@@ -1,0 +1,28 @@
+errors_message_handler.lua:11: deep
+stack traceback:
+	errors_message_handler.lua:11: in function 'inner'
+	errors_message_handler.lua:12: in function 'middle'
+	errors_message_handler.lua:13: in function <errors_message_handler.lua:13>
+	errors_message_handler.lua:13: in main chunk
+handled: errors_message_handler.lua:11: deep
+stack traceback:
+	errors_message_handler.lua:11: in function 'inner'
+	errors_message_handler.lua:12: in function <errors_message_handler.lua:12>
+	errors_message_handler.lua:14: in main chunk
+errors_message_handler.lua:16: in sort
+stack traceback:
+	errors_message_handler.lua:16: in function <errors_message_handler.lua:16>
+	errors_message_handler.lua:16: in function <errors_message_handler.lua:16>
+	errors_message_handler.lua:16: in main chunk
+false	error in error handling
+false	error in error handling
+false	error in error handling
+true	false	error in error handling
+true	fine
+false	1
+not a tail call
+stack traceback:
+	errors_message_handler.lua:24: in function <errors_message_handler.lua:24>
+	errors_message_handler.lua:11: in function 'inner'
+	errors_message_handler.lua:12: in function <errors_message_handler.lua:12>
+	errors_message_handler.lua:24: in main chunk

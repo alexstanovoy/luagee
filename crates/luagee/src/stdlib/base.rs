@@ -274,30 +274,25 @@ fn pairs(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     vm.results(&[next_value, Value::Table(table), Value::Nil])
 }
 
-/// Calls the function at `slot` protected: Ok(results) or Err(error value); limits pass through.
+/// Calls the function at `slot` protected, with a message handler (nil for none) run where an error happens:
+/// Ok(results) or Err(the handled error); limits pass through.
 pub(crate) fn protected_call(
     vm: &mut Vm,
     slot: usize,
     count: usize,
+    handler: Value,
 ) -> Result<Result<usize, Value>, LuaError> {
-    let depth = vm.frames.len();
-    let native_depth = vm.native_depth;
-    match vm.call_value(slot, count) {
-        Ok(n) => Ok(Ok(n)),
-        Err(LuaError::Runtime { value, .. }) => {
-            vm.frames.truncate(depth);
-            vm.native_depth = native_depth;
-            vm.stack.truncate(slot);
-            Ok(Err(value))
-        }
-        Err(limit) => Err(limit),
+    let called = vm.protect_with(handler, |vm| vm.call_value(slot, count))?;
+    if called.is_err() {
+        vm.stack.truncate(slot);
     }
+    Ok(called)
 }
 
 fn pcall(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     vm.check_any(args, 0)?;
     let slot = args.base;
-    match protected_call(vm, slot, args.count - 1)? {
+    match protected_call(vm, slot, args.count - 1, Value::Nil)? {
         Ok(n) => {
             vm.stack.insert(slot, Value::Boolean(true));
             Ok(n + 1)
@@ -313,36 +308,12 @@ fn xpcall(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     for i in 2..args.count {
         vm.push(vm.arg(args, i))?;
     }
-    match protected_call(vm, slot, args.count.saturating_sub(2))? {
+    match protected_call(vm, slot, args.count.saturating_sub(2), handler)? {
         Ok(n) => {
             vm.stack.insert(slot, Value::Boolean(true));
             Ok(n + 1)
         }
-        Err(value) => {
-            let handled = match protected_call_with(vm, handler, value)? {
-                Ok(result) => result,
-                Err(error) => error,
-            };
-            vm.results(&[Value::Boolean(false), handled])
-        }
-    }
-}
-
-fn protected_call_with(
-    vm: &mut Vm,
-    function: Value,
-    arg: Value,
-) -> Result<Result<Value, Value>, LuaError> {
-    let slot = vm.stack.len();
-    vm.push(function)?;
-    vm.push(arg)?;
-    match protected_call(vm, slot, 1)? {
-        Ok(n) => {
-            let result = if n > 0 { vm.stack[slot] } else { Value::Nil };
-            vm.stack.truncate(slot);
-            Ok(Ok(result))
-        }
-        Err(error) => Ok(Err(error)),
+        Err(handled) => vm.results(&[Value::Boolean(false), handled]),
     }
 }
 

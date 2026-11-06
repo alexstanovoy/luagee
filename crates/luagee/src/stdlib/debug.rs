@@ -22,10 +22,9 @@ fn traceback(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         text.push(b'\n');
     }
     text.extend_from_slice(b"stack traceback:");
-    for line in vm.traceback().lines() {
-        text.extend_from_slice(b"\n\t");
-        text.extend_from_slice(line.as_bytes());
-    }
+    let level = vm.opt_integer(args, 1, 1)?;
+    let frames = vm.traceback_text(usize::try_from(level).unwrap_or(0));
+    text.extend_from_slice(&frames);
     vm.push_string(&text)
 }
 

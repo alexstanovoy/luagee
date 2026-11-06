@@ -27,8 +27,6 @@ skip lua-5.1-tests/errors.lua:39-41 -- luajit: LuaJIT accepts empty statements (
 skip lua-5.1-tests/errors.lua:75-76 -- luajit: LuaJIT names the variable of `(aaa or aaa)` in its errors, which PUC Lua does not
 skip lua-5.1-tests/errors.lua:103-105 -- luajit: LuaJIT names a function it tail-called '?' in argument errors, as its frame is gone
 skip lua-5.1-tests/errors.lua:111-111 -- io: io.stdin
-skip lua-5.1-tests/errors.lua:142-167 -- fix: traceback
-skip lua-5.1-tests/errors.lua:171-172 -- fix: error in error handling
 skip lua-5.1-tests/errors.lua:196-196 -- luajit: LuaJIT reads bytes from 0x80 up as letters of names, so "\255a = 1" compiles
 skip lua-5.1-tests/errors.lua:229-238 -- known: luagee checks a function's limits once the whole chunk has parsed, so this chunk, which has no `end`s either, fails on those first
 skip lua-5.1-tests/events.lua:301-320 -- newproxy: newproxy (luagee has no newproxy: userdata come from the host)
@@ -65,7 +63,6 @@ omit luau-conformance/sort.luau -- luau: table.clone, table.freeze and += throug
 omit luau-conformance/tpack.luau -- luau: string.pack and string.unpack
 omit luau-conformance/types.luau -- luau-api: checks the globals against Luau's type information (RTTI) from the harness
 skip luau-conformance/assert.luau:23-23 -- luau: Luau's message for assert() is "missing argument #1"
-skip luau-conformance/calls.luau:247-255 -- fix: error in error handling (Luau)
 skip luau-conformance/calls.luau:257-263 -- luau: table.create
 omit luau-conformance/closure.luau:30-33 -- gc: waits for a weak table to lose its entry, which in luagee it never does (weak tables hold their entries)
 skip luau-conformance/constructs.luau:240-253 -- luau: continue

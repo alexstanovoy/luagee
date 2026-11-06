@@ -469,6 +469,64 @@ impl Vm {
         }
     }
 
+    /// `debug.traceback`'s lines for the Lua frames from `level` (1 is the innermost), as LuaJIT's `luaL_traceback`
+    /// writes them: `chunk:line: in function 'name'` (the name its caller's call gives it), `in main chunk`, or
+    /// `in function <chunk:line>`; when there are more than 22, the first 12, `...` and the last 10. A frame that
+    /// tail-called the running native is gone, as in LuaJIT.
+    pub(crate) fn traceback_text(&mut self, level: usize) -> Vec<u8> {
+        const FIRST: usize = 12;
+        const LAST: usize = 10;
+        let gone = usize::from(self.caller == Caller::Tail);
+        let shown: Vec<usize> = (0..self.frames.len())
+            .rev()
+            .skip(level.saturating_sub(1) + gone)
+            .collect();
+        let mut text = Vec::new();
+        for (i, &k) in shown.iter().enumerate() {
+            if shown.len() > FIRST + LAST && i >= FIRST && i < shown.len() - LAST {
+                if i == FIRST {
+                    text.extend_from_slice(b"\n\t...");
+                }
+                continue;
+            }
+            let frame = &self.frames[k];
+            let proto = frame.proto.clone();
+            let at = Self::position(&proto, frame.pc.saturating_sub(1));
+            text.extend_from_slice(format!("\n\t{at}: ").as_bytes());
+            match self.frame_name(k) {
+                Some(name) => {
+                    text.extend_from_slice(b"in function '");
+                    text.extend_from_slice(&name);
+                    text.push(b'\'');
+                }
+                None if proto.line == 0 => text.extend_from_slice(b"in main chunk"),
+                None => text.extend_from_slice(
+                    format!("in function <{}:{}>", proto.chunk, proto.line).as_bytes(),
+                ),
+            }
+        }
+        text
+    }
+
+    /// The name the call that runs frame `k` gives its function, when a Lua call does.
+    fn frame_name(&mut self, k: usize) -> Option<Vec<u8>> {
+        let frame = &self.frames[k];
+        if frame.boundary || frame.catch.is_some() {
+            return None;
+        }
+        let caller = &self.frames[k.checked_sub(1)?];
+        let call = caller.pc.checked_sub(1)?;
+        let Op::Call { func, .. } = caller.proto.code[call] else {
+            return None;
+        };
+        if caller.base + usize::from(func) != frame.slot {
+            return None;
+        }
+        let proto = caller.proto.clone();
+        self.register_origin(&proto, call, func)
+            .map(|(_, name)| name)
+    }
+
     pub(crate) fn traceback(&self) -> Traceback {
         Traceback(
             self.frames
@@ -920,12 +978,14 @@ impl Vm {
                     .and_then(|()| self.execute());
                 self.native_depth -= 1;
                 match result {
-                    Ok(Exec::Returned) => Ok(self.top - slot),
-                    Ok(Exec::Yielded) => unreachable!("a yield across a native call is refused"),
-                    Err(e) => {
-                        self.frames.truncate(depth);
-                        Err(e)
+                    Ok(Exec::Returned) => {
+                        debug_assert_eq!(self.frames.len(), depth, "a returned call left no frame");
+                        Ok(self.top - slot)
                     }
+                    Ok(Exec::Yielded) => unreachable!("a yield across a native call is refused"),
+                    // The failed call's frames stay for whoever catches the error: its handler sees them, then it
+                    // drops them (`protect_with`, `execute`, or the host's call).
+                    Err(e) => Err(e),
                 }
             }
         }
@@ -1091,6 +1151,9 @@ impl Vm {
     /// Runs Lua frames until the boundary frame that started this loop returns or the coroutine yields; an error stops
     /// at the innermost `pcall` this loop runs.
     pub(crate) fn execute(&mut self) -> Result<Exec, LuaError> {
+        // This loop runs the frames from its boundary up. A native's failed call leaves its frames above them (none
+        // of which catches), for the handler of the frame that catches to see; that frame drops them.
+        let boundary = self.frames.iter().rposition(|f| f.boundary).unwrap_or(0);
         loop {
             match self.run() {
                 Err(LuaError::Runtime {
@@ -1098,7 +1161,6 @@ impl Vm {
                     traceback,
                     located,
                 }) => {
-                    let boundary = self.frames.iter().rposition(|f| f.boundary).unwrap_or(0);
                     let Some(at) = self.frames[boundary..]
                         .iter()
                         .rposition(|f| f.catch.is_some())
@@ -1110,10 +1172,10 @@ impl Vm {
                         });
                     };
                     let frame = self.frames[boundary + at].clone();
-                    self.frames.truncate(boundary + at);
                     let catch = frame.catch.expect("a catching frame");
-                    self.stack.truncate(frame.slot);
                     let value = self.handle(catch.handler, value)?;
+                    self.frames.truncate(boundary + at);
+                    self.stack.truncate(frame.slot);
                     self.finish_protected(frame.slot - 1, value, catch.want)?;
                 }
                 other => return other,
@@ -1134,14 +1196,16 @@ impl Vm {
         located
     }
 
-    /// What a failed protected call returns besides `false`: the error, or what the `xpcall` handler made of it.
-    fn handle(&mut self, handler: Value, error: Value) -> Result<Value, LuaError> {
+    /// What a failed protected call returns besides `false`: the error, or what the `xpcall` handler made of it. The
+    /// handler runs where the error happened, the failed call's frames still there (so `debug.traceback` shows them),
+    /// as in LuaJIT; an error in the handler is "error in error handling".
+    pub(crate) fn handle(&mut self, handler: Value, error: Value) -> Result<Value, LuaError> {
         if handler == Value::Nil {
             return Ok(error);
         }
         match self.protect(|vm| vm.call_meta(handler, &[error])) {
             Ok(Ok(value)) => Ok(value),
-            Ok(Err(value)) => Ok(value),
+            Ok(Err(_)) => Ok(Value::String(self.heap.intern(b"error in error handling")?)),
             Err(limit) => Err(limit),
         }
     }
@@ -1151,16 +1215,27 @@ impl Vm {
         &mut self,
         f: impl FnOnce(&mut Vm) -> Result<T, LuaError>,
     ) -> Result<Result<T, Value>, LuaError> {
+        self.protect_with(Value::Nil, f)
+    }
+
+    /// [`protect`](Self::protect) with a message handler, which runs on the error before the failed call's frames
+    /// are dropped.
+    pub(crate) fn protect_with<T>(
+        &mut self,
+        handler: Value,
+        f: impl FnOnce(&mut Vm) -> Result<T, LuaError>,
+    ) -> Result<Result<T, Value>, LuaError> {
         let depth = self.frames.len();
         let native_depth = self.native_depth;
         let stack = self.stack.len();
         match f(self) {
             Ok(value) => Ok(Ok(value)),
             Err(LuaError::Runtime { value, .. }) => {
+                let value = self.handle(handler, value);
                 self.frames.truncate(depth);
                 self.native_depth = native_depth;
                 self.stack.truncate(stack);
-                Ok(Err(value))
+                value.map(Err)
             }
             Err(limit) => Err(limit),
         }
@@ -1219,15 +1294,14 @@ impl Vm {
             Value::Nil
         };
         let count = count + 1 - needed;
-        let (function, count) = match self.protect(|vm| vm.callable(slot + 1, count - 1)) {
-            Ok(Ok(called)) => called,
-            Ok(Err(error)) => {
-                let value = self.handle(handler, error)?;
-                self.finish_protected(slot, value, want)?;
-                return Ok(Protected::Done);
-            }
-            Err(limit) => return Err(limit),
-        };
+        let (function, count) =
+            match self.protect_with(handler, |vm| vm.callable(slot + 1, count - 1))? {
+                Ok(called) => called,
+                Err(value) => {
+                    self.finish_protected(slot, value, want)?;
+                    return Ok(Protected::Done);
+                }
+            };
         let inner_want = if want < 0 { -1 } else { (want - 1).max(0) };
         if matches!(self.heap.functions.get(function.0), Function::Lua { .. }) {
             self.push_frame(function, slot + 1, count, inner_want, false)?;
@@ -1235,7 +1309,9 @@ impl Vm {
                 Some(Catch { handler, want });
             return Ok(Protected::Frame);
         }
-        match self.protect(|vm| vm.call_native(function, slot + 1, count, Caller::Native))? {
+        match self.protect_with(handler, |vm| {
+            vm.call_native(function, slot + 1, count, Caller::Native)
+        })? {
             Ok(_) if self.yielding => {
                 self.yielding = false;
                 let thread = self.threads.get_mut(self.current.0);
@@ -1251,10 +1327,7 @@ impl Vm {
                 self.stack[slot] = Value::Boolean(true);
                 self.place_results(slot, produced + 1, slot, want)?;
             }
-            Err(error) => {
-                let value = self.handle(handler, error)?;
-                self.finish_protected(slot, value, want)?;
-            }
+            Err(value) => self.finish_protected(slot, value, want)?,
         }
         Ok(Protected::Done)
     }
