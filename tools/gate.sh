@@ -9,8 +9,9 @@
 # the borrowed suites, the sandbox's bounds), wasm (the crate builds for wasm32-unknown-unknown without features,
 # warning-free), fuzz-smoke (every fuzz target at once, GATE_FUZZ_SECONDS each, seeded from the corpora; the
 # differential target against the reference LuaJIT that tools/ref/build.sh builds from pinned sources), wasm-corpus
-# (the corpora and the fuzz corpora under wasmtime for wasm32-wasip1 on one thread, see tools/wasm.sh: it fetches
-# its pinned, checksummed wasmtime and the Rust target when missing), deny, then fmt (last: it changes no code).
+# (the corpora, the borrowed suites and the fuzz corpora under wasmtime for wasm32-wasip1 on one thread, see
+# tools/wasm.sh: it fetches its pinned, checksummed wasmtime and the Rust target when missing), deny, then fmt (last:
+# it changes no code).
 # A step that does not run fails the gate; nothing is skipped quietly.
 # Environment:
 #   GATE_STEP_LOG=FILE   append the seconds each step took to FILE (tab separated)

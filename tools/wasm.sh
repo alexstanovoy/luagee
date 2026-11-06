@@ -2,8 +2,9 @@
 # luagee under WebAssembly (wasm32-wasip1, run by a pinned wasmtime): the corpora, the binary size, the speed.
 #
 #   tools/wasm.sh corpus   build examples/corpus.rs for wasm32-wasip1 and run it under wasmtime on the conformance and
-#                          hostile corpora, on one thread and less stack than wasm's defaults, then on every
-#                          fuzz/corpus/* folder (each input run as a script): what the merge gate runs
+#                          hostile corpora, the borrowed suites (tests/suites.rs) and every fuzz/corpus/* folder (each
+#                          input run as a script), on one thread and less stack than wasm's defaults: what the merge
+#                          gate runs
 #   tools/wasm.sh size     the size of a minimal host embedding luagee (release, then wasm-opt -Oz)
 #   tools/wasm.sh bench    tools/bench kernels, native against wasmtime, interleaved, median of 5
 #
@@ -66,10 +67,15 @@ corpus)
     cargo rustc --profile test-release -p luagee --example corpus --target "$target" -- \
         -C link-arg=-zstack-size=$((512 << 10))
     runner=target/$target/test-release/examples/corpus.wasm
-    # The folders are the guest's only files. timeout is a hang guard; fuel ends every script long before it.
-    run() { "$runtime" run -W max-wasm-stack=$((384 << 10)) -W timeout=600s --dir "$here::/repo" "$runner" "$@"; }
+    # The folders are the guest's only files; the suites get a top-level one of their own, as the folder loader
+    # resolves a folder only below one. timeout is a hang guard; fuel ends every script long before it.
+    run() {
+        "$runtime" run -W max-wasm-stack=$((384 << 10)) -W timeout=1200s --dir "$here::/repo" \
+            --dir "$here/crates/luagee/tests/suites::/suites" "$runner" "$@"
+    }
     run conformance /repo/crates/luagee/tests/conformance
     run hostile /repo/crates/luagee/tests/hostile
+    run suites
     fuzzed=0
     for corpus in fuzz/corpus/*/; do
         if [ -d "$corpus" ]; then

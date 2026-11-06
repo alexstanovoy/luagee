@@ -40,7 +40,12 @@ const LIMITS: Limits = Limits {
     ..Limits::DEFAULT
 };
 
+/// The suites' folder: next to this file, or `/suites` under wasm, where `tools/wasm.sh` gives it to the guest (the
+/// folder loader resolves a folder only below a top-level guest folder there).
 fn suites() -> PathBuf {
+    if cfg!(target_os = "wasi") {
+        return PathBuf::from("/suites");
+    }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/suites")
 }
 
@@ -227,29 +232,36 @@ struct Ran {
 }
 
 /// Runs a job on a fresh interpreter of its own thread, with `require` reading below the suite's folder. What the
-/// suites print goes nowhere: they pass or fail by their errors.
+/// suites print goes nowhere: they pass or fail by their errors. Under wasm, which has one thread, on the calling
+/// thread (`tools/wasm.sh` gives the run a hang guard of its own).
 fn isolated<F>(suite: &str, name: &str, job: F) -> Ran
 where
     F: FnOnce(&mut Lua) -> Vec<Result<(), Error>> + Send + 'static,
 {
     let folder = suites().join(suite);
+    let interpret = move || {
+        let keys = Keys {
+            hash: [5, 5],
+            random: 5,
+        };
+        let began = Instant::now();
+        let mut lua = Lua::new(LIMITS, keys).expect("an interpreter");
+        let loader = FolderLoader::new(&folder, LIMITS.module_size as u64);
+        lua.set_loader(loader.expect("the suite's folder"));
+        let ended = job(&mut lua);
+        let elapsed = began.elapsed();
+        Ran { ended, elapsed }
+    };
+    if cfg!(target_os = "wasi") {
+        return interpret();
+    }
     let (done, outcome) = mpsc::channel();
     std::thread::Builder::new()
         .name(name.to_owned())
         .stack_size(STACK)
         .spawn(move || {
-            let keys = Keys {
-                hash: [5, 5],
-                random: 5,
-            };
-            let began = Instant::now();
-            let mut lua = Lua::new(LIMITS, keys).expect("an interpreter");
-            let loader = FolderLoader::new(&folder, LIMITS.module_size as u64);
-            lua.set_loader(loader.expect("the suite's folder"));
-            let ended = job(&mut lua);
-            let elapsed = began.elapsed();
-            done.send(Ran { ended, elapsed })
-                .expect("the test waits for the result");
+            done.send(interpret())
+                .expect("the test waits for the result")
         })
         .expect("a suite thread");
     outcome
@@ -257,8 +269,11 @@ where
         .unwrap_or_else(|_| panic!("{suite}/{name} did not end within the hang guard"))
 }
 
-/// Applies `run` to every job, a few at once.
+/// Applies `run` to every job, a few at once (one after another under wasm).
 fn parallel<J: Sync, T: Send>(jobs: &[J], run: impl Fn(&J) -> T + Sync) -> Vec<T> {
+    if cfg!(target_os = "wasi") {
+        return jobs.iter().map(run).collect();
+    }
     let next = AtomicUsize::new(0);
     let results = Mutex::new((0..jobs.len()).map(|_| None).collect::<Vec<Option<T>>>());
     std::thread::scope(|scope| {
@@ -508,6 +523,11 @@ fn luau_driver(_: &str) -> &'static str {
 
 #[test]
 fn the_puc_rio_lua_5_1_tests_pass() {
+    puc_rio();
+}
+
+/// The PUC-Rio Lua 5.1 tests (also what `examples/corpus.rs suites` runs under wasm).
+pub fn puc_rio() {
     FileSuite {
         name: "lua-5.1-tests",
         extension: ".lua",
@@ -521,6 +541,11 @@ fn the_puc_rio_lua_5_1_tests_pass() {
 
 #[test]
 fn the_luau_conformance_scripts_in_lua_5_1_pass() {
+    luau();
+}
+
+/// The Luau conformance scripts that are Lua 5.1.
+pub fn luau() {
     FileSuite {
         name: "luau-conformance",
         extension: ".luau",
@@ -812,6 +837,11 @@ fn run_luajit_file(file: &LuajitFile) -> Ran {
 
 #[test]
 fn the_luajit_test_cleanup_cases_pass() {
+    luajit();
+}
+
+/// LuaJIT's test-cleanup cases.
+pub fn luajit() {
     let skips = Skips::of(LUAJIT);
     let mut tally = Tally::default();
     let mut files = Vec::new();
