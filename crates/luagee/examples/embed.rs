@@ -3,12 +3,19 @@
 
 use luagee::{Keys, Limits, Lua, Value};
 
-const SCRIPT: &[u8] = b"local t = {} for i = 1, 10 do t[i] = string.rep('x', i) end return #table.concat(t)";
+const SCRIPT: &[u8] =
+    b"local t = {} for i = 1, 10 do t[i] = string.rep('x', i) end return #table.concat(t)";
 
 /// The script's result, or -1 when it fails.
 #[unsafe(no_mangle)]
 pub extern "C" fn run(hash: u64) -> f64 {
-    let Ok(mut lua) = Lua::new(Limits::DEFAULT, Keys { hash: [hash, hash], random: hash }) else {
+    let Ok(mut lua) = Lua::new(
+        Limits::DEFAULT,
+        Keys {
+            hash: [hash, hash],
+            random: hash,
+        },
+    ) else {
         return -1.0;
     };
     match lua.exec("embed", SCRIPT).as_deref() {

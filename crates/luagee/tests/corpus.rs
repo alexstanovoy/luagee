@@ -22,7 +22,9 @@ const STACK: usize = 16 << 20;
 const DEADLINE: Duration = Duration::from_secs(120);
 
 fn folder(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(name)
 }
 
 /// Runs every script of a corpus, each on a thread of its own with this native stack, and fails naming each one that
@@ -71,7 +73,12 @@ fn conformance_scripts_print_the_same_when_a_whole_collection_runs_at_every_inst
 /// way, a few steps at every instruction, no output changes.
 #[test]
 fn conformance_scripts_print_the_same_when_a_collection_is_always_under_way() {
-    corpus(Kind::Conformance, "conformance", STACK, GcStress::Incremental);
+    corpus(
+        Kind::Conformance,
+        "conformance",
+        STACK,
+        GcStress::Incremental,
+    );
 }
 
 #[test]

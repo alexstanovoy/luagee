@@ -71,7 +71,12 @@ impl Kind {
     }
 
     /// Runs a script of this kind on the calling thread and checks how it ended: Err tells what went otherwise.
-    pub fn check(self, script: &Path, stress: GcStress, loader: impl Loader + 'static) -> Result<(), String> {
+    pub fn check(
+        self,
+        script: &Path,
+        stress: GcStress,
+        loader: impl Loader + 'static,
+    ) -> Result<(), String> {
         let source = std::fs::read(script).map_err(|e| format!("{}: {e}", script.display()))?;
         let fail = |what: String| Err(format!("{}: {what}", script.display()));
         let mut lua = interpreter(self.limits(), stress, loader);
@@ -90,9 +95,10 @@ impl Kind {
                     .map_err(|e| format!("{}: the recorded output: {e}", script.display()))?;
                 match ended {
                     Err(error) => fail(format!("{error}")),
-                    Ok(()) if *printed != expected => {
-                        fail(format!("output differs from line {}", first_difference(&printed, &expected)))
-                    }
+                    Ok(()) if *printed != expected => fail(format!(
+                        "output differs from line {}",
+                        first_difference(&printed, &expected)
+                    )),
                     Ok(()) => Ok(()),
                 }
             }
@@ -101,9 +107,10 @@ impl Kind {
                 let printed = printed.strip_suffix('\n').unwrap_or(&printed);
                 let fine = match (expectation(script, &source)?, &ended) {
                     (Expectation::Limit(limit), Err(Error::Limit(got))) => limit == *got,
-                    (Expectation::Error(text), Err(Error::Runtime { message, .. } | Error::Syntax { message, .. })) => {
-                        message.contains(&text)
-                    }
+                    (
+                        Expectation::Error(text),
+                        Err(Error::Runtime { message, .. } | Error::Syntax { message, .. }),
+                    ) => message.contains(&text),
                     (Expectation::Ok(text), Ok(())) => printed == text,
                     _ => false,
                 };
@@ -114,7 +121,10 @@ impl Kind {
                     Ok(()) => format!("ok {printed:?}"),
                     Err(error) => format!("{error}"),
                 };
-                fail(format!("ended with {}", outcome.lines().next().unwrap_or_default()))
+                fail(format!(
+                    "ended with {}",
+                    outcome.lines().next().unwrap_or_default()
+                ))
             }
             Kind::Fuzz => unreachable!("handled above"),
         }
@@ -142,10 +152,19 @@ struct Interpreter {
 
 fn interpreter(limits: Limits, stress: GcStress, loader: impl Loader + 'static) -> Interpreter {
     let printed = Rc::new(RefCell::new(Vec::new()));
-    let mut lua = Lua::new(limits, luagee::Keys { hash: [7, 7], random: 7 }).expect("an interpreter");
+    let mut lua = Lua::new(
+        limits,
+        luagee::Keys {
+            hash: [7, 7],
+            random: 7,
+        },
+    )
+    .expect("an interpreter");
     let sink = printed.clone();
     lua.set_gc_stress(stress);
-    lua.set_print(Box::new(move |line| sink.borrow_mut().extend_from_slice(line)));
+    lua.set_print(Box::new(move |line| {
+        sink.borrow_mut().extend_from_slice(line)
+    }));
     lua.set_loader(loader);
     Interpreter { lua, printed }
 }
@@ -157,19 +176,28 @@ fn interpreter(limits: Limits, stress: GcStress, loader: impl Loader + 'static) 
 pub fn survives(lua: &mut Lua, input: &[u8]) -> Result<(), String> {
     // Loaded first: the input may use up the source limits, which last the interpreter's life.
     let after = lua
-        .load("after", b"local t = {} for i = 1, 10 do t[i] = i end return #t")
+        .load(
+            "after",
+            b"local t = {} for i = 1, 10 do t[i] = i end return #t",
+        )
         .map_err(|e| format!("the probe does not compile: {e}"))?;
     lua.pin(after);
     let _ = lua.exec("fuzz", input);
     let ceiling = FUZZ_LIMITS.memory + FUZZ_LIMITS.memory / 4;
     if lua.memory() > ceiling {
-        return Err(format!("counted {} bytes, past the ceiling {ceiling}", lua.memory()));
+        return Err(format!(
+            "counted {} bytes, past the ceiling {ceiling}",
+            lua.memory()
+        ));
     }
     let mut ran = Err(Error::Limit(Limit::FuelPerCall));
     for _ in 0..10 {
         lua.begin_tick();
         ran = lua.call(after, &[]);
-        if !matches!(ran, Err(Error::Limit(Limit::FuelPerCall | Limit::FuelPerTick))) {
+        if !matches!(
+            ran,
+            Err(Error::Limit(Limit::FuelPerCall | Limit::FuelPerTick))
+        ) {
             break;
         }
     }
@@ -179,7 +207,9 @@ pub fn survives(lua: &mut Lua, input: &[u8]) -> Result<(), String> {
         other => return Err(format!("the interpreter broke: {other:?}")),
     }
     match lua.collect() {
-        Ok(()) if lua.memory() > FUZZ_LIMITS.memory => Err(format!("a collection left {} bytes", lua.memory())),
+        Ok(()) if lua.memory() > FUZZ_LIMITS.memory => {
+            Err(format!("a collection left {} bytes", lua.memory()))
+        }
         Ok(()) | Err(Error::Limit(Limit::Memory)) => Ok(()),
         Err(error) => Err(format!("a collection failed: {error:?}")),
     }
@@ -222,7 +252,9 @@ fn expectation(script: &Path, source: &[u8]) -> Result<Expectation, String> {
         return Ok(Expectation::Error(text.to_owned()));
     }
     match rule.strip_prefix("ok") {
-        Some(text) => Ok(Expectation::Ok(text.strip_prefix(' ').unwrap_or(text).to_owned())),
+        Some(text) => Ok(Expectation::Ok(
+            text.strip_prefix(' ').unwrap_or(text).to_owned(),
+        )),
         None => unknown(&format!("unknown expectation {rule}")),
     }
 }

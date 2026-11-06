@@ -47,13 +47,22 @@ fn main() -> ExitCode {
         let folder = Path::new(folder);
         let scripts = kind.scripts(folder);
         for script in &scripts {
-            let loader = FolderLoader::new(folder, kind.limits().module_size as u64).expect("the corpus folder");
+            let loader = FolderLoader::new(folder, kind.limits().module_size as u64)
+                .expect("the corpus folder");
             if let Err(what) = kind.check(script, GcStress::Off, loader) {
                 eprintln!("FAIL {what}");
                 failed += 1;
             }
         }
-        println!("corpus: {} {kind:?} scripts in {}, {failed} failed so far", scripts.len(), folder.display());
+        println!(
+            "corpus: {} {kind:?} scripts in {}, {failed} failed so far",
+            scripts.len(),
+            folder.display()
+        );
     }
-    if failed == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
