@@ -35,6 +35,7 @@ fn callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
     methods.extend(object_callbacks());
     methods.extend(cache_callbacks());
     methods.extend(unrooted_callbacks());
+    methods.extend(argument_scope_callbacks());
     methods
 }
 
@@ -231,6 +232,26 @@ fn unrooted_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
         }),
         ("error_unrooted", Rc::new(move |_, _| {
             Err(luagee::LuaError::runtime(saved.get(), luagee::Traceback::default(), false))
+        })),
+    ]
+}
+
+fn argument_scope_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
+    let saved = Rc::new(std::cell::Cell::new(None));
+    vec![
+        ("save_args", {
+            let saved = saved.clone();
+            Rc::new(move |_, args| { saved.set(Some(args)); Ok(0) })
+        }),
+        ("read_args", Rc::new(move |vm, _| {
+            let args = saved.get().ok_or_else(|| vm.error("no saved callback arguments"))?;
+            let value = vm.check_any(args, 0)?;
+            vm.results(&[value])
+        })),
+        ("retain_results", Rc::new(|vm, args| {
+            let values = vm.call(vm.arg(args, 0), &[])?;
+            vm.call(vm.arg(args, 1), &[])?;
+            vm.results(&values)
         })),
     ]
 }

@@ -127,7 +127,9 @@ impl Vm {
     /// The name a native error message gives the running function.
     /// "bad argument #i to 'name' (message)", the function named as its caller named it. Called as a method, the
     /// object is argument 0: a bad one is "calling 'name' on bad self".
-    pub fn arg_error(&mut self, _args: Args, i: usize, message: &str) -> LuaError {
+    #[must_use = "return or propagate the argument error"]
+    pub fn arg_error(&mut self, args: Args, i: usize, message: &str) -> LuaError {
+        if !self.args_are_live(args) { return self.error("expired callback arguments"); }
         let (kind, name) = match self.callee() {
             Some((kind, name)) => (kind, crate::shown(&name)),
             None => ("", "?".to_owned()),
@@ -145,8 +147,8 @@ impl Vm {
     }
 
     fn type_name_of_arg(&self, args: Args, i: usize) -> &'static str {
-        if i < args.count {
-            self.stack[args.base + i].type_name()
+        if self.args_are_live(args) && i < args.count {
+            self.arg(args, i).type_name()
         } else {
             "no value"
         }
@@ -159,14 +161,16 @@ impl Vm {
 
     /// A required argument, including an explicit nil; missing arguments raise a positioned Lua error.
     pub fn check_any(&mut self, args: Args, i: usize) -> Result<Value, LuaError> {
+        self.check_args(args)?;
         if i >= args.count {
             return Err(self.arg_error(args, i, "value expected"));
         }
-        Ok(self.stack[args.base + i])
+        Ok(self.arg(args, i))
     }
 
     /// A required number, accepting numeric strings as Lua does; NaN and infinity are numbers too.
     pub fn check_number(&mut self, args: Args, i: usize) -> Result<f64, LuaError> {
+        self.check_args(args)?;
         match self.coerce_number(self.arg(args, i)) {
             Some(n) => Ok(n),
             None => Err(self.arg_type_error(args, i, "number")),
@@ -180,6 +184,7 @@ impl Vm {
 
     /// An integer argument, or the default for missing/nil; indexes are zero-based.
     pub fn opt_integer(&mut self, args: Args, i: usize, default: i64) -> Result<i64, LuaError> {
+        self.check_args(args)?;
         match self.arg(args, i) {
             Value::Nil => Ok(default),
             _ => self.check_integer(args, i),
@@ -188,6 +193,7 @@ impl Vm {
 
     /// A string argument; a number becomes its string, as Lua's libraries convert it.
     pub fn check_string(&mut self, args: Args, i: usize) -> Result<StrId, LuaError> {
+        self.check_args(args)?;
         match self.arg(args, i) {
             Value::String(s) => Ok(s),
             Value::Number(n) => {
@@ -201,6 +207,7 @@ impl Vm {
 
     /// A string argument (coercing numbers), or None for missing/nil.
     pub fn opt_string(&mut self, args: Args, i: usize) -> Result<Option<StrId>, LuaError> {
+        self.check_args(args)?;
         match self.arg(args, i) {
             Value::Nil => Ok(None),
             _ => self.check_string(args, i).map(Some),
@@ -209,6 +216,7 @@ impl Vm {
 
     /// A required table argument; a value of any other type raises a positioned Lua error.
     pub fn check_table(&mut self, args: Args, i: usize) -> Result<TableId, LuaError> {
+        self.check_args(args)?;
         match self.arg(args, i) {
             Value::Table(t) => Ok(t),
             _ => Err(self.arg_type_error(args, i, "table")),

@@ -130,9 +130,11 @@ impl Vm {
 
     /// Calls Lua from a callback under its current fuel, tick and native recursion bounds; no budget is refilled.
     /// Failed calls restore the caller's stack and frames, so a callback may handle a runtime error and continue.
-    /// Propagate `LuaError::Limit` unchanged. Returned handles and runtime error values need pinning before reentry.
-    /// Do not retain `Args` beyond its callback, or pass handles from another interpreter or an unpinned old call.
+    /// Only callable inside a host callback; top-level callers use `Lua::call` for tick accounting.
+    /// Propagate `LuaError::Limit` unchanged. Results and runtime error values stay rooted until this callback ends.
+    /// Pin any value retained beyond the callback. Expired `Args` cannot read another callback's frame.
     pub fn call(&mut self, function: Value, args: &[Value]) -> Result<Vec<Value>, LuaError> {
+        if self.host_depth == 0 { return Err(self.error("Vm::call requires an active host callback; use Lua::call at top level")); }
         let slot = self.stack.len();
         let depth = self.frames.len();
         let top = self.top;
@@ -150,9 +152,22 @@ impl Vm {
         })();
         let result = result.map_err(|error| self.locate(error, None));
         self.frames.truncate(depth);
-        self.stack.truncate(slot);
         self.top = top;
+        if result.is_err() { self.stack.truncate(slot); }
+        if let Err(LuaError::Runtime(thrown)) = &result {
+            self.push(thrown.value)?;
+        }
+        // Successful results stay on the stack as temporary roots until call_native returns.
         result
+    }
+
+    pub(crate) fn args_are_live(&self, args: Args) -> bool {
+        args.serial != 0 && args.serial == self.active_serial
+            && args.base.checked_add(args.count).is_some_and(|end| end <= self.stack.len())
+    }
+
+    pub(crate) fn check_args(&mut self, args: Args) -> Result<(), LuaError> {
+        if self.args_are_live(args) { Ok(()) } else { Err(self.error("expired callback arguments")) }
     }
 
     /// Rejects collected or reused handles before they enter a script's stack or heap.

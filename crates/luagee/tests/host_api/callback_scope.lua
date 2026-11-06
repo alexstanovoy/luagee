@@ -1,0 +1,5 @@
+host.save_args(17)
+local ok, message = pcall(host.read_args, 29)
+assert(not ok and message:find('expired callback arguments', 1, true))
+local kept = host.retain_results(function() return {value=71} end, function() collectgarbage() end)
+assert(kept.value == 71)

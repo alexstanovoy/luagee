@@ -142,8 +142,10 @@ or copies, and propagate `LuaError::Limit` unchanged. The interpreter checks hos
 result counts instead of allowing them to read caller stack slots. Callback
 arguments are valid only during that callback. Every heap handle must belong to
 the interpreter using it and remain live: pin values before reentry if Lua cannot
-reach them, including callback captures, nested call results and runtime error
-objects. Release those roots on error paths too. Allocation alone does not collect;
+reach them, including callback captures and fresh allocations. Nested call results
+and runtime error objects are automatically rooted until that callback returns;
+pin them to retain them longer. Release explicit roots on error paths too.
+Allocation alone does not collect;
 calling Lua can. Do not cache unpinned handles across calls or interpreters.
 
 `Vm::userdata(data, metatable, retained_bytes)` accounts for the payload's inline
@@ -177,3 +179,13 @@ makes an old handle refer to the replacement. Host reads of expired strings or
 userdata return `None`; writes, roots, calls and result/error ingress return a Lua
 error before a stale handle can enter the interpreter. Handles remain specific to
 the interpreter that created them; do not exchange them between interpreters.
+
+### Callback scope (unreleased fix)
+
+`Vm::call` is only available during a host callback. At top level use `Lua::call`,
+which accounts execution against `fuel_per_tick`; calling through `Lua::vm()`
+cannot bypass that accounting. `Args` carry an invocation serial: expired contexts
+produce nil from `arg` and a Lua error from checked readers instead of inspecting
+another callback's frame. Nested call results and runtime error values remain
+rooted on the charged callback stack until its return; pin anything retained past
+that point. `LuaError` and argument-error constructors must be used or propagated.

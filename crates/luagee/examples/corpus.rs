@@ -10,6 +10,8 @@
 mod corpus;
 #[path = "../tests/host_api.rs"]
 mod host_api;
+#[path = "../tests/host_api_safety.rs"]
+mod host_api_safety;
 #[path = "../tests/suites.rs"]
 mod suites;
 
@@ -30,6 +32,7 @@ fn main() -> ExitCode {
     }
     if std::env::args().nth(1).as_deref() == Some("host-api") {
         host_api::contracts();
+        host_api_safety::contracts();
         return ExitCode::SUCCESS;
     }
     let kind: Kind = match args.next().map(|k| k.parse()) {

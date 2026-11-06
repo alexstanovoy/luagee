@@ -31,6 +31,7 @@ const _: () = assert!(crate::heap::slot_size::<ThreadState>() <= THREAD_BYTES);
 
 /// Why a call ended early, inside the interpreter: what host functions return to raise an error.
 #[derive(Clone, Debug)]
+#[must_use]
 pub enum LuaError {
     /// A Lua error, catchable by `pcall`. Boxed: every `Result` the interpreter returns carries an error's size, and
     /// the dispatch loop, which native calls back into Lua nest, holds dozens of them; a small error keeps that
@@ -84,6 +85,7 @@ impl Traceback {
 /// A native function's arguments: `count` values on the stack from `base`.
 #[derive(Clone, Copy, Debug)]
 pub struct Args {
+    pub(crate) serial: u64,
     pub(crate) base: usize,
     pub(crate) count: usize,
 }
@@ -285,6 +287,9 @@ pub struct Vm {
     pub(crate) fuel_limit: Limit,
     pub(crate) tick_fuel: u64,
     pub(crate) native_depth: u32,
+    pub(crate) host_depth: u32,
+    pub(crate) active_serial: u64,
+    next_serial: u64,
     /// How the running native was called.
     pub(crate) call_site: CallSite,
     pub(crate) yielding: bool,
@@ -393,6 +398,9 @@ impl Vm {
             fuel_limit: Limit::FuelPerCall,
             tick_fuel: limits.fuel_per_tick,
             native_depth: 0,
+            host_depth: 0,
+            active_serial: 0,
+            next_serial: 0,
             call_site: CallSite::None,
             yielding: false,
             gc_threshold: MIN_THRESHOLD,
@@ -652,7 +660,7 @@ impl Vm {
     /// A zero-based argument, or nil when absent. `args` is valid only during the callback that received it.
     #[inline]
     pub fn arg(&self, args: Args, i: usize) -> Value {
-        if i < args.count {
+        if self.args_are_live(args) && i < args.count {
             self.stack
                 .get(args.base.saturating_add(i))
                 .copied()
@@ -1193,10 +1201,17 @@ impl Vm {
             unreachable!("a native")
         };
         let native = native.clone();
+        let serial = self.next_serial.checked_add(1)
+            .ok_or_else(|| self.error("callback invocation limit exceeded"))?;
+        self.next_serial = serial;
         self.enter_native()?;
+        let previous_serial = std::mem::replace(&mut self.active_serial, serial);
+        let previous_host_depth = self.host_depth;
+        if matches!(native, NativeFn::Host(_)) { self.host_depth += 1; }
         let caller = std::mem::replace(&mut self.call_site, site);
         self.stack.truncate(slot + 1 + count);
         let args = Args {
+            serial,
             base: slot + 1,
             count,
         };
@@ -1213,6 +1228,8 @@ impl Vm {
         };
         self.native_depth -= 1;
         self.call_site = caller;
+        self.active_serial = previous_serial;
+        self.host_depth = previous_host_depth;
         let results = result?;
         if matches!(native, NativeFn::Host(_))
             && results > self.stack.len().saturating_sub(result_start)
