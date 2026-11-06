@@ -17,7 +17,7 @@ impl Args {
 }
 
 impl Vm {
-    /// The bytes of a string value. Values must belong to this interpreter and still be live.
+    /// The bytes of a string value, or None for a collected handle. Values belong to this interpreter.
     #[must_use]
     pub fn bytes(&self, value: Value) -> Option<&[u8]> {
         match value {
@@ -32,7 +32,7 @@ impl Vm {
         self.heap.new_table(0, 0)
     }
 
-    /// A table lookup without metamethods. Both handles must belong to this interpreter and be live.
+    /// A table lookup without metamethods. Collected handles raise Lua errors; handles belong to this interpreter.
     pub fn raw_get(&mut self, table: TableId, key: Value) -> Result<Value, LuaError> {
         self.charge_fuel(1)?;
         self.validate(Value::Table(table))?;
@@ -90,11 +90,22 @@ impl Vm {
     }
 
     /// Reads an opaque object by its Rust type, independent of any script-visible metatable.
-    /// A table with a copied metatable cannot impersonate an object. Handles must be live in this interpreter.
+    /// A table with a copied metatable cannot impersonate an object. Collected handles return None.
     #[must_use]
     pub fn userdata_ref<T: 'static>(&self, value: Value) -> Option<&T> {
         match value {
             Value::Userdata(id) => self.heap.userdata.try_get(id.0)?.data.downcast_ref(),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrows typed host data; wrong types and collected handles return None.
+    /// The borrow prevents reentry through this VM until it ends. Mutation must stay within the payload's
+    /// declared retained allocation; handles stored in the payload still need independent roots.
+    #[must_use]
+    pub fn userdata_mut<T: 'static>(&mut self, value: Value) -> Option<&mut T> {
+        match value {
+            Value::Userdata(id) => self.heap.userdata.try_get_mut(id.0)?.data.downcast_mut(),
             _ => None,
         }
     }

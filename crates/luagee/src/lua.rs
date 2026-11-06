@@ -244,6 +244,13 @@ impl Lua {
         self.vm.userdata_ref(value)
     }
 
+    /// Mutably borrows typed host data; wrong types and collected handles return None.
+    /// Mutation must stay within the object's declared retained allocation, as for [`Vm::userdata_mut`].
+    #[must_use]
+    pub fn userdata_mut<T: 'static>(&mut self, value: Value) -> Option<&mut T> {
+        self.vm.userdata_mut(value)
+    }
+
     /// The bytes the interpreter holds, as it counts them.
     #[must_use]
     pub fn memory(&self) -> usize {

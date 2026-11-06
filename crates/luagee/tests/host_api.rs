@@ -33,6 +33,7 @@ pub fn contracts() {
     deepest_host_reentry_keeps_stack_margin();
     stale_handles_are_rejected_after_collection_and_slot_reuse();
     script_owned_tables_support_raw_operations_with_script_keys();
+    typed_callback_payloads_and_invalid_result_counts_are_checked();
 }
 
 #[cfg_attr(test, test)]
@@ -355,5 +356,14 @@ fn script_owned_tables_support_raw_operations_with_script_keys() {
         let mut lua = interpreter(Limits { fuel_per_call: 5_000_000, fuel_per_tick: 5_000_000, ..Limits::DEFAULT });
         lua.set_gc_stress(stress);
         lua.exec("raw_tables", include_bytes!("host_api/raw_tables.lua")).expect("raw API accepts script-owned tables and validates keys");
+    }
+}
+
+#[cfg_attr(test, test)]
+fn typed_callback_payloads_and_invalid_result_counts_are_checked() {
+    for stress in [GcStress::Full, GcStress::Incremental] {
+        let mut lua = interpreter(Limits::DEFAULT);
+        lua.set_gc_stress(stress);
+        lua.exec("typed_objects", include_bytes!("host_api/typed_objects.lua")).expect("payload types and result counts checked");
     }
 }

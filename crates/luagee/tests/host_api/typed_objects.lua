@@ -1,0 +1,12 @@
+local counter = host.counter(17)
+local scalar = host.object(9)
+assert(host.increment(counter) == 18)
+assert(host.counter_value(counter) == 18)
+assert(not pcall(host.object_value, counter))
+assert(not pcall(host.counter_value, scalar))
+assert(not pcall(host.increment, scalar))
+local fake = host.set_metatable({}, {__index={}})
+assert(not pcall(host.counter_value, fake))
+assert(host.object_value(scalar) == 9)
+local private = 'caller local'
+assert(not pcall(host.bad_count, private))

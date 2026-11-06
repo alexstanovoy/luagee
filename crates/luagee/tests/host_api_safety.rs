@@ -20,6 +20,7 @@ pub fn contracts() {
     host_table_writes_have_linear_cost_for_a_growing_list();
     saved_argument_contexts_cannot_read_a_later_callback();
     nested_results_remain_live_across_reentry_without_explicit_pins();
+    typed_userdata_mutation_rejects_other_types_and_stale_handles();
 }
 
 #[cfg_attr(test, test)]
@@ -102,4 +103,22 @@ fn host_table_writes_have_linear_cost_for_a_growing_list() {
         vm.results(&[Value::Table(table)])
     }));
     lua.exec("list", b"local t = fill() assert(#t == 1000 and t[1000] == 1000 and t[1] == 1000)").expect("linear writes fit the call budget");
+}
+
+#[cfg_attr(test, test)]
+fn typed_userdata_mutation_rejects_other_types_and_stale_handles() {
+    let mut lua = interpreter();
+    let object = lua.vm().userdata(17u64, None, 0).expect("object");
+    lua.pin(object).expect("root");
+    *lua.vm().userdata_mut::<u64>(object).expect("typed mutation") = 29;
+    assert_eq!(lua.userdata_ref::<u64>(object), Some(&29));
+    assert!(lua.vm().userdata_mut::<f64>(object).is_none());
+    *lua.userdata_mut::<u64>(object).expect("top-level mutation") = 41;
+    assert_eq!(lua.vm().userdata_ref::<u64>(object), Some(&41));
+    lua.unpin(object).expect("release");
+    lua.collect().expect("collection");
+    lua.begin_tick();
+    let replacement = lua.vm().userdata(71u64, None, 0).expect("replacement");
+    assert!(lua.vm().userdata_mut::<u64>(object).is_none());
+    assert_eq!(lua.vm().userdata_ref::<u64>(replacement), Some(&71));
 }

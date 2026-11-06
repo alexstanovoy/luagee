@@ -117,10 +117,7 @@ coverage-guided fuzz targets on stable Rust; `tools/bench/bench.py` times luagee
 binaryen's `wasm-opt`) are pinned by version and sha256 and downloaded into `temp/`; the Rust targets come from
 rustup.
 
-## License
-
-MIT, see [LICENSE](LICENSE).
-# Embedding API changes (unreleased, 0.1)
+## Embedding API changes (unreleased, 0.1)
 
 Added public callback argument access (`Args::len/is_empty`, zero-based `Vm::arg`,
 `check_*`, `opt_integer`, `opt_string`, `arg_error`), `results`, `new_string` and
@@ -169,7 +166,7 @@ let echo = lua.function("echo", Rc::new(|vm, args| {
 }))?;
 lua.set_global("echo", echo)?;
 assert_eq!(lua.exec("example", b"return echo(7)")?, vec![Value::Number(7.0)]);
-# Ok::<(), luagee::Error>(())
+Ok::<(), luagee::Error>(())
 ```
 
 ### Handle liveness (unreleased fix)
@@ -196,3 +193,22 @@ Raw table writes charge one lookup plus storage growth, rather than the whole
 existing table on every write. Building a sequential list has linear fuel cost;
 replacing an existing element has constant cost. The interpreter still enforces
 memory accounting and collector barriers on every write.
+
+### Typed mutation and host stack use (unreleased fix)
+
+`Lua::userdata_mut` and `Vm::userdata_mut` provide a generation-checked typed
+mutable borrow, so a host can update payloads without a `RefCell`. The Rust borrow
+must end before reentry, and mutations must not grow owned allocations beyond the
+declared retained-byte charge or store unrooted Lua handles.
+
+The 200-level native limit includes host callbacks and calls through `Vm::call`;
+a callback forwarding into Lua uses two of those levels. Host Rust frames also
+consume native/wasm stack. Keep callbacks small and bound their own Rust recursion;
+the interpreter cannot bound arbitrary Rust code. The regression runner checks
+combined callback reentry and deep parsing on 1 MiB native stacks and wasmtime's
+reduced engine/module stacks. Embedders with larger callback frames need to verify
+their own stack margin.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

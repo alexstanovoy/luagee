@@ -37,6 +37,7 @@ fn callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
     methods.extend(unrooted_callbacks());
     methods.extend(argument_scope_callbacks());
     methods.extend(raw_table_callbacks());
+    methods.extend(counter_callbacks());
     methods
 }
 
@@ -282,5 +283,35 @@ fn raw_table_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
             vm.set_metatable(table, metatable)?;
             vm.results(&[Value::Table(table)])
         })),
+    ]
+}
+
+struct Counter(u64);
+
+fn counter_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
+    vec![
+        ("counter", Rc::new(|vm, args| {
+            let number = vm.check_integer(args, 0)?.unsigned_abs();
+            let value = vm.userdata(Counter(number), None, 0)?;
+            vm.results(&[value])
+        })),
+        ("counter_value", Rc::new(|vm, args| {
+            let value = vm.arg(args, 0);
+            let Some(counter) = vm.userdata_ref::<Counter>(value) else {
+                return Err(vm.arg_error(args, 0, "counter expected"));
+            };
+            let number = counter.0;
+            vm.results(&[Value::Number(number as f64)])
+        })),
+        ("increment", Rc::new(|vm, args| {
+            let value = vm.arg(args, 0);
+            let Some(counter) = vm.userdata_mut::<Counter>(value) else {
+                return Err(vm.arg_error(args, 0, "counter expected"));
+            };
+            counter.0 = counter.0.saturating_add(1);
+            let number = counter.0;
+            vm.results(&[Value::Number(number as f64)])
+        })),
+        ("bad_count", Rc::new(|_, _| Ok(1))),
     ]
 }
