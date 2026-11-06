@@ -28,7 +28,9 @@ pub(crate) struct Parser<'a> {
     line: u32,
     /// The line of the token before `token`.
     last_line: u32,
-    ahead: Option<(Token, u32)>,
+    /// The source text of `token`, which syntax errors show.
+    text: &'a [u8],
+    ahead: Option<(Token, u32, &'a [u8])>,
     depth: u32,
     max_depth: u32,
     /// Bytes of tree the parser may still build.
@@ -48,11 +50,13 @@ pub(crate) fn parse(
     let mut lexer = Lexer::new(source, max_string);
     let token = lexer.next_token()?;
     let line = lexer.line;
+    let text = lexer.text();
     let mut parser = Parser {
         lexer,
         token,
         line,
         last_line: line,
+        text,
         ahead: None,
         depth: 0,
         max_depth,
@@ -90,8 +94,7 @@ const UNARY_PRIORITY: u8 = 8;
 
 fn describe(token: &Token) -> String {
     match token {
-        Token::Name(n) => crate::shown(n),
-        Token::String(s) => crate::shown(s),
+        Token::Name(n) | Token::String(n) => crate::shown(n),
         Token::Number(n) => crate::number::format(*n),
         Token::Eof => "<eof>".into(),
         other => {
@@ -155,13 +158,15 @@ impl<'a> Parser<'a> {
     fn advance(&mut self) -> Parse<()> {
         self.last_line = self.line;
         match self.ahead.take() {
-            Some((token, line)) => {
+            Some((token, line, text)) => {
                 self.token = token;
                 self.line = line;
+                self.text = text;
             }
             None => {
                 self.token = self.lexer.next_token()?;
                 self.line = self.lexer.line;
+                self.text = self.lexer.text();
             }
         }
         Ok(())
@@ -170,7 +175,7 @@ impl<'a> Parser<'a> {
     fn peek(&mut self) -> Parse<&Token> {
         if self.ahead.is_none() {
             let token = self.lexer.next_token()?;
-            self.ahead = Some((token, self.lexer.line));
+            self.ahead = Some((token, self.lexer.line, self.lexer.text()));
         }
         Ok(&self.ahead.as_ref().expect("a token ahead").0)
     }
@@ -178,8 +183,26 @@ impl<'a> Parser<'a> {
     fn error_near(&self, message: &str) -> ParseError {
         ParseError::Syntax(SyntaxError {
             line: self.line,
-            message: format!("{message} near '{}'", describe(&self.token)),
+            message: format!("{message} near '{}'", self.near()),
         })
+    }
+
+    /// The current token as LuaJIT's messages show it: a name or a number as written, a quoted string within its
+    /// quotes with its escapes decoded, a long string as written.
+    fn near(&self) -> String {
+        match &self.token {
+            Token::Name(_) | Token::Number(_) => crate::shown(self.text),
+            Token::String(s) => match self.text.first() {
+                Some(&quote @ (b'"' | b'\'')) => {
+                    let mut shown = vec![quote];
+                    shown.extend_from_slice(&s[..s.len().min(64)]);
+                    shown.push(quote);
+                    crate::shown(&shown)
+                }
+                _ => crate::shown(self.text),
+            },
+            other => describe(other),
+        }
     }
 
     fn expect(&mut self, token: Token, what: &str) -> Parse<()> {
@@ -212,7 +235,7 @@ impl<'a> Parser<'a> {
             }
             other => {
                 self.token = other;
-                Err(self.error_near("<name> expected"))
+                Err(self.error_near("'<name>' expected"))
             }
         }
     }
@@ -481,31 +504,32 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// A call, or an assignment: as in LuaJIT, each target must be a variable when the token after it is read, and
+    /// a variable not followed by `,` wants `=`.
     fn expression_statement(&mut self, line: u32) -> Parse<Statement> {
         let first = self.suffixed_expr()?;
-        if self.token == Token::Assign || self.token == Token::Comma {
-            let mut targets = vec![first];
-            while self.token == Token::Comma {
-                self.advance()?;
-                targets.push(self.suffixed_expr()?);
-            }
-            for target in &targets {
-                if !matches!(target.kind, ExprKind::Name(_) | ExprKind::Index(..)) {
-                    return Err(self.error_near("syntax error"));
-                }
-            }
-            self.expect(Token::Assign, "=")?;
-            let values = self.expr_list()?;
-            return Ok(Statement::Assign {
-                targets,
-                values,
-                line,
-            });
+        if matches!(first.kind, ExprKind::Call(..) | ExprKind::Method(..)) {
+            return Ok(Statement::Call(first));
         }
-        if !matches!(first.kind, ExprKind::Call(..) | ExprKind::Method(..)) {
-            return Err(self.error_near("syntax error"));
+        let mut targets = vec![first];
+        loop {
+            let target = targets.last().expect("a target");
+            if !matches!(target.kind, ExprKind::Name(_) | ExprKind::Index(..)) {
+                return Err(self.error_near("syntax error"));
+            }
+            if self.token != Token::Comma {
+                break;
+            }
+            self.advance()?;
+            targets.push(self.suffixed_expr()?);
         }
-        Ok(Statement::Call(first))
+        self.expect(Token::Assign, "=")?;
+        let values = self.expr_list()?;
+        Ok(Statement::Assign {
+            targets,
+            values,
+            line,
+        })
     }
 
     fn function_body(&mut self, method: bool, line: u32) -> Parse<FunctionBody> {
@@ -525,7 +549,7 @@ impl<'a> Parser<'a> {
                         break;
                     }
                     Token::Name(_) => params.push(self.name()?),
-                    _ => return Err(self.error_near("<name> expected")),
+                    _ => return Err(self.error_near("'<name>' expected")),
                 }
                 if self.token != Token::Comma {
                     break;

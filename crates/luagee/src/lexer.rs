@@ -70,6 +70,8 @@ pub(crate) struct Lexer<'a> {
     source: &'a [u8],
     at: usize,
     pub(crate) line: u32,
+    /// Where the token read last begins in the source.
+    pub(crate) start: usize,
     /// The longest string literal the lexer may build.
     max_string: usize,
 }
@@ -121,8 +123,14 @@ impl<'a> Lexer<'a> {
             source,
             at,
             line: 1,
+            start: at,
             max_string,
         }
+    }
+
+    /// The source text of the token read last.
+    pub(crate) fn text(&self) -> &'a [u8] {
+        &self.source[self.start..self.at]
     }
 
     fn peek(&self) -> u8 {
@@ -157,6 +165,7 @@ impl<'a> Lexer<'a> {
 
     pub(crate) fn next_token(&mut self) -> Result<Token, SyntaxError> {
         loop {
+            self.start = self.at;
             if self.at_end() {
                 return Ok(Token::Eof);
             }
