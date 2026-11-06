@@ -17,6 +17,7 @@ fn register(lua: &mut Lua, name: &'static str, callback: luagee::HostFunction) {
 #[cfg(not(test))]
 pub fn contracts() {
     top_level_vm_calls_cannot_bypass_tick_accounting();
+    host_table_writes_have_linear_cost_for_a_growing_list();
     saved_argument_contexts_cannot_read_a_later_callback();
     nested_results_remain_live_across_reentry_without_explicit_pins();
 }
@@ -85,4 +86,20 @@ fn nested_results_remain_live_across_reentry_without_explicit_pins() {
         lua.set_gc_stress(stress);
         lua.exec("nested_results", b"local t = retain_results(function() return {value = 71} end, function() collectgarbage() end) assert(t.value == 71)").expect("nested results are callback-local roots");
     }
+}
+
+#[cfg_attr(test, test)]
+fn host_table_writes_have_linear_cost_for_a_growing_list() {
+    let mut lua = interpreter();
+    register(&mut lua, "fill", Rc::new(|vm, _| {
+        let table = vm.new_table()?;
+        for index in 1..=1000 {
+            vm.raw_set(table, Value::Number(f64::from(index)), Value::Number(f64::from(index)))?;
+        }
+        for index in 1..=1000 {
+            vm.raw_set(table, Value::Number(1.0), Value::Number(f64::from(index)))?;
+        }
+        vm.results(&[Value::Table(table)])
+    }));
+    lua.exec("list", b"local t = fill() assert(#t == 1000 and t[1000] == 1000 and t[1] == 1000)").expect("linear writes fit the call budget");
 }

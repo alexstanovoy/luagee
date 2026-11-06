@@ -41,13 +41,16 @@ impl Vm {
     }
 
     /// A table write without metamethods, behind the collector's barrier. Nil and NaN keys raise Lua errors.
-    /// Conservatively pays for the table's storage before a possible rehash or hash-to-array migration.
+    /// Pays a constant lookup cost and for storage actually added, so sequential list writes stay linear.
     pub fn raw_set(&mut self, table: TableId, key: Value, value: Value) -> Result<(), LuaError> {
         self.validate(Value::Table(table))?;
         self.validate(key)?;
         self.validate(value)?;
-        self.charge_fuel(1 + self.heap.table(table).bytes() as u64 / 16)?;
-        self.raw_set_checked(table, key, value)
+        self.charge_fuel(1)?;
+        let before = self.heap.table(table).bytes();
+        self.raw_set_checked(table, key, value)?;
+        let growth = self.heap.table(table).bytes().saturating_sub(before);
+        self.charge_fuel(growth as u64 / 16)
     }
 
     /// Sets a table's metatable behind the collector's barrier. The host can replace a protected metatable.

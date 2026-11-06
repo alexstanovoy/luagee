@@ -36,6 +36,7 @@ fn callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
     methods.extend(cache_callbacks());
     methods.extend(unrooted_callbacks());
     methods.extend(argument_scope_callbacks());
+    methods.extend(raw_table_callbacks());
     methods
 }
 
@@ -252,6 +253,34 @@ fn argument_scope_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
             let values = vm.call(vm.arg(args, 0), &[])?;
             vm.call(vm.arg(args, 1), &[])?;
             vm.results(&values)
+        })),
+    ]
+}
+
+fn raw_table_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
+    vec![
+        ("raw_get", Rc::new(|vm, args| {
+            let table = vm.check_table(args, 0)?;
+            let key = vm.check_any(args, 1)?;
+            let value = vm.raw_get(table, key)?;
+            vm.results(&[value])
+        })),
+        ("raw_set", Rc::new(|vm, args| {
+            let table = vm.check_table(args, 0)?;
+            let key = vm.check_any(args, 1)?;
+            let value = vm.check_any(args, 2)?;
+            vm.raw_set(table, key, value)?;
+            vm.results(&[Value::Table(table)])
+        })),
+        ("set_metatable", Rc::new(|vm, args| {
+            let table = vm.check_table(args, 0)?;
+            let metatable = match vm.arg(args, 1) {
+                Value::Nil => None,
+                Value::Table(table) => Some(table),
+                _ => return Err(vm.arg_error(args, 1, "table or nil expected")),
+            };
+            vm.set_metatable(table, metatable)?;
+            vm.results(&[Value::Table(table)])
         })),
     ]
 }

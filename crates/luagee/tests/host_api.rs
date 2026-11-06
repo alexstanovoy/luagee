@@ -32,6 +32,7 @@ pub fn contracts() {
     metatable_writes_and_duplicate_roots_survive_collection();
     deepest_host_reentry_keeps_stack_margin();
     stale_handles_are_rejected_after_collection_and_slot_reuse();
+    script_owned_tables_support_raw_operations_with_script_keys();
 }
 
 #[cfg_attr(test, test)]
@@ -345,5 +346,14 @@ fn stale_handles_are_rejected_after_collection_and_slot_reuse() {
         assert_eq!(lua.vm().userdata_ref::<u64>(replacement), Some(&29));
         lua.begin_tick();
         lua.exec("stale_callback", include_bytes!("host_api/stale_handles.lua")).expect("stale callback handles rejected");
+    }
+}
+
+#[cfg_attr(test, test)]
+fn script_owned_tables_support_raw_operations_with_script_keys() {
+    for stress in [GcStress::Off, GcStress::Incremental] {
+        let mut lua = interpreter(Limits { fuel_per_call: 5_000_000, fuel_per_tick: 5_000_000, ..Limits::DEFAULT });
+        lua.set_gc_stress(stress);
+        lua.exec("raw_tables", include_bytes!("host_api/raw_tables.lua")).expect("raw API accepts script-owned tables and validates keys");
     }
 }

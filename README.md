@@ -189,3 +189,10 @@ produce nil from `arg` and a Lua error from checked readers instead of inspectin
 another callback's frame. Nested call results and runtime error values remain
 rooted on the charged callback stack until its return; pin anything retained past
 that point. `LuaError` and argument-error constructors must be used or propagated.
+
+### Raw-write fuel (unreleased fix)
+
+Raw table writes charge one lookup plus storage growth, rather than the whole
+existing table on every write. Building a sequential list has linear fuel cost;
+replacing an existing element has constant cost. The interpreter still enforces
+memory accounting and collector barriers on every write.
