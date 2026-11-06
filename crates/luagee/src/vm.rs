@@ -2416,6 +2416,7 @@ impl Vm {
             }
             self.gc_protos += proto.bytes();
             self.heap.gray.extend_from_slice(&proto.constants);
+            self.heap.gray.push(Value::String(proto.source));
             protos.extend(proto.protos.iter().cloned());
             work += 1 + proto.constants.len();
         }

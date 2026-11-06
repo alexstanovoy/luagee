@@ -1,0 +1,9 @@
+modname	[string "modname"]	main
+=x	x	main
+return 1	[string "return 1"]	main
+@some/file.lua	some/file.lua	main
+return 2	[string "return 2"]	main
+=(load)	(load)	main
+=outer	outer	Lua
+=[C]	[C]	C
+@

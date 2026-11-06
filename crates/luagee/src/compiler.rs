@@ -15,7 +15,7 @@ use crate::heap::Heap;
 use crate::lexer::SyntaxError;
 use crate::parser::ParseError;
 use crate::proto::{ArithOp, Capture, CompareOp, LocalInfo, Op, Proto, Rk};
-use crate::value::Value;
+use crate::value::{StrId, Value};
 
 type Compile<T> = Result<T, ParseError>;
 
@@ -32,6 +32,7 @@ const FIELDS_PER_FLUSH: u32 = 50;
 pub(crate) fn compile(
     block: &Block,
     chunk: Rc<str>,
+    source: StrId,
     heap: &mut Heap,
     max_depth: u32,
 ) -> Compile<Rc<Proto>> {
@@ -48,6 +49,7 @@ pub(crate) fn compile(
         captured: resolver.captured,
         declared: 0,
         chunk,
+        source,
         depth: 0,
         max_depth,
     };
@@ -374,6 +376,7 @@ struct Compiler<'h> {
     captured: Vec<bool>,
     declared: usize,
     chunk: Rc<str>,
+    source: StrId,
     depth: u32,
     max_depth: u32,
 }
@@ -680,6 +683,7 @@ impl Compiler<'_> {
             vararg,
             registers: f.registers as u8,
             chunk: self.chunk.clone(),
+            source: self.source,
             line,
             visited: Cell::new(0),
         };

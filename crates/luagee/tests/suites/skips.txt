@@ -13,7 +13,6 @@ skip lua-5.1-tests/attrib.lua:3-140 -- package: require searching package.path t
 skip lua-5.1-tests/attrib.lua:176-210 -- package: C libraries through package.loadlib
 skip lua-5.1-tests/attrib.lua:214-228 -- fix: package.preload
 skip lua-5.1-tests/big.lua:3-12 -- bound: a 32 MiB string is past the sandbox's string length bound (4 MiB), which overflows before the concatenation the test overflows
-skip lua-5.1-tests/calls.lua:241-241 -- fix: getinfo source
 skip lua-5.1-tests/calls.lua:243-243 -- dump: string.dump
 skip lua-5.1-tests/calls.lua:245-246 -- dump: loads the dump of line 243
 skip lua-5.1-tests/calls.lua:248-250 -- known: load calls its reader until the end of the source before it compiles, so a syntax error does not stop the reading early

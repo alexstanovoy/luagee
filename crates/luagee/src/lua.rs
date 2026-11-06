@@ -33,6 +33,7 @@ pub struct Lua {
 pub(crate) fn compile_chunk(
     vm: &mut Vm,
     source: &[u8],
+    name: StrId,
     chunk: &str,
 ) -> Result<Result<Value, String>, LuaError> {
     let budget = vm.heap.cap.saturating_sub(vm.heap.memory);
@@ -49,6 +50,7 @@ pub(crate) fn compile_chunk(
     let proto = match crate::compiler::compile(
         &block,
         chunk.into(),
+        name,
         &mut vm.heap,
         vm.limits.syntax_depth,
     ) {
@@ -92,7 +94,11 @@ impl Lua {
         let vm = &mut self.vm;
         // The host's own loading is not a script's work: it spends no script fuel (the source limits still hold).
         let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
-        let compiled = crate::stdlib::compile_source(vm, source, chunk);
+        // As a file is in Lua, the chunk's source is "@" and its name.
+        let compiled = vm
+            .heap
+            .intern(format!("@{chunk}").as_bytes())
+            .and_then(|name| crate::stdlib::compile_source(vm, source, name, chunk));
         vm.fuel = fuel;
         let compiled = compiled.map_err(|e| to_error(&mut Some(vm), e))?;
         compiled.map_err(|message: String| Error::Syntax {

@@ -48,16 +48,15 @@ fn getinfo(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         }
     };
     let info = vm.heap.new_table(0, 6)?;
-    let (source, what, defined) = match function.map(|f| vm.heap.functions.get(f.0)) {
+    let (source, short, what, defined) = match function.map(|f| vm.heap.functions.get(f.0)) {
         Some(Function::Lua { proto, .. }) => (
-            format!("@{}", proto.chunk),
+            Value::String(proto.source),
+            proto.chunk.to_string(),
             if proto.line == 0 { "main" } else { "Lua" },
             f64::from(proto.line),
         ),
-        _ => ("=[C]".to_owned(), "C", -1.0),
+        _ => (vm.new_string(b"=[C]")?, "[C]".to_owned(), "C", -1.0),
     };
-    let short = source.trim_start_matches(['@', '=']).to_owned();
-    let source = vm.new_string(source.as_bytes())?;
     vm.set_field(info, "source", source)?;
     let short = vm.new_string(short.as_bytes())?;
     vm.set_field(info, "short_src", short)?;

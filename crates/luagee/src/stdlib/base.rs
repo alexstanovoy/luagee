@@ -2,7 +2,7 @@
 
 use crate::heap::Function;
 use crate::table::InvalidKey;
-use crate::value::{TableId, Value};
+use crate::value::{StrId, TableId, Value};
 use crate::vm::{Args, Caller, LuaError, Vm};
 use crate::{Limit, ModuleName};
 
@@ -470,10 +470,12 @@ fn unpack(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 // --- loading -------------------------------------------------------------------------------------------------
 
 /// Compiles source into a function in the thread's globals, counting it against the source limits. Ok(Err(message))
-/// for source that does not compile.
+/// for source that does not compile. `name` is the chunk's name as given (what `debug.getinfo` reports as its
+/// source), `chunk` that name as positions print it.
 pub(crate) fn compile(
     vm: &mut Vm,
     source: &[u8],
+    name: StrId,
     chunk: &str,
 ) -> Result<Result<Value, String>, LuaError> {
     if source.first() == Some(&0x1b) {
@@ -493,7 +495,7 @@ pub(crate) fn compile(
         return Err(LuaError::Limit(Limit::ModuleCount));
     }
     vm.charge_fuel(source.len() as u64 / 4)?;
-    crate::lua::compile_chunk(vm, source, chunk)
+    crate::lua::compile_chunk(vm, source, name, chunk)
 }
 
 /// Lua's chunk names as LuaJIT shortens them (`lj_debug_shortname`, with LuaJIT's LUA_IDSIZE of 60): `=name` as is,
@@ -545,22 +547,18 @@ fn loadstring(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     if !matches!(vm.arg(args, 0), Value::String(_) | Value::Number(_)) {
         return load(vm, args);
     }
-    let source = vm.check_string(args, 0)?;
-    let name = match vm.opt_string(args, 1)? {
-        Some(n) => vm.heap.string(n).to_vec(),
-        None => vm.heap.string(source).to_vec(),
-    };
-    let source = vm.heap.string(source).to_vec();
-    let compiled = compile(vm, &source, &chunk_id(&name))?;
+    let text = vm.check_string(args, 0)?;
+    // Without a name, the chunk is named by its source, as in Lua.
+    let name = vm.opt_string(args, 1)?.unwrap_or(text);
+    let chunk = chunk_id(vm.heap.string(name));
+    let source = vm.heap.string(text).to_vec();
+    let compiled = compile(vm, &source, name, &chunk)?;
     loaded_result(vm, compiled)
 }
 
 fn load(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let chunk = vm.arg(args, 0);
-    let name = match vm.opt_string(args, 1)? {
-        Some(n) => vm.heap.string(n).to_vec(),
-        None => b"=(load)".to_vec(),
-    };
+    let given = vm.opt_string(args, 1)?;
     let source = match chunk {
         Value::String(s) => vm.heap.string(s).to_vec(),
         Value::Function(_) => {
@@ -595,12 +593,14 @@ fn load(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         }
         _ => return Err(vm.arg_type_error(args, 0, "function")),
     };
-    let name = if matches!(chunk, Value::String(_)) && vm.arg(args, 1) == Value::Nil {
-        source.clone()
-    } else {
-        name
+    // Without a name, a string chunk is named by its source, as in Lua, and a reader's chunk is "=(load)".
+    let name = match (given, chunk) {
+        (Some(name), _) => name,
+        (None, Value::String(text)) => text,
+        (None, _) => vm.heap.intern(b"=(load)")?,
     };
-    let compiled = compile(vm, &source, &chunk_id(&name))?;
+    let shown = chunk_id(vm.heap.string(name));
+    let compiled = compile(vm, &source, name, &shown)?;
     loaded_result(vm, compiled)
 }
 
@@ -622,7 +622,8 @@ fn read_module(vm: &mut Vm, args: Args, name: &[u8]) -> Result<Vec<u8>, LuaError
 fn run_module(vm: &mut Vm, args: Args, name: &[u8], arg: Option<Value>) -> Result<usize, LuaError> {
     let source = read_module(vm, args, name)?;
     let chunk = format!("@{}", crate::shown(name));
-    let function = match compile(vm, &source, &chunk_id(chunk.as_bytes()))? {
+    let source_name = vm.heap.intern(chunk.as_bytes())?;
+    let function = match compile(vm, &source, source_name, &chunk_id(chunk.as_bytes()))? {
         Ok(function) => function,
         Err(message) => {
             return Err(vm.error(format!(

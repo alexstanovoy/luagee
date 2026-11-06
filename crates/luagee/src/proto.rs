@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use crate::value::Value;
+use crate::value::{StrId, Value};
 
 /// A register or a constant operand: below 256 a register, from 256 the constant `index - 256`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,6 +225,9 @@ pub(crate) struct Proto {
     pub(crate) registers: u8,
     /// The chunk's name, as error positions print it.
     pub(crate) chunk: Rc<str>,
+    /// The chunk's name as it was given (`@file`, `=name`, or the source itself): `debug.getinfo`'s `source`. The
+    /// collector keeps it with the function.
+    pub(crate) source: StrId,
     pub(crate) line: u32,
     /// The collector's mark: the collection that last visited this function's constants.
     pub(crate) visited: Cell<u64>,
