@@ -126,8 +126,6 @@ skip luajit-test-cleanup/lib/base/error.lua#level 2 in xpcall -- debug: debug.ge
 skip luajit-test-cleanup/lib/base/getfenv.lua#untitled -- debug: debug.setfenv
 skip luajit-test-cleanup/lib/base/tonumber_tostring.lua#print calls overridden tostring -- debug: debug.setfenv
 skip luajit-test-cleanup/lib/string/metatable.lua#__index metamethod is string library -- debug: debug.getmetatable
-skip luajit-test-cleanup/lib/string/format/num.lua#easily enumerable cases of %a, %A -- fix: %a
-skip luajit-test-cleanup/lib/string/format/num.lua#assorted %a -- fix: %a
 skip luajit-test-cleanup/lib/coroutine/yield.lua#assorted -- known: a coroutine cannot yield inside a metamethod (here __add)
 skip luajit-test-cleanup/lib/contents.lua#base -- sandbox: the sandbox has no io, os, loadfile or arg
 skip luajit-test-cleanup/lib/contents.lua#pre-5.2 base -- newproxy: newproxy (luagee has no newproxy: userdata come from the host)

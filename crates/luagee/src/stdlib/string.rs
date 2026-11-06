@@ -589,7 +589,7 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
             return Err(vm.error("invalid option '%' to 'format'"));
         };
         i += 1;
-        if b"diuoxXceEfFgGqs".contains(&conversion) && argument >= args.count {
+        if b"diuoxXceEfFgGaAqs".contains(&conversion) && argument >= args.count {
             return Err(vm.arg_error(args, argument, "value expected"));
         }
         let text = match conversion {
@@ -622,6 +622,10 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
             b'e' | b'E' | b'f' | b'F' | b'g' | b'G' => {
                 let n = vm.check_number(args, argument)?;
                 format_float(n, conversion, &spec)
+            }
+            b'a' | b'A' => {
+                let n = vm.check_number(args, argument)?;
+                format_hex_float(n, conversion == b'A', &spec)
             }
             b'q' => {
                 let value = vm.check_any(args, argument)?;
@@ -789,6 +793,62 @@ fn format_float(n: f64, conversion: u8, spec: &Spec) -> String {
     };
     let body = if upper { body.to_uppercase() } else { body };
     pad(spec, sign, body, true)
+}
+
+/// `%a`, as LuaJIT writes it, from the bits alone: a subnormal normalized to a leading 1, the 13 hex digits of the
+/// mantissa without trailing zeros (or rounded half up to the precision, a carry making the leading digit 2), and the
+/// binary exponent in decimal.
+fn format_hex_float(n: f64, upper: bool, spec: &Spec) -> String {
+    const FRACTION: u64 = (1 << 52) - 1;
+    if !n.is_finite() {
+        return format_float(n, if upper { b'E' } else { b'e' }, spec);
+    }
+    let bits = n.to_bits();
+    let sign = sign_of(bits >> 63 == 1, spec);
+    let biased = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & FRACTION;
+    let (mut lead, mantissa, exponent) = match (biased, fraction) {
+        (0, 0) => (0, 0, 0),
+        (0, _) => {
+            let top = 63 - fraction.leading_zeros() as i32;
+            (1, (fraction << (52 - top)) & FRACTION, top - 1074)
+        }
+        _ => (1, fraction, biased - 1023),
+    };
+    let digits = match spec.precision {
+        None => format!("{mantissa:013x}").trim_end_matches('0').to_owned(),
+        Some(precision) if precision >= 13 => {
+            format!("{mantissa:013x}{}", "0".repeat(precision - 13))
+        }
+        Some(precision) => {
+            let shift = 4 * (13 - precision as u32);
+            let mut rounded = (mantissa + (1 << (shift - 1))) >> shift;
+            if rounded >> (4 * precision) != 0 {
+                lead += 1;
+                rounded &= (1 << (4 * precision)) - 1;
+            }
+            match precision {
+                0 => String::new(),
+                _ => format!("{rounded:0precision$x}"),
+            }
+        }
+    };
+    let point = if digits.is_empty() && !spec.alternate {
+        ""
+    } else {
+        "."
+    };
+    let exponent_sign = if exponent < 0 { '-' } else { '+' };
+    let body = format!(
+        "{lead}{point}{digits}p{exponent_sign}{}",
+        exponent.unsigned_abs()
+    );
+    let (prefix, body) = if upper {
+        ("0X", body.to_uppercase())
+    } else {
+        ("0x", body)
+    };
+    pad(spec, sign + prefix, body, true)
 }
 
 fn exponent_form(magnitude: f64, precision: usize, alternate: bool) -> String {
