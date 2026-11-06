@@ -63,7 +63,7 @@ corpus)
     runtime=$(wasmtime)
     # On less stack than wasm's defaults, so that a margin is checked, not hoped for: the module's own (linear
     # memory) stack is half rustc's default of 1 MiB, wasmtime's stack three quarters of its default of 512 KiB.
-    # tests/hostile/deepest_native_nesting_coroutines.lua takes the most of both a script can (some 340 KiB each).
+    # tests/hostile/deepest_native_nesting_coroutines.lua takes the most of both a script can (some 350 KiB each).
     cargo rustc --profile test-release -p luagee --example corpus --target "$target" -- \
         -C link-arg=-zstack-size=$((512 << 10))
     runner=target/$target/test-release/examples/corpus.wasm

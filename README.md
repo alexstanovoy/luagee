@@ -58,7 +58,7 @@ A script is treated as hostile input. Whatever it does, the host keeps running:
   complex", "chunk has too many syntax levels".
 - All Rust recursion is bounded, and so is the native stack it takes. At the default limits the most a script can
   make the interpreter use (`tests/hostile/deepest_native_nesting_*.lua`: native nesting at its bound, then the
-  deepest source and patterns at its top) is under 800 KiB on x86-64; under wasmtime, about 340 KiB of its 512 KiB
+  deepest source and patterns at its top) is about 800 KiB on x86-64; under wasmtime, about 350 KiB of its 512 KiB
   stack and 340 KiB of the module's 1 MiB stack. The tests check a 1 MiB native stack, and the gate the
   corpora on three quarters of wasmtime's stack and half the module's. Raising `syntax_depth` or `pattern_depth`
   takes more: up to 2 KiB of native stack a syntax level, 0.3 KiB a pattern level.

@@ -15,8 +15,8 @@ use crate::table::Table;
 use crate::value::{CellId, FuncId, StrId, TableId, ThreadId, Value};
 
 /// How deeply native functions may nest Lua calls ("C stack overflow" past it), as Lua 5.1's C calls do. A level
-/// takes up to 1.7 KiB of native stack on x86-64 (under wasm, 1 KiB of wasmtime's stack and 0.6 KiB of the module's
-/// own), so the deepest nesting, with the deepest source and patterns at its top, needs under 800 KiB natively and
+/// takes up to 1.8 KiB of native stack on x86-64 (under wasm, 1 KiB of wasmtime's stack and 0.7 KiB of the module's
+/// own), so the deepest nesting, with the deepest source and patterns at its top, needs some 800 KiB natively and
 /// two thirds of wasmtime's default stack (`tests/hostile/deepest_native_nesting_*.lua`).
 pub(crate) const MAX_NATIVE_DEPTH: u32 = 200;
 /// How many frames a traceback keeps.
