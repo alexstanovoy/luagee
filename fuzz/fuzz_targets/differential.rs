@@ -15,7 +15,8 @@ use luagee_fuzz::generate::{Dialect, program};
 use luagee_fuzz::{KEYS, run};
 
 static REFERENCE: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("LUAGEE_REFERENCE").expect("LUAGEE_REFERENCE names the reference interpreter (tools/ref/build.sh)")
+    std::env::var("LUAGEE_REFERENCE")
+        .expect("LUAGEE_REFERENCE names the reference interpreter (tools/ref/build.sh)")
 });
 
 /// A generated program ends in milliseconds; one that takes this long is a generator bug.
@@ -23,7 +24,9 @@ const REFERENCE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
-    let Ok(source) = program(&mut u, Dialect::Deterministic) else { return };
+    let Ok(source) = program(&mut u, Dialect::Deterministic) else {
+        return;
+    };
     let ours = run(source.as_bytes(), KEYS);
     if ours.ended.starts_with("Limit(") {
         return;
@@ -65,7 +68,10 @@ fn reference(source: &str) -> (Vec<u8>, bool) {
         if child.try_wait().expect("the reference's status").is_some() {
             break;
         }
-        assert!(began.elapsed() < REFERENCE_TIMEOUT, "the reference ran past {REFERENCE_TIMEOUT:?}:\n{source}");
+        assert!(
+            began.elapsed() < REFERENCE_TIMEOUT,
+            "the reference ran past {REFERENCE_TIMEOUT:?}:\n{source}"
+        );
         std::thread::sleep(Duration::from_millis(1));
     }
     let output = child.wait_with_output().expect("the reference's output");

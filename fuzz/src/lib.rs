@@ -58,7 +58,8 @@ unsafe impl GlobalAlloc for Counting {
         let moved = unsafe { System.realloc(pointer, layout, new_size) };
         if !moved.is_null() {
             if new_size >= layout.size() {
-                let held = HELD.fetch_add(new_size - layout.size(), Ordering::Relaxed) + new_size - layout.size();
+                let held = HELD.fetch_add(new_size - layout.size(), Ordering::Relaxed) + new_size
+                    - layout.size();
                 PEAK.fetch_max(held, Ordering::Relaxed);
             } else {
                 HELD.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
@@ -128,10 +129,17 @@ pub fn describe(lua: &Lua, ended: Result<Vec<Value>, Error>) -> String {
                 .iter()
                 .map(|value| match value {
                     Value::String(_) => {
-                        format!("{:?}", String::from_utf8_lossy(lua.bytes(*value).expect("a string")))
+                        format!(
+                            "{:?}",
+                            String::from_utf8_lossy(lua.bytes(*value).expect("a string"))
+                        )
                     }
                     Value::Number(n) => luagee::number::format(*n),
-                    other => format!("{other:?}").split('(').next().unwrap_or("value").to_owned(),
+                    other => format!("{other:?}")
+                        .split('(')
+                        .next()
+                        .unwrap_or("value")
+                        .to_owned(),
                 })
                 .collect();
             format!("ok {}", shown.join(" "))
@@ -141,7 +149,10 @@ pub fn describe(lua: &Lua, ended: Result<Vec<Value>, Error>) -> String {
 }
 
 /// The keys the single-run targets use.
-pub const KEYS: Keys = Keys { hash: [1, 2], random: 3 };
+pub const KEYS: Keys = Keys {
+    hash: [1, 2],
+    random: 3,
+};
 
 /// Runs a chunk and checks what the sandbox promises whatever it does: no panic (the fuzzer catches one), memory as
 /// counted under the ceiling and as really held near it, a collection afterwards that leaves at most the cap (or
@@ -151,12 +162,19 @@ pub fn check_run(source: &[u8]) {
     let (mut lua, _) = interpreter(KEYS);
     // Loaded first: the input may use up the source limits, which last the interpreter's life.
     let after = lua
-        .load("after", b"local t = {} for i = 1, 10 do t[i] = i end return #t")
+        .load(
+            "after",
+            b"local t = {} for i = 1, 10 do t[i] = i end return #t",
+        )
         .expect("compiles");
     lua.pin(after);
     let (_ended, peak) = peak_while(|| lua.exec("fuzz", source));
     let ceiling = LIMITS.memory + LIMITS.memory / 4;
-    assert!(lua.memory() <= ceiling, "counted {} bytes, past the ceiling {ceiling}", lua.memory());
+    assert!(
+        lua.memory() <= ceiling,
+        "counted {} bytes, past the ceiling {ceiling}",
+        lua.memory()
+    );
     assert!(
         peak <= REAL_MEMORY_BOUND,
         "really held {peak} bytes at the peak, counting {} at the end",
@@ -166,18 +184,29 @@ pub fn check_run(source: &[u8]) {
     for _ in 0..10 {
         lua.begin_tick();
         ran = lua.call(after, &[]);
-        if !matches!(ran, Err(Error::Limit(Limit::FuelPerCall | Limit::FuelPerTick))) {
+        if !matches!(
+            ran,
+            Err(Error::Limit(Limit::FuelPerCall | Limit::FuelPerTick))
+        ) {
             break;
         }
     }
     match ran {
-        Ok(values) => assert_eq!(values.len(), 1, "the function after the script returned {values:?}"),
+        Ok(values) => assert_eq!(
+            values.len(),
+            1,
+            "the function after the script returned {values:?}"
+        ),
         // What the script left alive may fill the cap: then nothing more fits, which is the cap working.
         Err(Error::Limit(Limit::Memory)) => {}
         Err(error) => panic!("the interpreter broke: {error:?}"),
     }
     match lua.collect() {
-        Ok(()) => assert!(lua.memory() <= LIMITS.memory, "a collection left {} bytes", lua.memory()),
+        Ok(()) => assert!(
+            lua.memory() <= LIMITS.memory,
+            "a collection left {} bytes",
+            lua.memory()
+        ),
         Err(Error::Limit(Limit::Memory)) => {}
         Err(error) => panic!("a collection failed: {error:?}"),
     }

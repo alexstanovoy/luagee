@@ -74,7 +74,8 @@ pub fn program(u: &mut Unstructured, dialect: Dialect) -> Result<String> {
     if dialect == Dialect::Deterministic {
         g.source.push_str(DETERMINISTIC_PRELUDE);
     }
-    g.source.push_str("local v0, v1, v2, v3, v4, v5 = 0, 1, \"2\", {}, {1, 2, 3}, \"x\"\n");
+    g.source
+        .push_str("local v0, v1, v2, v3, v4, v5 = 0, 1, \"2\", {}, {1, 2, 3}, \"x\"\n");
     for i in 0..FUNCTIONS {
         g.function = i;
         g.source.push_str(&format!("local function f{i}(a, b)\n"));
@@ -87,8 +88,14 @@ pub fn program(u: &mut Unstructured, dialect: Dialect) -> Result<String> {
     // The body runs protected, so that an error ends it with its message printed rather than stopping everything.
     g.source.push_str("out(pcall(function()\n");
     g.block(0)?;
-    let length = if dialect == Dialect::Deterministic { "len" } else { "#" };
-    g.source.push_str(&format!("end))\nout(v0, v1, v2, {length}(v3), {length}(v4), v5)\n"));
+    let length = if dialect == Dialect::Deterministic {
+        "len"
+    } else {
+        "#"
+    };
+    g.source.push_str(&format!(
+        "end))\nout(v0, v1, v2, {length}(v3), {length}(v4), v5)\n"
+    ));
     Ok(g.source)
 }
 
@@ -155,20 +162,24 @@ impl Generator<'_, '_> {
                 let start = self.u.int_in_range(-3..=3)?;
                 let stop = self.u.int_in_range(-3..=8)?;
                 let step = *self.u.choose(&[1, 2, -1, 3])?;
-                self.source.push_str(&format!("for i = {start}, {stop}, {step} do\n"));
+                self.source
+                    .push_str(&format!("for i = {start}, {stop}, {step} do\n"));
                 self.block(depth + 1)?;
                 self.source.push_str("end");
             }
             6 if nested => {
                 let pairs = self.dialect == Dialect::Any && self.u.arbitrary()?;
                 let iterator = if pairs { "pairs" } else { "ipairs" };
-                self.source.push_str(&format!("for k, v in {iterator}(type(v4) == \"table\" and v4 or {{}}) do\n"));
+                self.source.push_str(&format!(
+                    "for k, v in {iterator}(type(v4) == \"table\" and v4 or {{}}) do\n"
+                ));
                 self.block(depth + 1)?;
                 self.source.push_str("end");
             }
             7 if nested => {
                 // A guard bounds the loop whatever its condition does.
-                self.source.push_str("do local guard = 0 while guard < 4 and (");
+                self.source
+                    .push_str("do local guard = 0 while guard < 4 and (");
                 self.expression(depth + 1)?;
                 self.source.push_str(") do guard = guard + 1\n");
                 self.block(depth + 1)?;
@@ -180,7 +191,8 @@ impl Generator<'_, '_> {
                 self.source.push_str("end))");
             }
             9 if nested => {
-                self.source.push_str("do local co = coroutine.wrap(function(a)\n");
+                self.source
+                    .push_str("do local co = coroutine.wrap(function(a)\n");
                 self.block(depth + 1)?;
                 self.source.push_str("coroutine.yield(");
                 self.expression(depth + 1)?;
@@ -196,7 +208,9 @@ impl Generator<'_, '_> {
             11 => {
                 let label = self.labels;
                 self.labels += 1;
-                self.source.push_str(&format!("do goto l{label}\nout(\"skipped\")\n::l{label}:: end"));
+                self.source.push_str(&format!(
+                    "do goto l{label}\nout(\"skipped\")\n::l{label}:: end"
+                ));
             }
             12 => {
                 self.source.push_str("error(");
@@ -215,7 +229,17 @@ impl Generator<'_, '_> {
 
     fn metamethods(&mut self) -> Result<()> {
         const EVENTS: [&str; 12] = [
-            "__index", "__newindex", "__add", "__sub", "__mul", "__concat", "__eq", "__lt", "__le", "__len", "__call",
+            "__index",
+            "__newindex",
+            "__add",
+            "__sub",
+            "__mul",
+            "__concat",
+            "__eq",
+            "__lt",
+            "__le",
+            "__len",
+            "__call",
             "__unm",
         ];
         let count = self.u.int_in_range(1..=3)?;
@@ -224,7 +248,9 @@ impl Generator<'_, '_> {
             self.source.push_str(event);
             // Only operands and constants: anything more could set the metamethod off again, without bound.
             self.source.push_str(" = function(a, b) return ");
-            let result = *self.u.choose(&["a", "b", "1", "\"m\"", "nil", "true", "false"])?;
+            let result = *self
+                .u
+                .choose(&["a", "b", "1", "\"m\"", "nil", "true", "false"])?;
             self.source.push_str(result);
             self.source.push_str(" end, ");
         }
@@ -255,8 +281,10 @@ impl Generator<'_, '_> {
         match self.u.int_in_range(0..=9)? {
             0..=2 => self.atom(),
             3 => {
-                const OPERATORS: [&str; 15] =
-                    ["+", "-", "*", "/", "%", "^", "..", "==", "~=", "<", "<=", ">", ">=", "and", "or"];
+                const OPERATORS: [&str; 15] = [
+                    "+", "-", "*", "/", "%", "^", "..", "==", "~=", "<", "<=", ">", ">=", "and",
+                    "or",
+                ];
                 self.source.push('(');
                 self.expression(depth + 1)?;
                 let operator = *self.u.choose(&OPERATORS)?;
@@ -266,7 +294,11 @@ impl Generator<'_, '_> {
                 Ok(())
             }
             4 => {
-                let length = if self.dialect == Dialect::Deterministic { "len" } else { "#" };
+                let length = if self.dialect == Dialect::Deterministic {
+                    "len"
+                } else {
+                    "#"
+                };
                 let operator = *self.u.choose(&["-", "not ", length])?;
                 self.source.push_str(&format!("({operator}("));
                 self.expression(depth + 1)?;
@@ -279,7 +311,9 @@ impl Generator<'_, '_> {
                 for _ in 0..count {
                     match self.u.int_in_range(0..=2)? {
                         0 => {}
-                        1 => self.source.push_str(&format!("k{} = ", self.u.int_in_range(0..=2)?)),
+                        1 => self
+                            .source
+                            .push_str(&format!("k{} = ", self.u.int_in_range(0..=2)?)),
                         _ => {
                             self.source.push('[');
                             self.expression(depth + 1)?;
@@ -318,10 +352,36 @@ impl Generator<'_, '_> {
 
     fn library_call(&mut self, depth: u32) -> Result<()> {
         const FUNCTIONS: [&str; 30] = [
-            "tostring", "tonumber", "type", "select", "rawequal", "rawget", "math.floor", "math.abs", "math.max",
-            "math.min", "math.fmod", "math.ceil", "string.len", "string.sub", "string.upper", "string.byte",
-            "string.format", "string.find", "string.match", "string.gsub", "string.rep", "table.concat",
-            "table.insert", "table.remove", "unpack", "bit.band", "bit.bor", "bit.bxor", "bit.lshift", "bit.tobit",
+            "tostring",
+            "tonumber",
+            "type",
+            "select",
+            "rawequal",
+            "rawget",
+            "math.floor",
+            "math.abs",
+            "math.max",
+            "math.min",
+            "math.fmod",
+            "math.ceil",
+            "string.len",
+            "string.sub",
+            "string.upper",
+            "string.byte",
+            "string.format",
+            "string.find",
+            "string.match",
+            "string.gsub",
+            "string.rep",
+            "table.concat",
+            "table.insert",
+            "table.remove",
+            "unpack",
+            "bit.band",
+            "bit.bor",
+            "bit.bxor",
+            "bit.lshift",
+            "bit.tobit",
         ];
         let mut function = *self.u.choose(&FUNCTIONS)?;
         if self.dialect == Dialect::Deterministic {
@@ -338,7 +398,8 @@ impl Generator<'_, '_> {
             // Bounded, so that no program asks for more than any interpreter gives.
             self.source.push_str("string.rep(");
             self.expression(depth)?;
-            self.source.push_str(&format!(", {})", self.u.int_in_range(0..=5)?));
+            self.source
+                .push_str(&format!(", {})", self.u.int_in_range(0..=5)?));
             return Ok(());
         }
         self.source.push_str(&format!("{function}("));
@@ -352,21 +413,33 @@ impl Generator<'_, '_> {
             0 => self.variable(),
             1 => {
                 const NUMBERS: [&str; 14] = [
-                    "0", "1", "-1", "2", "3", "10", "0.5", "-0", "1e300", "2^53", "0x10", "1/0", "-1/0", "255",
+                    "0", "1", "-1", "2", "3", "10", "0.5", "-0", "1e300", "2^53", "0x10", "1/0",
+                    "-1/0", "255",
                 ];
                 self.source.push_str(self.u.choose(&NUMBERS)?);
                 Ok(())
             }
             2 => {
                 const STRINGS: [&str; 12] = [
-                    "\"\"", "\"a\"", "\"10\"", "\" 5 \"", "\"0x1A\"", "\"1e2\"", "\"abc\"", "\"%d\"", "\"%s=%5.2f\"",
-                    "\"(%a+)\"", "\"\\0z\"", "\"a.b\"",
+                    "\"\"",
+                    "\"a\"",
+                    "\"10\"",
+                    "\" 5 \"",
+                    "\"0x1A\"",
+                    "\"1e2\"",
+                    "\"abc\"",
+                    "\"%d\"",
+                    "\"%s=%5.2f\"",
+                    "\"(%a+)\"",
+                    "\"\\0z\"",
+                    "\"a.b\"",
                 ];
                 self.source.push_str(self.u.choose(&STRINGS)?);
                 Ok(())
             }
             3 => {
-                self.source.push_str(self.u.choose(&["nil", "true", "false"])?);
+                self.source
+                    .push_str(self.u.choose(&["nil", "true", "false"])?);
                 Ok(())
             }
             4 if self.function < FUNCTIONS => {
@@ -374,12 +447,14 @@ impl Generator<'_, '_> {
                 Ok(())
             }
             5 => {
-                self.source.push_str(&format!("{}", self.u.int_in_range(-20..=300)?));
+                self.source
+                    .push_str(&format!("{}", self.u.int_in_range(-20..=300)?));
                 Ok(())
             }
             6 => {
                 self.variable()?;
-                self.source.push_str(&format!(".k{}", self.u.int_in_range(0..=2)?));
+                self.source
+                    .push_str(&format!(".k{}", self.u.int_in_range(0..=2)?));
                 Ok(())
             }
             _ => {
