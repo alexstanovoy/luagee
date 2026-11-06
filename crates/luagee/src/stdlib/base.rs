@@ -521,23 +521,35 @@ pub(crate) fn compile(
     crate::lua::compile_chunk(vm, source, chunk)
 }
 
-/// Lua's chunk names: `=name` as is, `@file` as the file, anything else as `[string "first line..."]`.
+/// Lua's chunk names as LuaJIT shortens them (`lj_debug_shortname`, with LuaJIT's LUA_IDSIZE of 60): `=name` as is,
+/// `@file` as the file (its last part when long), anything else as `[string "first line..."]`.
 pub(crate) fn chunk_id(name: &[u8]) -> String {
+    const ID_SIZE: usize = 60;
+    // C's strings end at the first NUL.
+    let c_string = |bytes: &[u8]| -> String {
+        let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
+    };
     match name.first() {
-        Some(b'=') | Some(b'@') => {
-            String::from_utf8_lossy(&name[1..name.len().min(60)]).into_owned()
+        Some(b'=') => c_string(&name[1..name.len().min(ID_SIZE)]),
+        Some(b'@') if name.len() > ID_SIZE => {
+            format!("...{}", c_string(&name[name.len() - (ID_SIZE - 4)..]))
         }
+        Some(b'@') => c_string(&name[1..]),
         _ => {
-            let line = name
-                .split(|&c| c == b'\n' || c == b'\r')
-                .next()
-                .unwrap_or(b"");
-            let truncated = line.len() < name.len() || line.len() > 40;
-            let shown = String::from_utf8_lossy(&line[..line.len().min(40)]);
-            if truncated {
-                format!("[string \"{shown}...\"]")
+            // Up to the first control character, and shorter still when that is not the end.
+            let len = name
+                .iter()
+                .take(ID_SIZE - 12)
+                .take_while(|&&c| c >= b' ')
+                .count();
+            if name.get(len).is_none_or(|&c| c == 0) {
+                format!("[string \"{}\"]", c_string(&name[..len]))
             } else {
-                format!("[string \"{shown}\"]")
+                format!(
+                    "[string \"{}...\"]",
+                    c_string(&name[..len.min(ID_SIZE - 15)])
+                )
             }
         }
     }
