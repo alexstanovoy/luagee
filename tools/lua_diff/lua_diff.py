@@ -8,12 +8,15 @@ Run with `python3 -I tools/lua_diff/lua_diff.py ...`; Python 3 standard library 
   gen N SEED OUTDIR       write N random programs OUTDIR/gen_SEED_I.lua (arithmetic, comparison, concatenation,
                           tostring/tonumber, string.format, % and math.floor/fmod over awkward numbers and strings)
 
-Every script runs with an empty temporary directory as its working directory. $LUAJIT overrides the oracle's path.
+Every script runs as NAME.lua from a temporary directory, its working directory, holding a copy of it and of the
+`modules/` folder next to it (what it may `require`): its chunk name is its file name, as the corpus test gives it.
+$LUAJIT overrides the oracle's path.
 A script that exits non-zero or writes to stderr under `record` is an error, so the corpus stays clean.
 """
 
 import os
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,9 +30,13 @@ MAX_OUTPUT_BYTES = 64 << 20
 def run(command, script):
     """Returns (exit status or 'timeout', stdout bytes, stderr bytes)."""
     with tempfile.TemporaryDirectory() as scratch:
+        shutil.copy(script, scratch)
+        modules = script.parent / "modules"
+        if modules.is_dir():
+            shutil.copytree(modules, Path(scratch) / "modules")
         try:
             done = subprocess.run(
-                [*command, str(script.resolve())],
+                [*command, script.name],
                 cwd=scratch,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
