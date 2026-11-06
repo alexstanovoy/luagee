@@ -2,6 +2,8 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use luagee::{Args, Error, GcStress, Keys, Limits, Lua, Value};
 
@@ -27,6 +29,10 @@ fn register(lua: &mut Lua, name: &'static str, callback: luagee::HostFunction) {
 
 #[cfg(not(test))]
 pub fn contracts() {
+    #[cfg(not(target_arch = "wasm32"))]
+    payload_drop_panic_during_script_gc_retires();
+    #[cfg(not(target_arch = "wasm32"))]
+    payload_drop_panic_inside_nested_vm_call_caught_by_the_callback_retires();
     top_level_vm_calls_cannot_bypass_tick_accounting();
     host_table_writes_have_linear_cost_for_a_growing_list();
     saved_argument_contexts_cannot_read_a_later_callback();
@@ -632,4 +638,119 @@ fn a_payload_drop_panic_retires_explicit_collection() {
     assert!(ended.is_err());
     assert!(lua.collect().is_err());
     assert!(lua.exec("after", b"return 71").is_err());
+}
+
+
+#[cfg(not(target_arch = "wasm32"))]
+fn install_panicky(lua: &mut Lua, effects: Rc<Cell<u32>>) {
+    register(lua, "host_panic", Rc::new(|_, _| panic!("probe panic")));
+    register(
+        lua,
+        "swallow",
+        Rc::new(|vm, args| {
+            let function = vm.check_any(args, 0)?;
+            let caught = catch_unwind(AssertUnwindSafe(|| vm.call(function, &[])));
+            assert!(caught.is_err());
+            Ok(0)
+        }),
+    );
+    register(
+        lua,
+        "side_effect",
+        Rc::new(move |_, _| {
+            effects.set(effects.get() + 1);
+            Ok(0)
+        }),
+    );
+}
+
+
+#[cfg(not(target_arch = "wasm32"))]
+fn poke_retired(lua: &mut Lua) {
+    let globals = lua.globals();
+    let poked = catch_unwind(AssertUnwindSafe(|| {
+        let _ = lua.string(b"x");
+        let _ = lua.global("x");
+        let _ = lua.set_global("x", Value::Nil);
+        let _ = lua.load("x", b"return 1");
+        let _ = lua.collect();
+        let _ = lua.pin(Value::Table(globals));
+        let _ = lua.unpin(Value::Table(globals));
+        let _ = lua.userdata(Box::new(1u8), None);
+        let _ = lua.function("f", Rc::new(|_, _| Ok(0)));
+        lua.begin_tick();
+        let _ = lua.exec("x", b"return 1");
+        let vm = lua.vm();
+        let _ = vm.new_table();
+        let _ = vm.raw_get(globals, Value::Number(1.0));
+        let _ = vm.raw_set(globals, Value::Number(1.0), Value::Nil);
+        let _ = vm.raw_set(globals, Value::Nil, Value::Nil);
+        let _ = vm.set_metatable(globals, None);
+        let _ = vm.new_string(b"x");
+        let _ = vm.error("x");
+        let _ = vm.pin(Value::Table(globals));
+        let _ = vm.unpin(Value::Table(globals));
+        let _ = vm.userdata(1u8, None, 0);
+        let _ = vm.results(&[Value::Nil]);
+        let _ = vm.call(Value::Nil, &[]);
+        let _ = vm.charge_fuel(1);
+        let _ = lua.memory();
+        let _ = lua.tick_fuel_left();
+    }));
+    assert!(poked.is_ok(), "a retired interpreter panicked");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(test, test)]
+fn payload_drop_panic_during_script_gc_retires() {
+    struct PanicOnDrop;
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("payload drop");
+        }
+    }
+    let mut lua = interpreter();
+    lua.userdata(Box::new(PanicOnDrop), None).expect("payload");
+    lua.set_gc_stress(GcStress::Full);
+    let ended = catch_unwind(AssertUnwindSafe(|| {
+        lua.exec("gc", b"local t = {} for i = 1, 100 do t[i] = {} end")
+    }));
+    assert!(ended.is_err(), "{ended:?}");
+    assert!(lua.exec("after", b"return 1").is_err());
+    poke_retired(&mut lua);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(test, test)]
+fn payload_drop_panic_inside_nested_vm_call_caught_by_the_callback_retires() {
+    struct PanicOnDrop;
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("payload drop");
+        }
+    }
+    let effects = Rc::new(Cell::new(0));
+    let mut lua = interpreter();
+    install_panicky(&mut lua, effects.clone());
+    register(
+        &mut lua,
+        "bomb",
+        Rc::new(|vm, _| {
+            vm.userdata(PanicOnDrop, None, 0)?;
+            Ok(0)
+        }),
+    );
+    lua.set_gc_stress(GcStress::Full);
+    let ended = catch_unwind(AssertUnwindSafe(|| {
+        lua.exec(
+            "gc",
+            b"swallow(function() bomb() local t = {} for i = 1, 100 do t[i] = {} end end) side_effect() return 1",
+        )
+    }));
+    assert!(
+        matches!(&ended, Ok(Err(Error::Runtime { message, .. })) if message.contains("retired")),
+        "{ended:?}"
+    );
+    assert_eq!(effects.get(), 0);
+    poke_retired(&mut lua);
 }
