@@ -21,6 +21,10 @@ workspace = true
 name = "lua"
 required-features = ["fs"]
 
+[[example]]
+name = "corpus"
+required-features = ["fs"]
+
 [[test]]
 name = "corpus"
 required-features = ["fs"]

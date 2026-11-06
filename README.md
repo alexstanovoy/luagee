@@ -1,7 +1,8 @@
 # luagee
 
 A sandboxed Lua 5.1 interpreter with LuaJIT-compatible extensions, in safe Rust, for running untrusted scripts
-under hard limits. No `unsafe`, no dependencies, and it builds for `wasm32-unknown-unknown`.
+under hard limits. No `unsafe`, no dependencies, and it runs under WebAssembly (`wasm32-unknown-unknown`,
+`wasm32-wasip1`) on one thread and wasm's default stacks: no clock, threads, files or entropy of its own.
 
 ```rust
 use luagee::{Keys, Limits, Lua};
@@ -105,9 +106,14 @@ the same output.
 
 ## Development
 
-`tools/precheck.sh` is the quick loop (clippy, tests); `tools/gate.sh` is the merge gate (adds the wasm32 build, a
-fuzz smoke, `cargo deny`, fmt). `fuzz/fuzz.sh` builds and runs the coverage-guided fuzz targets on stable Rust;
-`tools/bench/bench.py` times luagee against reference interpreters.
+`tools/precheck.sh` is the quick loop (clippy, tests); `tools/gate.sh` is the merge gate (adds the wasm32 build and
+its audit, a fuzz smoke, the corpora under wasm, `cargo deny`, fmt). `fuzz/fuzz.sh` builds and runs the
+coverage-guided fuzz targets on stable Rust; `tools/bench/bench.py` times luagee against reference interpreters.
+
+`tools/wasm.sh corpus` runs the conformance, hostile and fuzz corpora under wasmtime for `wasm32-wasip1`, on one
+thread and less stack than wasm's defaults (`examples/corpus.rs`, which checks what `tests/corpus.rs` checks, for
+any folder of scripts of a kind). Its wasmtime is pinned by version and sha256 and downloaded into
+`temp/`; the Rust target comes from rustup.
 
 ## License
 

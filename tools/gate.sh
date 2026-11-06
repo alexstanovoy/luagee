@@ -7,10 +7,10 @@
 # environment, threads, randomness or files outside the `fs` loader), fuzz-check (the fuzz targets compile), clippy
 # (all targets and features, -D warnings), test (profile test-release: unit tests, the conformance and hostile corpora,
 # the borrowed suites, the sandbox's bounds), wasm (the crate builds for wasm32-unknown-unknown without features,
-# warning-free),
-# fuzz-smoke (every fuzz target at once, GATE_FUZZ_SECONDS each, seeded from the corpora; the differential target
-# against the reference LuaJIT that tools/ref/build.sh builds from pinned sources), deny, then fmt (last: it changes
-# no code).
+# warning-free), fuzz-smoke (every fuzz target at once, GATE_FUZZ_SECONDS each, seeded from the corpora; the
+# differential target against the reference LuaJIT that tools/ref/build.sh builds from pinned sources), wasm-corpus
+# (the corpora and the fuzz corpora under wasmtime for wasm32-wasip1 on one thread, see tools/wasm.sh: it fetches
+# its pinned, checksummed wasmtime and the Rust target when missing), deny, then fmt (last: it changes no code).
 # A step that does not run fails the gate; nothing is skipped quietly.
 # Environment:
 #   GATE_STEP_LOG=FILE   append the seconds each step took to FILE (tab separated)
@@ -47,6 +47,7 @@ step test cargo test --profile test-release --all-features
 # A build, not a check: some lints (a shift past 32 bits) fire only in code generation.
 step wasm env RUSTFLAGS="-D warnings" cargo build --release -p luagee --no-default-features --target wasm32-unknown-unknown
 step fuzz-smoke fuzz/fuzz.sh smoke "${GATE_FUZZ_SECONDS:-20}"
+step wasm-corpus tools/wasm.sh corpus
 step deny cargo deny check
 step fmt cargo fmt --check
 echo "GATE-OK"
