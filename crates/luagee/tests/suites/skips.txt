@@ -24,8 +24,7 @@ skip lua-5.1-tests/closure.lua:409-419 -- debug: debug.setfenv and debug.getfenv
 skip lua-5.1-tests/constructs.lua:189-189 -- debug: debug.getinfo's "n" (luagee reports a function's source and lines only)
 skip lua-5.1-tests/db.lua -- debug: hooks, locals, upvalues and the rest of the debug library
 skip lua-5.1-tests/errors.lua:39-41 -- luajit: LuaJIT accepts empty statements (`;`, `a=1;;`), as Lua 5.2 does
-skip lua-5.1-tests/errors.lua:76-76 -- luajit: LuaJIT names the variable of `(aaa or aaa)()` in its error
-skip lua-5.1-tests/errors.lua:78-87 -- fix: names through jumps
+skip lua-5.1-tests/errors.lua:75-76 -- luajit: LuaJIT names the variable of `(aaa or aaa)` in its errors, which PUC Lua does not
 skip lua-5.1-tests/errors.lua:111-111 -- io: io.stdin
 skip lua-5.1-tests/errors.lua:142-167 -- fix: traceback
 skip lua-5.1-tests/errors.lua:171-172 -- fix: error in error handling

@@ -1734,7 +1734,7 @@ impl Vm {
     }
 
     /// Names the register an error was about (`local 'a'`, `upvalue 'u'`, `global 'x'`, `field 'y'`, `method 'z'`),
-    /// as Lua's messages do: a local active there, else the instruction that last wrote it in straight-line code.
+    /// as LuaJIT's messages do.
     fn name_error(&mut self, error: LuaError, proto: &Proto, pc: usize, register: u8) -> LuaError {
         let LuaError::Runtime {
             value: Value::String(message),
@@ -1744,66 +1744,7 @@ impl Vm {
         else {
             return error;
         };
-        // Naming scans the function's locals for up to 64 instructions: paid as the work it is.
-        let work = 64 * (1 + proto.locals.len() as u64 / 16);
-        self.fuel = self.fuel.saturating_sub(work);
-        let local_name = |register: u8| {
-            proto
-                .locals
-                .iter()
-                .rev()
-                .find(|l| l.register == register && l.start <= pc && pc < l.end)
-                .map(|l| l.name.clone())
-        };
-        let mut name: Option<(&str, Vec<u8>)> =
-            local_name(register).map(|n| ("local", n.into_vec()));
-        if name.is_none() {
-            let constant = |k: usize| match proto.constants[k] {
-                Value::String(s) => Some(self.heap.string(s).to_vec()),
-                _ => None,
-            };
-            for op in proto.code[..pc].iter().rev().take(64) {
-                let (written, described) = match *op {
-                    Op::GetGlobal { a, k } => (a, constant(k as usize).map(|n| ("global", n))),
-                    Op::GetTable { a, key, .. } if key.0 >= Rk::CONSTANT => (
-                        a,
-                        constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("field", n)),
-                    ),
-                    Op::SelfMethod { a, key, .. } if key.0 >= Rk::CONSTANT => (
-                        a,
-                        constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("method", n)),
-                    ),
-                    Op::GetUpvalue { a, upvalue } => (
-                        a,
-                        proto
-                            .upvalue_names
-                            .get(usize::from(upvalue))
-                            .map(|n| ("upvalue", n.to_vec())),
-                    ),
-                    Op::GetCell { a, cell } => {
-                        (a, local_name(cell).map(|n| ("local", n.into_vec())))
-                    }
-                    Op::Move { a, b } => (a, local_name(b).map(|n| ("local", n.into_vec()))),
-                    Op::LoadK { a, .. }
-                    | Op::LoadBool { a, .. }
-                    | Op::GetTable { a, .. }
-                    | Op::SelfMethod { a, .. }
-                    | Op::NewTable { a, .. }
-                    | Op::Arith { a, .. }
-                    | Op::Concat { a, .. } => (a, None),
-                    Op::Jump { .. }
-                    | Op::Call { .. }
-                    | Op::Closure { .. }
-                    | Op::TailCall { .. }
-                    | Op::VarArg { .. } => break,
-                    _ => continue,
-                };
-                if written == register {
-                    name = described;
-                    break;
-                }
-            }
-        }
+        let name = self.register_origin(proto, pc, register);
         let Some((kind, n)) = name else { return error };
         // "attempt to call a nil value" becomes "attempt to call global 'f' (a nil value)".
         let text = self.heap.string(message);
@@ -1824,6 +1765,140 @@ impl Vm {
             },
             Err(e) => e,
         }
+    }
+
+    /// What `register` holds at `pc`, as LuaJIT's `lj_debug_slotname` finds it: the local active there, else what the
+    /// last instruction before `pc` in code order (across jumps, as LuaJIT scans) that wrote it read. A move restarts
+    /// the search from its source; an instruction that leaves the register unnamed, or a call or loop that may have
+    /// changed it, ends the search. Pays fuel for the instructions it scans.
+    fn register_origin(
+        &mut self,
+        proto: &Proto,
+        pc: usize,
+        register: u8,
+    ) -> Option<(&'static str, Vec<u8>)> {
+        let work = (pc as u64 + 1) * (1 + proto.locals.len() as u64 / 16);
+        self.fuel = self.fuel.saturating_sub(work);
+        let local_name = |register: u8, at: usize| {
+            proto
+                .locals
+                .iter()
+                .rev()
+                .find(|l| l.register == register && l.start <= at && at < l.end)
+                .map(|l| l.name.to_vec())
+        };
+        let constant = |k: usize| match proto.constants[k] {
+            Value::String(s) => Some(self.heap.string(s).to_vec()),
+            _ => None,
+        };
+        let key = |key: Rk| {
+            key.0
+                .checked_sub(Rk::CONSTANT)
+                .and_then(|k| constant(usize::from(k)))
+        };
+        let mut register = register;
+        let mut at = pc;
+        if let Some(name) = local_name(register, at) {
+            return Some(("local", name));
+        }
+        while at > 0 {
+            at -= 1;
+            let from = |first: u8| register >= first;
+            match proto.code[at] {
+                Op::Move { a, b } if a == register => {
+                    register = b;
+                    if let Some(name) = local_name(register, at) {
+                        return Some(("local", name));
+                    }
+                }
+                Op::GetGlobal { a, k } if a == register => {
+                    return constant(k as usize).map(|n| ("global", n));
+                }
+                Op::GetTable { a, key: k, .. } if a == register => {
+                    return key(k).map(|n| ("field", n));
+                }
+                Op::SelfMethod { a, key: k, .. } if a == register => {
+                    return key(k).map(|n| ("method", n));
+                }
+                Op::SelfMethod { a, object, .. } if a + 1 == register => {
+                    register = object;
+                    if let Some(name) = local_name(register, at) {
+                        return Some(("local", name));
+                    }
+                }
+                Op::GetUpvalue { a, upvalue } if a == register => {
+                    return proto
+                        .upvalue_names
+                        .get(usize::from(upvalue))
+                        .map(|n| ("upvalue", n.to_vec()));
+                }
+                Op::GetCell { a, cell } if a == register => {
+                    return local_name(cell, at).map(|n| ("local", n));
+                }
+                Op::LoadNil { a, count } if (a..=a.saturating_add(count)).contains(&register) => {
+                    return None;
+                }
+                Op::LoadK { a, .. }
+                | Op::LoadBool { a, .. }
+                | Op::NewCell { a }
+                | Op::NewTable { a, .. }
+                | Op::Arith { a, .. }
+                | Op::Neg { a, .. }
+                | Op::Not { a, .. }
+                | Op::Len { a, .. }
+                | Op::Concat { a, .. }
+                | Op::Closure { a, .. }
+                    if a == register =>
+                {
+                    return None;
+                }
+                Op::Call { func: first, .. }
+                | Op::TailCall { func: first, .. }
+                | Op::VarArg { a: first, .. }
+                | Op::Return { first, .. }
+                | Op::ForPrep { a: first, .. }
+                | Op::ForLoop { a: first, .. }
+                | Op::ForEachLoop { a: first, .. }
+                | Op::SetList { table: first, .. }
+                    if from(first) =>
+                {
+                    return None;
+                }
+                Op::Move { .. }
+                | Op::GetGlobal { .. }
+                | Op::GetTable { .. }
+                | Op::SelfMethod { .. }
+                | Op::GetUpvalue { .. }
+                | Op::GetCell { .. }
+                | Op::LoadNil { .. }
+                | Op::LoadK { .. }
+                | Op::LoadBool { .. }
+                | Op::NewCell { .. }
+                | Op::NewTable { .. }
+                | Op::Arith { .. }
+                | Op::Neg { .. }
+                | Op::Not { .. }
+                | Op::Len { .. }
+                | Op::Concat { .. }
+                | Op::Closure { .. }
+                | Op::Call { .. }
+                | Op::TailCall { .. }
+                | Op::VarArg { .. }
+                | Op::Return { .. }
+                | Op::ForPrep { .. }
+                | Op::ForLoop { .. }
+                | Op::ForEachLoop { .. }
+                | Op::SetList { .. }
+                | Op::SetCell { .. }
+                | Op::SetUpvalue { .. }
+                | Op::SetGlobal { .. }
+                | Op::SetTable { .. }
+                | Op::Jump { .. }
+                | Op::Compare { .. }
+                | Op::Test { .. } => {}
+            }
+        }
+        None
     }
 
     /// Returns `count` values from `first` out of the running frame; true when that frame was a boundary.

@@ -1,0 +1,10 @@
+s:9: attempt to index global 'aaa' (a number value)
+s:1: attempt to call global 'aaa' (a table value)
+s:1: attempt to perform arithmetic on global 'aaa' (a table value)
+s:1: attempt to index local 't' (a nil value)
+s:1: attempt to index local 'u' (a nil value)
+s:1: attempt to index field 'x' (a nil value)
+s:1: attempt to call local 'y' (a nil value)
+s:1: attempt to index local 'z' (a nil value)
+s:1: attempt to perform arithmetic on a table value
+s:1: attempt to call a nil value
