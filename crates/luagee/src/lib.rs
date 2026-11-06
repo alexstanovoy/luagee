@@ -16,7 +16,8 @@
 //!   which a script may catch (every retry pays fuel): "stack overflow", "string length overflow", "pattern too
 //!   complex", "chunk has too many syntax levels";
 //! - Lua calls are frames on the interpreter's heap; Rust recursion (the parser, the compiler, a native function
-//!   calling Lua, the pattern matcher) is bounded, so an interpreter needs a thread with a few megabytes of stack;
+//!   calling Lua, the pattern matcher) is bounded: at the default limits no script makes it use 1 MiB of native stack,
+//!   so it runs on wasm's default stacks, on one thread;
 //! - table keys hash with a seeded SipHash a script never sees, so no script can make its keys collide;
 //! - no IO, no OS, no FFI, no JIT, no bytecode: `load`, `loadstring` and `dofile` take source text only; there is no
 //!   `string.dump`, `newproxy`, `io`, `os`, `ffi` or `jit`, and `debug` has only `traceback` and a `getinfo` that tells

@@ -21,11 +21,11 @@ pub struct Limits {
     /// The Lua calls that may be running at once ("stack overflow"). Calls are frames on the interpreter's heap, never on
     /// the Rust stack.
     pub call_depth: u32,
-    /// How deeply source may nest (parentheses, blocks, table constructors), which bounds the parser's recursion
-    /// ("chunk has too many syntax levels").
+    /// How deeply source may nest (parentheses, blocks, table constructors), which bounds the parser's and the
+    /// compiler's recursion ("chunk has too many syntax levels"): up to 2 KiB of native stack a level.
     pub syntax_depth: u32,
     /// How deeply a string pattern's matcher may recurse (optional items, expansions, captures): "pattern too
-    /// complex".
+    /// complex". Some 0.3 KiB of native stack a level.
     pub pattern_depth: u32,
     /// The bytes of one module's source.
     pub module_size: usize,

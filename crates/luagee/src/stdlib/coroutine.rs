@@ -91,8 +91,8 @@ fn yield_(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         return Err(vm.error("attempt to yield from outside a coroutine"));
     }
     let depth = vm.threads.get(vm.current.0).depth;
-    // The yield must come straight from the coroutine's own loop: one native level above its resume.
-    if vm.native_depth != depth + 2 {
+    // The yield must come straight from the coroutine's own loop: the yield is the one native level above its resume.
+    if vm.native_depth != depth + 1 {
         return Err(vm.error("attempt to yield across a C-call boundary"));
     }
     vm.yielding = true;
@@ -109,7 +109,7 @@ fn running(vm: &mut Vm, _args: Args) -> Result<usize, LuaError> {
 
 fn isyieldable(vm: &mut Vm, _args: Args) -> Result<usize, LuaError> {
     let yieldable =
-        vm.current != vm.main && vm.native_depth == vm.threads.get(vm.current.0).depth + 2;
+        vm.current != vm.main && vm.native_depth == vm.threads.get(vm.current.0).depth + 1;
     vm.results(&[Value::Boolean(yieldable)])
 }
 

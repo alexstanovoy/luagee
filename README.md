@@ -52,9 +52,15 @@ A script is treated as hostile input. Whatever it does, the host keeps running:
 - Running out of fuel or memory, or loading too much source (per module, in all, or too many modules), ends the call
   with `Error::Limit`. No `pcall` catches it, so no script can retry its way past a bound.
 - The other bounds raise Lua's own errors, which scripts may catch: "stack overflow" (Lua calls are frames on the
-  interpreter's heap), "C stack overflow" (native code calling back into Lua nests at most 300 deep), "string length
-  overflow", "pattern too complex", "chunk has too many syntax levels". All Rust recursion is bounded; a few
-  megabytes of thread stack are enough (16 MiB is ample).
+  interpreter's heap), "C stack overflow" (native code calling back into Lua, a metamethod, a library callback or a
+  coroutine resume, nests at most 200 deep, as Lua 5.1's C calls do), "string length overflow", "pattern too
+  complex", "chunk has too many syntax levels".
+- All Rust recursion is bounded, and so is the native stack it takes. At the default limits the most a script can
+  make the interpreter use (`tests/hostile/deepest_native_nesting_*.lua`: native nesting at its bound, then the
+  deepest source and patterns at its top) is under 800 KiB on x86-64; under wasmtime, about 340 KiB of its 512 KiB
+  stack and 340 KiB of the module's 1 MiB stack. The tests check a 1 MiB native stack, and the gate the
+  corpora on three quarters of wasmtime's stack and half the module's. Raising `syntax_depth` or `pattern_depth`
+  takes more: up to 2 KiB of native stack a syntax level, 0.3 KiB a pattern level.
 - Table keys are hashed with a keyed SipHash the script never sees, so no script can choose keys that collide. The
   hash key and `math.random`'s seed are separate, and both come from the host.
 - No IO, OS, FFI, JIT or bytecode: `load`, `loadstring` and `dofile` take source text only. There is no
@@ -73,7 +79,8 @@ line how it must end, and the tests check that it does.
 - A coroutine cannot yield inside a metamethod or a library callback (a `table.sort` comparator, a `gsub` function),
   as in Lua 5.1. Yielding through `pcall` and `xpcall` works.
 - `__mode` and `__gc` have no effect: weak tables hold their entries, and nothing is finalized.
-- Nested coroutine resumes stop at 300 levels ("C stack overflow"); LuaJIT goes deeper.
+- Native code calling back into Lua (metamethods, library callbacks, nested coroutine resumes) stops at 200
+  levels ("C stack overflow"), as in Lua 5.1; LuaJIT runs metamethods as Lua frames and goes deeper.
 - Syntax that only recent LuaJIT builds accept (`//`, `&`, `<<`, `!=`, `+=`) does not parse.
 - Bounds raise errors where LuaJIT would allocate without limit (a 10 GB `string.rep`, for one).
 - Scripts cannot steer the collector: `collectgarbage("stop")`, `"step"` and the tuning options change nothing, and

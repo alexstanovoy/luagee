@@ -14,9 +14,11 @@ use crate::proto::{ArithOp, Capture, CompareOp, Op, Proto, Rk};
 use crate::table::Table;
 use crate::value::{CellId, FuncId, StrId, TableId, ThreadId, Value};
 
-/// How deeply native functions may nest Lua calls ("C stack overflow" past it). Each level is a few kilobytes of
-/// Rust stack, so an interpreter wants a thread with a few megabytes of stack (16 MiB is ample).
-pub(crate) const MAX_NATIVE_DEPTH: u32 = 300;
+/// How deeply native functions may nest Lua calls ("C stack overflow" past it), as Lua 5.1's C calls do. A level
+/// takes up to 1.7 KiB of native stack on x86-64 (under wasm, 1 KiB of wasmtime's stack and 0.6 KiB of the module's
+/// own), so the deepest nesting, with the deepest source and patterns at its top, needs under 800 KiB natively and
+/// two thirds of wasmtime's default stack (`tests/hostile/deepest_native_nesting_*.lua`).
+pub(crate) const MAX_NATIVE_DEPTH: u32 = 200;
 /// How many frames a traceback keeps.
 const TRACEBACK_FRAMES: usize = 16;
 /// The slots of a coroutine's stack, counted as this many bytes each.
@@ -1306,24 +1308,29 @@ impl Vm {
         let boundary = self.frames.iter().rposition(|f| f.boundary).unwrap_or(0);
         loop {
             match self.run() {
-                Err(LuaError::Runtime(thrown)) => {
-                    let Some(at) = self.frames[boundary..]
-                        .iter()
-                        .rposition(|f| f.catch.is_some())
-                    else {
-                        return Err(LuaError::Runtime(thrown));
-                    };
-                    let value = thrown.value;
-                    let frame = self.frames[boundary + at].clone();
-                    let catch = frame.catch.expect("a catching frame");
-                    let value = self.handle(catch.handler, value)?;
-                    self.frames.truncate(boundary + at);
-                    self.stack.truncate(frame.slot);
-                    self.finish_protected(frame.slot - 1, value, catch.want)?;
-                }
+                Err(LuaError::Runtime(thrown)) => self.catch(boundary, thrown)?,
                 other => return other,
             }
         }
+    }
+
+    /// Hands an error to the innermost `pcall` this loop runs (its handler runs first, where the error happened),
+    /// which then returns `false` and the error; with none, the error goes on out. Out of line: every native re-entry
+    /// nests `execute`, and this keeps its frame small.
+    #[inline(never)]
+    fn catch(&mut self, boundary: usize, thrown: Box<Thrown>) -> Result<(), LuaError> {
+        let Some(at) = self.frames[boundary..]
+            .iter()
+            .rposition(|f| f.catch.is_some())
+        else {
+            return Err(LuaError::Runtime(thrown));
+        };
+        let frame = &self.frames[boundary + at];
+        let (slot, catch) = (frame.slot, frame.catch.expect("a catching frame"));
+        let value = self.handle(catch.handler, thrown.value)?;
+        self.frames.truncate(boundary + at);
+        self.stack.truncate(slot);
+        self.finish_protected(slot - 1, value, catch.want)
     }
 
     /// What a failed protected call returns besides `false`: the error, or what the `xpcall` handler made of it. The
@@ -2641,8 +2648,9 @@ impl Vm {
         Ok(results)
     }
 
+    /// Runs the coroutine just switched to. Its loop nests in the native that resumes it (`coroutine.resume`, a
+    /// `wrap` function), whose call counted the level: a resume is one native level, as a metamethod is.
     fn run_coroutine(&mut self, status: ThreadStatus, args: Vec<Value>) -> Result<Exec, LuaError> {
-        self.enter_native()?;
         // The coroutine runs its own instructions: no native of this thread is running in it.
         let caller = std::mem::replace(&mut self.call_site, CallSite::None);
         let result = (|| {
@@ -2690,7 +2698,6 @@ impl Vm {
             self.execute()
         })();
         self.call_site = caller;
-        self.native_depth -= 1;
         result.map_err(|e| self.locate(e, None))
     }
 }
