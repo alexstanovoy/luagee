@@ -1,0 +1,13 @@
+[string "break label"]:1: '<eof>' expected near 'label'
+[string "while true do break print(1) end"]:1: 'end' expected near 'print'
+[string "while true do break ::x:: end"]:1: 'end' expected near '::'
+compiles
+[string "if x then break x() else end"]:1: 'end' expected near 'x'
+compiles
+[string "while true do return 1 print(1) end"]:1: 'end' expected near 'print'
+[string "if x then return 1 print(1) end"]:1: 'end' expected near 'print'
+[string "repeat return 1 x() until y"]:1: 'until' expected near 'x'
+[string "function f() return 1 x() end"]:1: 'end' expected near 'x'
+[string "return 1 x()"]:1: '<eof>' expected near 'x'
+compiles
+compiles

@@ -272,14 +272,20 @@ impl<'a> Parser<'a> {
                 while self.token == Token::Semicolon {
                     self.advance()?;
                 }
-                if !self.block_ends() {
-                    return Err(self.error_near("'<eof>' expected"));
-                }
+                // What closes the block comes next: whoever opened it says what was expected otherwise.
                 block.ret = Some((values, line));
                 break;
             }
             let statement = self.statement()?;
+            let last = matches!(statement, Statement::Break { .. });
             block.statements.push(statement);
+            // In Lua 5.1, as LuaJIT keeps it, `break` ends its block as `return` does.
+            if last {
+                while self.token == Token::Semicolon {
+                    self.advance()?;
+                }
+                break;
+            }
         }
         self.leave();
         Ok(block)
