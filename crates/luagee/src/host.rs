@@ -21,7 +21,7 @@ impl Vm {
     #[must_use]
     pub fn bytes(&self, value: Value) -> Option<&[u8]> {
         match value {
-            Value::String(string) => Some(self.heap.string(string)),
+            Value::String(string) => self.heap.strings.try_get(string.0).map(|string| string.bytes.as_ref()),
             _ => None,
         }
     }
@@ -35,12 +35,17 @@ impl Vm {
     /// A table lookup without metamethods. Both handles must belong to this interpreter and be live.
     pub fn raw_get(&mut self, table: TableId, key: Value) -> Result<Value, LuaError> {
         self.charge_fuel(1)?;
+        self.validate(Value::Table(table))?;
+        self.validate(key)?;
         Ok(self.heap.raw_get(table, key))
     }
 
     /// A table write without metamethods, behind the collector's barrier. Nil and NaN keys raise Lua errors.
     /// Conservatively pays for the table's storage before a possible rehash or hash-to-array migration.
     pub fn raw_set(&mut self, table: TableId, key: Value, value: Value) -> Result<(), LuaError> {
+        self.validate(Value::Table(table))?;
+        self.validate(key)?;
+        self.validate(value)?;
         self.charge_fuel(1 + self.heap.table(table).bytes() as u64 / 16)?;
         self.raw_set_checked(table, key, value)
     }
@@ -53,6 +58,8 @@ impl Vm {
         metatable: Option<TableId>,
     ) -> Result<(), LuaError> {
         self.charge_fuel(1)?;
+        self.validate(Value::Table(table))?;
+        if let Some(meta) = metatable { self.validate(Value::Table(meta))?; }
         self.heap.set_metatable(table, metatable);
         Ok(())
     }
@@ -68,6 +75,7 @@ impl Vm {
         retained_bytes: usize,
     ) -> Result<Value, LuaError> {
         self.charge_fuel(crate::vm::ALLOCATION_FUEL)?;
+        if let Some(meta) = metatable { self.validate(Value::Table(meta))?; }
         let bytes = std::mem::size_of::<T>()
             .checked_add(retained_bytes)
             .ok_or(LuaError::Limit(Limit::Memory))?;
@@ -83,7 +91,7 @@ impl Vm {
     #[must_use]
     pub fn userdata_ref<T: 'static>(&self, value: Value) -> Option<&T> {
         match value {
-            Value::Userdata(id) => self.heap.userdata.get(id.0).data.downcast_ref(),
+            Value::Userdata(id) => self.heap.userdata.try_get(id.0)?.data.downcast_ref(),
             _ => None,
         }
     }
@@ -92,6 +100,7 @@ impl Vm {
     /// Pin callback captures, temporary values and nested results before reentering Lua. Storage is memory charged.
     pub fn pin(&mut self, value: Value) -> Result<(), LuaError> {
         self.charge_fuel(1)?;
+        self.validate(value)?;
         if self.pinned.len() == self.pinned.capacity() {
             let growth = self.pinned.capacity().max(4);
             self.charge_fuel(1 + self.pinned.len() as u64 / 8)?;
@@ -129,6 +138,8 @@ impl Vm {
         let top = self.top;
         let result = (|| {
             self.charge_fuel(1 + args.len() as u64 / crate::vm::VALUES_PER_FUEL as u64)?;
+            self.validate(function)?;
+            for &value in args { self.validate(value)?; }
             self.push(function)?;
             for &value in args {
                 self.push(value)?;
@@ -142,5 +153,19 @@ impl Vm {
         self.stack.truncate(slot);
         self.top = top;
         result
+    }
+
+    /// Rejects collected or reused handles before they enter a script's stack or heap.
+    pub(crate) fn validate(&mut self, value: Value) -> Result<(), LuaError> {
+        let live = match value {
+            Value::Nil | Value::Boolean(_) | Value::Number(_) => true,
+            Value::String(id) => self.heap.strings.try_get(id.0).is_some(),
+            Value::Table(id) => self.heap.tables.try_get(id.0).is_some(),
+            Value::Function(id) => self.heap.functions.try_get(id.0).is_some(),
+            Value::Userdata(id) => self.heap.userdata.try_get(id.0).is_some(),
+            Value::Thread(id) => self.threads.try_get(id.0).is_some(),
+            Value::Cell(id) => self.heap.cells.try_get(id.0).is_some(),
+        };
+        if live { Ok(()) } else { Err(self.error("stale interpreter handle")) }
     }
 }

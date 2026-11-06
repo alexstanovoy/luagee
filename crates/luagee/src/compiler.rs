@@ -330,7 +330,7 @@ struct FunctionState {
     lines: Vec<u32>,
     constants: Vec<Value>,
     numbers: BTreeMap<u64, u32>,
-    strings: BTreeMap<u32, u32>,
+    strings: BTreeMap<u64, u32>,
     nil: Option<u32>,
     booleans: [Option<u32>; 2],
     protos: Vec<Rc<Proto>>,

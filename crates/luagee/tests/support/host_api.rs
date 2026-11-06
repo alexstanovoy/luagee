@@ -34,6 +34,7 @@ fn callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
     let mut methods = argument_callbacks();
     methods.extend(object_callbacks());
     methods.extend(cache_callbacks());
+    methods.extend(unrooted_callbacks());
     methods
 }
 
@@ -204,5 +205,32 @@ fn cache_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
                 Ok(0)
             }),
         ),
+    ]
+}
+
+fn unrooted_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
+    let saved = Rc::new(std::cell::Cell::new(Value::Nil));
+    vec![
+        ("save_unrooted", {
+            let saved = saved.clone();
+            Rc::new(move |vm, args| {
+                saved.set(vm.check_any(args, 0)?);
+                Ok(0)
+            })
+        }),
+        ("read_unrooted", {
+            let saved = saved.clone();
+            Rc::new(move |vm, _| {
+                let value = vm.userdata_ref::<f64>(saved.get()).copied();
+                vm.results(&[value.map_or(Value::Nil, Value::Number)])
+            })
+        }),
+        ("result_unrooted", {
+            let saved = saved.clone();
+            Rc::new(move |vm, _| vm.results(&[saved.get()]))
+        }),
+        ("error_unrooted", Rc::new(move |_, _| {
+            Err(luagee::LuaError::runtime(saved.get(), luagee::Traceback::default(), false))
+        })),
     ]
 }

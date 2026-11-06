@@ -1205,6 +1205,12 @@ impl Vm {
             NativeFn::Builtin(f) => f(self, args),
             NativeFn::Host(f) => f(self, args),
         };
+        let result = match result {
+            Err(LuaError::Runtime(thrown)) if matches!(native, NativeFn::Host(_)) => {
+                self.validate(thrown.value).and(Err(LuaError::Runtime(thrown)))
+            }
+            other => other,
+        };
         self.native_depth -= 1;
         self.call_site = caller;
         let results = result?;

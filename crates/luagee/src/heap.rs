@@ -12,6 +12,9 @@ use crate::table::Table;
 use crate::value::{CellId, FuncId, StrId, TableId, UserdataId, Value};
 use crate::vm::{Args, LuaError, Vm};
 
+#[cfg(test)]
+mod tests;
+
 /// SipHash-1-3, keyed: table keys hash with a key the script never sees, so it cannot pick keys that collide.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct KeyHasher {
@@ -93,6 +96,7 @@ impl KeyHasher {
 struct Slot<T> {
     object: Option<T>,
     marked: bool,
+    generation: u32,
 }
 
 /// The size of an arena slot holding a `T` on this target.
@@ -126,7 +130,7 @@ impl<T> Default for Arena<T> {
 
 impl<T> Arena<T> {
     /// Stores an object.
-    pub(crate) fn insert(&mut self, object: T) -> u32 {
+    pub(crate) fn insert(&mut self, object: T) -> u64 {
         self.objects += 1;
         let i = match self.free.pop() {
             Some(i) => i as usize,
@@ -134,15 +138,19 @@ impl<T> Arena<T> {
                 self.slots.push(Slot {
                     object: None,
                     marked: false,
+                    generation: 0,
                 });
                 self.slots.len() - 1
             }
         };
+        let generation = self.slots[i].generation + 1;
         self.slots[i] = Slot {
             object: Some(object),
             marked: i >= self.swept,
+            generation,
         };
-        u32::try_from(i).expect("an arena holds fewer than 2^32 objects")
+        let index = u32::try_from(i).expect("an arena holds fewer than 2^32 objects");
+        u64::from(generation) << 32 | u64::from(index)
     }
 
     /// The slots the next `insert` adds to the arena's storage (it doubles when full): what to charge before it.
@@ -154,33 +162,46 @@ impl<T> Arena<T> {
         }
     }
 
-    #[inline]
-    pub(crate) fn get(&self, i: u32) -> &T {
-        self.slots[i as usize]
-            .object
-            .as_ref()
-            .expect("a live object")
+    /// A live handle at a trusted slot index (the intern index is maintained with the arena).
+    pub(crate) fn id_at(&self, index: u32) -> u64 {
+        let slot = &self.slots[index as usize];
+        u64::from(slot.generation) << 32 | u64::from(index)
+    }
+
+    pub(crate) fn try_get(&self, id: u64) -> Option<&T> {
+        let slot = self.slots.get(id as u32 as usize)?;
+        (slot.generation == (id >> 32) as u32).then_some(())?;
+        slot.object.as_ref()
+    }
+
+    pub(crate) fn try_get_mut(&mut self, id: u64) -> Option<&mut T> {
+        let slot = self.slots.get_mut(id as u32 as usize)?;
+        (slot.generation == (id >> 32) as u32).then_some(())?;
+        slot.object.as_mut()
     }
 
     #[inline]
-    pub(crate) fn get_mut(&mut self, i: u32) -> &mut T {
-        self.slots[i as usize]
-            .object
-            .as_mut()
-            .expect("a live object")
+    pub(crate) fn get(&self, id: u64) -> &T {
+        self.try_get(id).expect("a live internal handle")
     }
 
-    /// Marks an object; true when it was not marked yet.
-    pub(crate) fn mark(&mut self, i: u32) -> bool {
-        let slot = &mut self.slots[i as usize];
+    #[inline]
+    pub(crate) fn get_mut(&mut self, id: u64) -> &mut T {
+        self.try_get_mut(id).expect("a live internal handle")
+    }
+
+    /// Marks an internal live handle; true when it was not marked yet.
+    pub(crate) fn mark(&mut self, id: u64) -> bool {
+        let slot = &mut self.slots[id as u32 as usize];
+        debug_assert_eq!(slot.generation, (id >> 32) as u32);
         !std::mem::replace(&mut slot.marked, true)
     }
 
-    /// Keeps an object the script reached again through a lookup (an interned string): marked if the sweep has yet
-    /// to reach it, so that it is not freed as the garbage it was a moment ago.
-    pub(crate) fn keep(&mut self, i: u32) {
-        if i as usize >= self.swept {
-            self.slots[i as usize].marked = true;
+    /// Revives an interned string without changing its generation.
+    pub(crate) fn keep(&mut self, id: u64) {
+        let index = id as u32 as usize;
+        if index >= self.swept {
+            self.slots[index].marked = true;
         }
     }
 
@@ -210,7 +231,8 @@ impl<T> Arena<T> {
                 kept += slot.object.as_ref().map_or(0, &size);
             } else if let Some(object) = slot.object.take() {
                 self.objects -= 1;
-                self.free.push(i as u32);
+                // Retire exhausted generations; a stale handle must never become valid again.
+                if slot.generation < u32::MAX { self.free.push(i as u32); }
                 freed(i as u32, object);
             }
         }
@@ -336,7 +358,7 @@ pub(crate) const CELL_SIZE: usize = 24;
 /// The counted size of a userdata object (its host data is the host's).
 pub(crate) const USERDATA_SIZE: usize = 48;
 /// The counted size of a table object beyond its parts.
-pub(crate) const TABLE_SIZE: usize = 88;
+pub(crate) const TABLE_SIZE: usize = 96;
 
 // An object's counted size covers its arena slot on 64-bit targets, the largest, so an empty slot counts as much as
 // the object it held.
@@ -403,7 +425,7 @@ impl Heap {
         while self.intern[slot] != 0 {
             let entry = self.intern[slot];
             if entry >> 32 == hash & 0xffff_ffff {
-                let id = entry as u32 - 1;
+                let id = self.strings.id_at(entry as u32 - 1);
                 let s = self.strings.get(id);
                 if s.hash == hash && *s.bytes == *bytes {
                     self.strings.keep(id);
@@ -433,7 +455,7 @@ impl Heap {
         while self.intern[slot] != 0 {
             slot = (slot + 1) & mask;
         }
-        self.intern[slot] = (hash & 0xffff_ffff) << 32 | u64::from(id + 1);
+        self.intern[slot] = (hash & 0xffff_ffff) << 32 | u64::from(id as u32 + 1);
         self.interned += 1;
         Ok(StrId(id))
     }
@@ -617,10 +639,10 @@ impl Heap {
             Value::String(s) => self.strings.get(s.0).hash,
             Value::Number(n) => self.hasher.number(n),
             Value::Boolean(b) => self.hasher_word(2, u64::from(b)),
-            Value::Table(t) => self.hasher_word(3, u64::from(t.0)),
-            Value::Function(f) => self.hasher_word(4, u64::from(f.0)),
-            Value::Userdata(u) => self.hasher_word(5, u64::from(u.0)),
-            Value::Thread(t) => self.hasher_word(6, u64::from(t.0)),
+            Value::Table(t) => self.hasher_word(3, u64::from(t.0 as u32)),
+            Value::Function(f) => self.hasher_word(4, u64::from(f.0 as u32)),
+            Value::Userdata(u) => self.hasher_word(5, u64::from(u.0 as u32)),
+            Value::Thread(t) => self.hasher_word(6, u64::from(t.0 as u32)),
             Value::Nil | Value::Cell(_) => 0,
         }
     }

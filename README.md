@@ -169,3 +169,11 @@ lua.set_global("echo", echo)?;
 assert_eq!(lua.exec("example", b"return echo(7)")?, vec![Value::Number(7.0)]);
 # Ok::<(), luagee::Error>(())
 ```
+
+### Handle liveness (unreleased fix)
+
+Heap handles carry slot generations. Collecting and reusing an arena slot never
+makes an old handle refer to the replacement. Host reads of expired strings or
+userdata return `None`; writes, roots, calls and result/error ingress return a Lua
+error before a stale handle can enter the interpreter. Handles remain specific to
+the interpreter that created them; do not exchange them between interpreters.

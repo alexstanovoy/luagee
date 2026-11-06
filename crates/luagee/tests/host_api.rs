@@ -31,6 +31,7 @@ pub fn contracts() {
     nested_runtime_errors_can_be_handled_inside_a_callback();
     metatable_writes_and_duplicate_roots_survive_collection();
     deepest_host_reentry_keeps_stack_margin();
+    stale_handles_are_rejected_after_collection_and_slot_reuse();
 }
 
 #[cfg_attr(test, test)]
@@ -312,4 +313,37 @@ fn deepest_host_reentry_keeps_stack_margin() {
         .expect("stack margin");
     #[cfg(target_arch = "wasm32")]
     run();
+}
+
+#[cfg_attr(test, test)]
+fn stale_handles_are_rejected_after_collection_and_slot_reuse() {
+    for stress in [GcStress::Full, GcStress::Incremental] {
+        let mut lua = interpreter(Limits::DEFAULT);
+        let stale_object = lua.vm().userdata(17u64, None, 0).expect("object");
+        let stale_string = lua.vm().new_string(b"unrooted bytes").expect("string");
+        let stale_table = lua.vm().new_table().expect("table");
+        let stale_function = lua.load("old", b"return 1").expect("function");
+        lua.set_gc_stress(stress);
+        lua.collect().expect("frees unrooted handles");
+        lua.begin_tick();
+        let replacement = lua.vm().userdata(29u64, None, 0).expect("replacement");
+        lua.pin(replacement).expect("root");
+        assert_eq!(lua.vm().userdata_ref::<u64>(stale_object), None);
+        assert_eq!(lua.userdata_ref::<u64>(stale_object), None);
+        assert_eq!(lua.vm().bytes(stale_string), None);
+        assert_eq!(lua.bytes(stale_string), None);
+        assert!(lua.pin(stale_object).is_err());
+        assert!(lua.vm().raw_get(stale_table, luagee::Value::Number(1.0)).is_err());
+        assert!(lua.vm().raw_set(stale_table, luagee::Value::Number(1.0), replacement).is_err());
+        assert!(lua.vm().set_metatable(stale_table, None).is_err());
+        assert!(lua.set_global("stale", stale_object).is_err());
+        let live = lua.vm().new_table().expect("live table");
+        assert!(lua.vm().raw_get(live, stale_string).is_err());
+        assert!(lua.vm().raw_set(live, luagee::Value::Number(1.0), stale_object).is_err());
+        assert!(lua.vm().set_metatable(live, Some(stale_table)).is_err());
+        assert!(lua.call(stale_function, &[]).is_err());
+        assert_eq!(lua.vm().userdata_ref::<u64>(replacement), Some(&29));
+        lua.begin_tick();
+        lua.exec("stale_callback", include_bytes!("host_api/stale_handles.lua")).expect("stale callback handles rejected");
+    }
 }

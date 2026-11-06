@@ -132,6 +132,9 @@ impl Lua {
         };
         let slot = vm.stack.len();
         let result = (|| {
+            vm.charge_fuel(1 + args.len() as u64 / crate::vm::VALUES_PER_FUEL as u64)?;
+            vm.validate(function)?;
+            for &value in args { vm.validate(value)?; }
             vm.push(function)?;
             for &arg in args {
                 vm.push(arg)?;
@@ -182,10 +185,7 @@ impl Lua {
     /// A string value's bytes.
     #[must_use]
     pub fn bytes(&self, value: Value) -> Option<&[u8]> {
-        match value {
-            Value::String(s) => Some(self.vm.heap.string(s)),
-            _ => None,
-        }
+        self.vm.bytes(value)
     }
 
     /// The globals table.
@@ -204,7 +204,7 @@ impl Lua {
     /// `globals[name] = value`, without metamethods.
     pub fn set_global(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let vm = &mut self.vm;
-        vm.set_field(vm.globals, name, value)
+        vm.validate(value).and_then(|()| vm.set_field(vm.globals, name, value))
             .map_err(|e| to_error(&mut Some(vm), e))
     }
 
@@ -230,6 +230,7 @@ impl Lua {
         metatable: Option<TableId>,
     ) -> Result<Value, Error> {
         let vm = &mut self.vm;
+        if let Some(meta) = metatable { vm.validate(Value::Table(meta)).map_err(|e| to_error(&mut Some(vm), e))?; }
         let id = vm
             .heap
             .new_userdata(data, metatable)
@@ -240,10 +241,7 @@ impl Lua {
     /// The host data of a userdata value, if it is one of type `T`.
     #[must_use]
     pub fn userdata_ref<T: 'static>(&self, value: Value) -> Option<&T> {
-        match value {
-            Value::Userdata(u) => self.vm.heap.userdata.get(u.0).data.downcast_ref(),
-            _ => None,
-        }
+        self.vm.userdata_ref(value)
     }
 
     /// The bytes the interpreter holds, as it counts them.
