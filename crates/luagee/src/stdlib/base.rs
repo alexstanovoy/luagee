@@ -73,11 +73,7 @@ fn assert(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         Value::Nil if args.count < 2 => b"assertion failed!".to_vec(),
         // Any other message is raised as it is, as LuaJIT does.
         other => {
-            return Err(LuaError::Runtime {
-                value: other,
-                traceback: vm.traceback(),
-                located: true,
-            });
+            return Err(LuaError::runtime(other, vm.traceback(), true));
         }
     };
     let error = vm.error(message);
@@ -149,11 +145,7 @@ fn error(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         }
         _ => value,
     };
-    Err(LuaError::Runtime {
-        value,
-        traceback: vm.traceback(),
-        located: true,
-    })
+    Err(LuaError::runtime(value, vm.traceback(), true))
 }
 
 /// The function at a `getfenv`/`setfenv` level (1: the caller), or None for level 0 (the thread's globals).

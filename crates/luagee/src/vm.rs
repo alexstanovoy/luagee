@@ -30,16 +30,39 @@ const _: () = assert!(crate::heap::slot_size::<ThreadState>() <= THREAD_BYTES);
 /// Why a call ended early, inside the interpreter: what host functions return to raise an error.
 #[derive(Clone, Debug)]
 pub enum LuaError {
-    /// A Lua error, catchable by `pcall`.
-    Runtime {
-        value: Value,
-        traceback: Traceback,
-        /// Whether the error position is already in the message (or must not be added).
-        located: bool,
-    },
+    /// A Lua error, catchable by `pcall`. Boxed: every `Result` the interpreter returns carries an error's size, and
+    /// the dispatch loop, which native calls back into Lua nest, holds dozens of them; a small error keeps that
+    /// nesting cheap on a small native stack (wasm's).
+    Runtime(Box<Thrown>),
     /// A limit was crossed: nothing in the script can catch it.
     Limit(Limit),
 }
+
+/// A Lua error on its way to the `pcall` that catches it, or to the host.
+#[derive(Clone, Debug)]
+pub struct Thrown {
+    /// The error value.
+    pub value: Value,
+    /// Where the Lua calls stood when it was raised.
+    pub traceback: Traceback,
+    /// Whether the error position is already in the message (or must not be added).
+    pub located: bool,
+}
+
+impl LuaError {
+    /// A Lua error with this value.
+    pub fn runtime(value: Value, traceback: Traceback, located: bool) -> LuaError {
+        LuaError::Runtime(Box::new(Thrown {
+            value,
+            traceback,
+            located,
+        }))
+    }
+}
+
+// The error stays two words, so that a `Result<Value, LuaError>` stays three.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<LuaError>() <= 16);
 
 /// Where the Lua calls running at an error stood, innermost first: kept as functions and instruction indexes, and
 /// turned into text only when the error reaches the host (most errors are caught and never shown).
@@ -392,11 +415,7 @@ impl Vm {
     /// A runtime error with a message; the position of the running Lua code is added where it is raised.
     pub fn error(&mut self, message: impl AsRef<[u8]>) -> LuaError {
         match self.heap.intern(message.as_ref()) {
-            Ok(s) => LuaError::Runtime {
-                value: Value::String(s),
-                traceback: Traceback::default(),
-                located: false,
-            },
+            Ok(s) => LuaError::runtime(Value::String(s), Traceback::default(), false),
             Err(e) => e,
         }
     }
@@ -425,13 +444,9 @@ impl Vm {
 
     /// Adds the position (of the running frame at `pc`, else its saved pc) and a traceback to an error not located yet.
     pub(crate) fn locate(&mut self, error: LuaError, pc: Option<usize>) -> LuaError {
-        let LuaError::Runtime {
-            value,
-            located: false,
-            ..
-        } = error
-        else {
-            return error;
+        let value = match &error {
+            LuaError::Runtime(thrown) if !thrown.located => thrown.value,
+            _ => return error,
         };
         let mut traceback = self.traceback();
         if let (Some(pc), Some((_, at))) = (pc, traceback.0.first_mut()) {
@@ -450,11 +465,7 @@ impl Vm {
             }
             (value, _) => value,
         };
-        LuaError::Runtime {
-            value,
-            traceback,
-            located: true,
-        }
+        LuaError::runtime(value, traceback, true)
     }
 
     /// Locates an error a tail-called native raised: at its caller's caller, whose call made the frame now gone; with
@@ -465,13 +476,9 @@ impl Vm {
         if !lua_caller || self.frames.len() < 2 {
             return self.locate_nowhere(error);
         }
-        let LuaError::Runtime {
-            value,
-            located: false,
-            ..
-        } = error
-        else {
-            return error;
+        let value = match &error {
+            LuaError::Runtime(thrown) if !thrown.located => thrown.value,
+            _ => return error,
         };
         let caller = &self.frames[self.frames.len() - 2];
         let value = match value {
@@ -487,21 +494,13 @@ impl Vm {
             }
             value => value,
         };
-        LuaError::Runtime {
-            value,
-            traceback: self.traceback(),
-            located: true,
-        }
+        LuaError::runtime(value, self.traceback(), true)
     }
 
     /// Marks an error as located without adding a position (raised by a native that no Lua code called directly).
     pub(crate) fn locate_nowhere(&mut self, error: LuaError) -> LuaError {
         match error {
-            LuaError::Runtime { value, .. } => LuaError::Runtime {
-                value,
-                traceback: self.traceback(),
-                located: true,
-            },
+            LuaError::Runtime(thrown) => LuaError::runtime(thrown.value, self.traceback(), true),
             other => other,
         }
     }
@@ -1307,21 +1306,14 @@ impl Vm {
         let boundary = self.frames.iter().rposition(|f| f.boundary).unwrap_or(0);
         loop {
             match self.run() {
-                Err(LuaError::Runtime {
-                    value,
-                    traceback,
-                    located,
-                }) => {
+                Err(LuaError::Runtime(thrown)) => {
                     let Some(at) = self.frames[boundary..]
                         .iter()
                         .rposition(|f| f.catch.is_some())
                     else {
-                        return Err(LuaError::Runtime {
-                            value,
-                            traceback,
-                            located,
-                        });
+                        return Err(LuaError::Runtime(thrown));
                     };
+                    let value = thrown.value;
                     let frame = self.frames[boundary + at].clone();
                     let catch = frame.catch.expect("a catching frame");
                     let value = self.handle(catch.handler, value)?;
@@ -1368,8 +1360,8 @@ impl Vm {
         let stack = self.stack.len();
         match f(self) {
             Ok(value) => Ok(Ok(value)),
-            Err(LuaError::Runtime { value, .. }) => {
-                let value = self.handle(handler, value);
+            Err(LuaError::Runtime(thrown)) => {
+                let value = self.handle(handler, thrown.value);
                 self.frames.truncate(depth);
                 self.native_depth = native_depth;
                 self.stack.truncate(stack);
@@ -2139,13 +2131,12 @@ impl Vm {
     /// Names the register an error was about (`local 'a'`, `upvalue 'u'`, `global 'x'`, `field 'y'`, `method 'z'`),
     /// as Lua's messages do.
     fn name_error(&mut self, error: LuaError, proto: &Proto, pc: usize, register: u8) -> LuaError {
-        let LuaError::Runtime {
-            value: Value::String(message),
-            located: false,
-            ..
-        } = error
-        else {
-            return error;
+        let message = match &error {
+            LuaError::Runtime(thrown) if !thrown.located => match thrown.value {
+                Value::String(message) => message,
+                _ => return error,
+            },
+            _ => return error,
         };
         let Some((kind, n)) = self.describe_register(proto, pc, register) else {
             return error;
@@ -2162,11 +2153,7 @@ impl Vm {
         rewritten.extend_from_slice(&text[article + 1..]);
         rewritten.push(b')');
         match self.heap.intern(&rewritten) {
-            Ok(s) => LuaError::Runtime {
-                value: Value::String(s),
-                traceback: Traceback::default(),
-                located: false,
-            },
+            Ok(s) => LuaError::runtime(Value::String(s), Traceback::default(), false),
             Err(e) => e,
         }
     }
@@ -2636,9 +2623,9 @@ impl Vm {
                 self.frames.clear();
                 (Ok(values), ThreadStatus::Dead)
             }
-            Err(LuaError::Runtime { value, .. }) => {
+            Err(LuaError::Runtime(thrown)) => {
                 self.frames.clear();
-                (Err(value), ThreadStatus::Dead)
+                (Err(thrown.value), ThreadStatus::Dead)
             }
             Err(limit @ LuaError::Limit(_)) => {
                 self.frames.clear();

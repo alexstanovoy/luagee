@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::heap::{Function, NativeFn};
 use crate::parser::ParseError;
 use crate::value::{StrId, TableId, Value};
-use crate::vm::{LuaError, PrintSink, Vm};
+use crate::vm::{LuaError, PrintSink, Thrown, Vm};
 use crate::{Error, Limit, Limits};
 
 /// A host function: it reads its arguments with [`Vm`]'s accessors and pushes its results, returning their count.
@@ -276,9 +276,10 @@ fn line_of(message: &str) -> u32 {
 fn to_error(vm: &mut Option<&mut Vm>, error: LuaError) -> Error {
     match error {
         LuaError::Limit(limit) => Error::Limit(limit),
-        LuaError::Runtime {
-            value, traceback, ..
-        } => {
+        LuaError::Runtime(thrown) => {
+            let Thrown {
+                value, traceback, ..
+            } = *thrown;
             let message = match (vm, value) {
                 (Some(vm), Value::String(s)) => text(vm, s),
                 (Some(vm), Value::Number(n)) => {

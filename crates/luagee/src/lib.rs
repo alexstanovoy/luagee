@@ -86,4 +86,4 @@ pub use loader::Loader;
 pub use lua::{HostFunction, Keys, Lua};
 pub use module_name::{ModuleName, ModuleNameError};
 pub use value::{FuncId, StrId, TableId, ThreadId, UserdataId, Value};
-pub use vm::{Args, GcStress, LuaError, PrintSink, Traceback, Vm};
+pub use vm::{Args, GcStress, LuaError, PrintSink, Thrown, Traceback, Vm};

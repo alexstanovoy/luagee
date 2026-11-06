@@ -71,11 +71,7 @@ fn wrap_step(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                 }
                 _ => error,
             };
-            Err(LuaError::Runtime {
-                value,
-                traceback: vm.traceback(),
-                located: true,
-            })
+            Err(LuaError::runtime(value, vm.traceback(), true))
         }
     }
 }
