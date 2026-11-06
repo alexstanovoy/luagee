@@ -3,7 +3,7 @@
 use crate::heap::Function;
 use crate::table::InvalidKey;
 use crate::value::{StrId, TableId, Value};
-use crate::vm::{Args, Caller, LuaError, Vm};
+use crate::vm::{Args, LuaError, Vm};
 use crate::{Limit, ModuleName};
 
 /// The most values a library function returns or unpacks at once (Lua 5.1's C stack limit).
@@ -68,6 +68,8 @@ fn assert(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     }
     let message = match vm.arg(args, 1) {
         Value::String(s) => vm.heap.string(s).to_vec(),
+        // A number message is raised as its text, with a position, as LuaJIT does.
+        Value::Number(n) => crate::number::format(n).into_bytes(),
         Value::Nil if args.count < 2 => b"assertion failed!".to_vec(),
         // Any other message is raised as it is, as LuaJIT does.
         other => {
@@ -79,9 +81,10 @@ fn assert(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         }
     };
     let error = vm.error(message);
-    Err(match vm.caller {
-        Caller::Native => vm.locate_nowhere(error),
-        Caller::Lua | Caller::Tail => error,
+    Err(if vm.call_site.is_from_lua() {
+        error
+    } else {
+        vm.locate_nowhere(error)
     })
 }
 
@@ -121,18 +124,28 @@ fn gcinfo(vm: &mut Vm, _args: Args) -> Result<usize, LuaError> {
 fn error(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let value = vm.arg(args, 0);
     let level = vm.opt_integer(args, 1, 1)?;
-    // Level 1 is the function that called `error`; when that was a native (`pcall(error, ...)`), it has no position,
-    // and a tail call's caller is the function below it.
-    let level = match vm.caller {
-        Caller::Lua => level,
-        Caller::Native => level - 1,
-        Caller::Tail => level.saturating_add(1),
-    };
+    // A number is a message too: raised as its text, with the position (Lua 5.1's `lua_isstring`). Level 1 is the
+    // function that called `error`.
     let value = match value {
-        Value::String(s) if level > 0 => {
-            let mut text = vm.where_(level as usize);
-            text.extend_from_slice(vm.heap.string(s));
-            vm.new_string(&text)?
+        Value::String(_) | Value::Number(_) if level > 0 => {
+            let position = vm.native_where(level);
+            match value {
+                Value::String(_) if position.is_empty() => value,
+                _ => {
+                    let mut text = position;
+                    match value {
+                        Value::String(s) => {
+                            vm.charge_fuel(vm.heap.string(s).len() as u64 / 16)?;
+                            text.extend_from_slice(vm.heap.string(s));
+                        }
+                        Value::Number(n) => {
+                            text.extend_from_slice(crate::number::format(n).as_bytes())
+                        }
+                        _ => unreachable!("a string or a number"),
+                    }
+                    vm.new_string(&text)?
+                }
+            }
         }
         _ => value,
     };
@@ -269,6 +282,8 @@ fn next(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 }
 
 fn pairs(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
+    // LuaJIT asks for any value first, then for a table.
+    vm.check_any(args, 0)?;
     let table = vm.check_table(args, 0)?;
     let next_value = vm.get_field(vm.globals, "next")?;
     let next_value = match next_value {
@@ -393,10 +408,11 @@ fn tonumber(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         let n = vm.coerce_number(value).map_or(Value::Nil, Value::Number);
         return vm.results(&[n]);
     }
+    // LuaJIT asks for the string before it checks the base.
+    let s = vm.check_string(args, 0)?;
     if !(2..=36).contains(&base) {
         return Err(vm.arg_error(args, 1, "base out of range"));
     }
-    let s = vm.check_string(args, 0)?;
     vm.charge_fuel(vm.heap.string(s).len() as u64 / 16)?;
     let text = vm.heap.string(s);
     let result = parse_in_base(text, base as u32).map_or(Value::Nil, Value::Number);

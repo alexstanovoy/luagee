@@ -24,7 +24,9 @@ Lua 5.1 with the extensions LuaJIT 2.1 adds to it, as a long-lived LuaJIT 2.1 bu
   `table.getn`, `foreach`, `foreachi`, `maxn`, `table.new` and `table.clear` (from `require`), `coroutine.isyieldable`,
   and a coroutine may yield through `pcall` and `xpcall`;
 - LuaJIT's wording of error messages, including the names of the variables involved (`attempt to call global 'f'
-  (a nil value)`).
+  (a nil value)`), a library function named as its caller referred to it (`local tinsert = table.insert` makes
+  `bad argument #1 to 'tinsert'`), and LuaJIT's positions for tail calls (a function's `return f(x)` frame is gone,
+  so errors in `f` report from its caller's caller).
 
 The conformance corpus (`crates/luagee/tests/conformance`) holds scripts with the output LuaJIT 2.1 prints for them;
 luagee prints the same, byte for byte. `tools/lua_diff/lua_diff.py` re-records them from a LuaJIT build and compares

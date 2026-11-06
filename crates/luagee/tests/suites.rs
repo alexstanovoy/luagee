@@ -301,7 +301,10 @@ fn lines_named(error: &Error, chunk: &str) -> Vec<u32> {
     };
     match error {
         Error::Syntax { chunk: c, line, .. } if c == chunk => vec![*line],
-        Error::Runtime { message, traceback } => std::iter::once(message.as_str())
+        // A message may carry several positions in front (`coroutine.wrap` adds its caller's): any of them counts.
+        Error::Runtime { message, traceback } => message
+            .match_indices(chunk)
+            .map(|(i, _)| &message[i..])
             .chain(traceback.iter().map(String::as_str))
             .filter_map(at)
             .collect(),

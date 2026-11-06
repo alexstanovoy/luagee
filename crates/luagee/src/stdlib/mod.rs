@@ -124,19 +124,21 @@ impl Vm {
         Ok(table)
     }
 
-    /// An error about the running native's argument `i` (from 0), worded as LuaJIT's: the native is named as its
-    /// caller's call names it (`'?'` when no Lua call does), and a method call does not count `self`.
-    pub(crate) fn arg_error(&mut self, args: Args, i: usize, message: &str) -> LuaError {
-        let site = self.call_site(args);
-        let name = site
-            .as_ref()
-            .map_or_else(|| "?".to_owned(), |(_, n)| crate::shown(n));
-        let message = match site {
-            Some(("method", _)) if i == 0 => format!("calling '{name}' on bad self ({message})"),
-            Some(("method", _)) => format!("bad argument #{i} to '{name}' ({message})"),
-            _ => format!("bad argument #{} to '{name}' ({message})", i + 1),
+    /// The name a native error message gives the running function.
+    /// "bad argument #i to 'name' (message)", the function named as its caller named it. Called as a method, the
+    /// object is argument 0: a bad one is "calling 'name' on bad self".
+    pub(crate) fn arg_error(&mut self, _args: Args, i: usize, message: &str) -> LuaError {
+        let (kind, name) = match self.callee() {
+            Some((kind, name)) => (kind, crate::shown(&name)),
+            None => ("", "?".to_owned()),
         };
-        self.error(message)
+        if kind == "method" {
+            if i == 0 {
+                return self.error(format!("calling '{name}' on bad self ({message})"));
+            }
+            return self.error(format!("bad argument #{i} to '{name}' ({message})"));
+        }
+        self.error(format!("bad argument #{} to '{name}' ({message})", i + 1))
     }
 
     fn type_name_of_arg(&self, args: Args, i: usize) -> &'static str {
