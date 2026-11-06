@@ -723,7 +723,8 @@ fn module(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let name_bytes = vm.heap.string(name).to_vec();
     let existing = vm.heap.raw_get(vm.loaded, Value::String(name));
     let table = match existing {
-        Value::Table(t) => t,
+        // The loaded table itself is require's mark of a module still loading, not a module.
+        Value::Table(t) if t != vm.loaded => t,
         _ => {
             // Find or make the nested tables of `a.b.c` in the globals.
             let mut table = vm.globals;
