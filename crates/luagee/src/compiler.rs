@@ -21,10 +21,10 @@ type Compile<T> = Result<T, ParseError>;
 
 /// The registers a function may use (Lua 5.1's limit is 250).
 const MAX_REGISTERS: u32 = 250;
-/// The locals a function may have active at once (Lua 5.1's limit).
+/// The locals a function may have active at once (LuaJIT's and Lua 5.1's limit).
 const MAX_LOCALS: usize = 200;
-/// The upvalues a function may have.
-const MAX_UPVALUES: usize = 255;
+/// The upvalues a function may have (LuaJIT's limit).
+const MAX_UPVALUES: usize = 60;
 /// Values a table constructor stores per `SetList`.
 const FIELDS_PER_FLUSH: u32 = 50;
 
@@ -339,7 +339,10 @@ struct FunctionState {
     blocks: Vec<BlockState>,
     free: u32,
     registers: u32,
+    /// The line being compiled.
     line: u32,
+    /// The line the function begins on; 0 for the main chunk.
+    defined: u32,
     vararg: bool,
 }
 
@@ -534,12 +537,21 @@ impl Compiler<'_> {
 
     // --- variables -------------------------------------------------------------------------------------------
 
+    /// A function past one of LuaJIT's limits, as LuaJIT says it: on the line being compiled.
+    fn limit(&self, function: usize, limit: usize, what: &str) -> ParseError {
+        let line = self.functions.last().expect("a function").line;
+        let message = match self.functions[function].defined {
+            0 => format!("main function has more than {limit} {what}"),
+            defined => format!("function at line {defined} has more than {limit} {what}"),
+        };
+        self.syntax(line, message)
+    }
+
     fn declare_local(&mut self, name: Name, register: u8) -> Compile<bool> {
         let captured = self.captured[self.declared];
         self.declared += 1;
-        let line = self.f().line;
         if self.f().locals.len() >= MAX_LOCALS {
-            return Err(self.syntax(line, "too many local variables"));
+            return Err(self.limit(self.functions.len() - 1, MAX_LOCALS, "local variables"));
         }
         let f = self.f();
         let info = f.infos.len();
@@ -605,11 +617,10 @@ impl Compiler<'_> {
         } else {
             return Ok(None);
         };
-        let line = self.functions[function].line;
-        let f = &mut self.functions[function];
-        if f.captures.len() >= MAX_UPVALUES {
-            return Err(self.syntax(line, "function has more than 255 upvalues"));
+        if self.functions[function].captures.len() >= MAX_UPVALUES {
+            return Err(self.limit(function, MAX_UPVALUES, "upvalues"));
         }
+        let f = &mut self.functions[function];
         f.captures.push(capture);
         f.upvalue_names.push(name.clone());
         Ok(Some((f.captures.len() - 1) as u8))
@@ -643,10 +654,11 @@ impl Compiler<'_> {
             free: 0,
             registers: 2,
             line,
+            defined: line,
             vararg,
         });
         if params.len() > MAX_LOCALS {
-            return Err(self.syntax(line, "too many local variables"));
+            return Err(self.limit(self.functions.len() - 1, MAX_LOCALS, "local variables"));
         }
         let first = self.alloc(params.len() as u32)?;
         for (i, param) in params.iter().enumerate() {
