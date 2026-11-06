@@ -17,7 +17,6 @@ skip lua-5.1-tests/calls.lua:241-241 -- fix: getinfo source
 skip lua-5.1-tests/calls.lua:243-243 -- dump: string.dump
 skip lua-5.1-tests/calls.lua:245-246 -- dump: loads the dump of line 243
 skip lua-5.1-tests/calls.lua:248-250 -- known: load calls its reader until the end of the source before it compiles, so a syntax error does not stop the reading early
-skip lua-5.1-tests/calls.lua:252-253 -- fix: load catches reader errors
 skip lua-5.1-tests/calls.lua:270-285 -- dump: string.dump, and debug.setupvalue
 omit lua-5.1-tests/closure.lua:26-29 -- gc: waits for a weak table to lose its entry, which in luagee it never does (weak tables hold their entries)
 skip lua-5.1-tests/closure.lua:332-332 -- gc: a weak table losing its entry

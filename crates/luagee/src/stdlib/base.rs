@@ -579,7 +579,11 @@ fn load(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         Value::Function(_) => {
             let mut source = Vec::new();
             loop {
-                let piece = vm.call_meta(chunk, &[])?;
+                // An error in the reader is load's failure, as in LuaJIT: nil and the error.
+                let piece = match vm.protect(|vm| vm.call_meta(chunk, &[]))? {
+                    Ok(piece) => piece,
+                    Err(error) => return vm.results(&[Value::Nil, error]),
+                };
                 match piece {
                     Value::Nil => break,
                     Value::String(s) => {
@@ -593,7 +597,9 @@ fn load(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                         source.extend_from_slice(bytes);
                     }
                     _ => {
-                        let message = vm.new_string(b"reader function must return a string")?;
+                        let mut message = vm.where_(1);
+                        message.extend_from_slice(b"reader function must return a string");
+                        let message = vm.new_string(&message)?;
                         return vm.results(&[Value::Nil, message]);
                     }
                 }

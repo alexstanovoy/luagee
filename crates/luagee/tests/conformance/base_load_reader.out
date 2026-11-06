@@ -1,0 +1,6 @@
+nil	string	base_load_reader.lua:6: hhi
+nil	table	false
+nil	nil	true
+nil	string	second
+nil	string	base_load_reader.lua:11: reader function must return a string
+3
