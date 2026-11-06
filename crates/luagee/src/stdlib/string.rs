@@ -442,11 +442,12 @@ fn add_value(
             while i < r.len() {
                 let c = r[i];
                 i += 1;
-                if c != b'%' || i >= r.len() {
+                if c != b'%' {
                     out.push(c);
                     continue;
                 }
-                let d = r[i];
+                // A `%` that ends the replacement stands for the NUL that ends C's string, as in LuaJIT.
+                let d = r.get(i).copied().unwrap_or(0);
                 i += 1;
                 if d.is_ascii_digit() {
                     let index = usize::from(d - b'0');

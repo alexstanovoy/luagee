@@ -75,7 +75,7 @@ omit luau-conformance/closure.luau:30-33 -- gc: waits for a weak table to lose i
 skip luau-conformance/constructs.luau:240-253 -- luau: continue
 skip luau-conformance/iter_fenv.luau -- luau: Luau's message for iterating over a string ("attempt to iterate over a string value")
 skip luau-conformance/pm.luau:40-40 -- luau: %g, Lua 5.2's class of printable characters
-skip luau-conformance/pm.luau:271-271 -- fix: gsub trailing percent
+skip luau-conformance/pm.luau:271-271 -- luau: Luau, as Lua 5.2, rejects a % that ends a gsub replacement; LuaJIT adds a NUL there
 skip luau-conformance/pm.luau:347-348 -- luau: Lua 5.2's message for %b without its arguments; LuaJIT's is "unbalanced pattern"
 skip luau-conformance/strconv.luau:18-18 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
 skip luau-conformance/strconv.luau:24-24 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
