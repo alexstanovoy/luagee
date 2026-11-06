@@ -53,11 +53,30 @@ fn wrap_step(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let values: Vec<Value> = (0..args.count).map(|i| vm.arg(args, i)).collect();
     match vm.resume(co, values)? {
         Ok(results) => vm.results(&results),
-        Err(error) => Err(LuaError::Runtime {
-            value: error,
-            traceback: vm.traceback(),
-            located: true,
-        }),
+        Err(error) => {
+            // A string (or number) error gets the position of the wrapper's caller in front, as Lua 5.1's does.
+            let position = vm.native_where(1);
+            let value = match error {
+                Value::String(_) if position.is_empty() => error,
+                Value::String(s) => {
+                    vm.charge_fuel(vm.heap.string(s).len() as u64 / 16)?;
+                    let mut text = position;
+                    text.extend_from_slice(vm.heap.string(s));
+                    vm.new_string(&text)?
+                }
+                Value::Number(n) => {
+                    let mut text = position;
+                    text.extend_from_slice(crate::number::format(n).as_bytes());
+                    vm.new_string(&text)?
+                }
+                _ => error,
+            };
+            Err(LuaError::Runtime {
+                value,
+                traceback: vm.traceback(),
+                located: true,
+            })
+        }
     }
 }
 

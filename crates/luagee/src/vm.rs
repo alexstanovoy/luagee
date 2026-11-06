@@ -80,6 +80,9 @@ pub(crate) struct Frame {
     pub(crate) boundary: bool,
     /// Set when this frame is the function a `pcall` or `xpcall` runs: errors below it stop here.
     pub(crate) catch: Option<Catch>,
+    /// Set when an instruction of the frame below set this function off as a metamethod handler: though entered
+    /// from Rust (a boundary), it is called from Lua code, which is where its errors at level 2 point.
+    pub(crate) metamethod: Option<&'static str>,
 }
 
 /// A `pcall` or `xpcall` waiting on its function's frame: its handler (nil for `pcall`) and the results its caller
@@ -157,6 +160,32 @@ pub(crate) enum Protected {
     Yielded,
 }
 
+/// How the running native was called: what its argument errors name it, and where its errors say it was called.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallSite {
+    /// No native runs: Lua code runs its instructions.
+    None,
+    /// By a call instruction of the running Lua function, of the function in this register.
+    Call { register: u8 },
+    /// By a tail call of the running Lua function. As in LuaJIT, the function that made the call is gone: the native
+    /// reports from that function's caller.
+    Tail,
+    /// As the handler of a metamethod an instruction of the running Lua function set off.
+    Meta { event: &'static str },
+    /// By another native.
+    Native,
+}
+
+impl CallSite {
+    /// Whether Lua code called the native (so its errors have a position).
+    pub(crate) fn is_from_lua(self) -> bool {
+        matches!(
+            self,
+            CallSite::Call { .. } | CallSite::Tail | CallSite::Meta { .. }
+        )
+    }
+}
+
 /// The collector's test modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcStress {
@@ -232,8 +261,8 @@ pub struct Vm {
     pub(crate) fuel_limit: Limit,
     pub(crate) tick_fuel: u64,
     pub(crate) native_depth: u32,
-    /// Whether the running native was called straight from Lua code (so `error`'s level 1 has a position).
-    pub(crate) lua_caller: bool,
+    /// How the running native was called.
+    pub(crate) call_site: CallSite,
     pub(crate) yielding: bool,
     pub(crate) gc_threshold: usize,
     pub(crate) gc_epoch: u64,
@@ -275,6 +304,14 @@ fn function_bytes(function: &Function) -> usize {
 
 /// The smallest collection threshold.
 const MIN_THRESHOLD: usize = 1 << 20;
+
+/// Saves the running frame's position before an instruction's slow path, which may run a metamethod: what that
+/// metamethod's `error(message, 2)` and a native's messages report.
+macro_rules! save_pc {
+    ($vm:ident, $pc:expr) => {
+        $vm.frames.last_mut().expect("a running frame").pc = $pc
+    };
+}
 
 macro_rules! located {
     ($vm:ident, $result:expr, $pc:expr) => {
@@ -332,7 +369,7 @@ impl Vm {
             fuel_limit: Limit::FuelPerCall,
             tick_fuel: limits.fuel_per_tick,
             native_depth: 0,
-            lua_caller: false,
+            call_site: CallSite::None,
             yielding: false,
             gc_threshold: MIN_THRESHOLD,
             gc_epoch: 0,
@@ -421,6 +458,43 @@ impl Vm {
         }
     }
 
+    /// Locates an error a tail-called native raised: at its caller's caller, whose call made the frame now gone; with
+    /// no position when a native made that call.
+    fn locate_tail(&mut self, error: LuaError) -> LuaError {
+        let frame = self.frames.last().expect("a running frame");
+        let lua_caller = (!frame.boundary || frame.metamethod.is_some()) && frame.catch.is_none();
+        if !lua_caller || self.frames.len() < 2 {
+            return self.locate_nowhere(error);
+        }
+        let LuaError::Runtime {
+            value,
+            located: false,
+            ..
+        } = error
+        else {
+            return error;
+        };
+        let caller = &self.frames[self.frames.len() - 2];
+        let value = match value {
+            Value::String(s) => {
+                let mut text =
+                    Self::position(&caller.proto, caller.pc.saturating_sub(1)).into_bytes();
+                text.extend_from_slice(b": ");
+                text.extend_from_slice(self.heap.string(s));
+                match self.heap.intern(&text) {
+                    Ok(s) => Value::String(s),
+                    Err(e) => return e,
+                }
+            }
+            value => value,
+        };
+        LuaError::Runtime {
+            value,
+            traceback: self.traceback(),
+            located: true,
+        }
+    }
+
     /// Marks an error as located without adding a position (raised by a native that no Lua code called directly).
     pub(crate) fn locate_nowhere(&mut self, error: LuaError) -> LuaError {
         match error {
@@ -433,6 +507,22 @@ impl Vm {
         }
     }
 
+    /// The `chunk:line: ` prefix of the function `level` calls up from the running native (1: its caller), or nothing
+    /// when that is a native or there is none. A tail-called native's caller is its caller's caller: the calling
+    /// frame is gone.
+    pub(crate) fn native_where(&self, level: i64) -> Vec<u8> {
+        let level = match self.call_site {
+            CallSite::Call { .. } | CallSite::Meta { .. } => level,
+            CallSite::Tail if level > 0 => level + 1,
+            CallSite::Tail => level,
+            CallSite::Native | CallSite::None => level - 1,
+        };
+        if level <= 0 {
+            return Vec::new();
+        }
+        self.where_(level as usize)
+    }
+
     /// The `chunk:line: ` prefix for `error(message, level)`: level 1 is the function calling `error`.
     pub(crate) fn where_(&self, level: usize) -> Vec<u8> {
         if level == 0 {
@@ -443,7 +533,9 @@ impl Vm {
         for _ in 1..level {
             // A frame a native called (a boundary, or a pcall's function) has a native one level up: no position.
             match frame {
-                Some(f) if !f.boundary && f.catch.is_none() => frame = frames.next(),
+                Some(f) if (!f.boundary || f.metamethod.is_some()) && f.catch.is_none() => {
+                    frame = frames.next()
+                }
                 _ => return Vec::new(),
             }
         }
@@ -604,7 +696,9 @@ impl Vm {
             };
             match handler {
                 Value::Nil => return Ok(Value::Nil),
-                Value::Function(_) => return self.call_meta(handler, &[object, key]),
+                Value::Function(_) => {
+                    return self.call_metamethod(handler, &[object, key], "__index");
+                }
                 _ => object = handler,
             }
             self.charge_fuel(1)?;
@@ -647,7 +741,7 @@ impl Vm {
                 }
             };
             if let Value::Function(_) = handler {
-                self.call_meta(handler, &[object, key, value])?;
+                self.call_metamethod(handler, &[object, key, value], "__newindex")?;
                 return Ok(());
             }
             object = handler;
@@ -664,6 +758,17 @@ impl Vm {
             ArithOp::Div => self.names.div,
             ArithOp::Mod => self.names.modulo,
             ArithOp::Pow => self.names.pow,
+        }
+    }
+
+    fn arith_event_name(op: ArithOp) -> &'static str {
+        match op {
+            ArithOp::Add => "__add",
+            ArithOp::Sub => "__sub",
+            ArithOp::Mul => "__mul",
+            ArithOp::Div => "__div",
+            ArithOp::Mod => "__mod",
+            ArithOp::Pow => "__pow",
         }
     }
 
@@ -699,7 +804,7 @@ impl Vm {
                 Self::type_of(culprit)
             )));
         }
-        self.call_meta(handler, &[a, b])
+        self.call_metamethod(handler, &[a, b], Self::arith_event_name(op))
     }
 
     pub(crate) fn negate(&mut self, a: Value) -> Result<Value, LuaError> {
@@ -713,7 +818,7 @@ impl Vm {
                 Self::type_of(a)
             )));
         }
-        self.call_meta(handler, &[a, a])
+        self.call_metamethod(handler, &[a, a], "__unm")
     }
 
     pub(crate) fn length(&mut self, a: Value) -> Result<Value, LuaError> {
@@ -728,7 +833,7 @@ impl Vm {
                         Self::type_of(a)
                     )));
                 }
-                self.call_meta(handler, &[a, Value::Nil])
+                self.call_metamethod(handler, &[a, Value::Nil], "__len")
             }
         }
     }
@@ -749,7 +854,7 @@ impl Vm {
                 if first == Value::Nil || first != self.metamethod(b, self.names.eq) {
                     return Ok(false);
                 }
-                Ok(self.call_meta(first, &[a, b])?.is_truthy())
+                Ok(self.call_metamethod(first, &[a, b], "__eq")?.is_truthy())
             }
             _ => Ok(false),
         }
@@ -794,7 +899,7 @@ impl Vm {
                 if handler == Value::Nil {
                     return Err(self.compare_error(a, b));
                 }
-                Ok(self.call_meta(handler, &[a, b])?.is_truthy())
+                Ok(self.call_metamethod(handler, &[a, b], "__lt")?.is_truthy())
             }
         }
     }
@@ -809,11 +914,11 @@ impl Vm {
             _ => {
                 let handler = self.order_handler(a, b, self.names.le);
                 if handler != Value::Nil {
-                    return Ok(self.call_meta(handler, &[a, b])?.is_truthy());
+                    return Ok(self.call_metamethod(handler, &[a, b], "__le")?.is_truthy());
                 }
                 let handler = self.order_handler(b, a, self.names.lt);
                 if handler != Value::Nil {
-                    return Ok(!self.call_meta(handler, &[b, a])?.is_truthy());
+                    return Ok(!self.call_metamethod(handler, &[b, a], "__lt")?.is_truthy());
                 }
                 Err(self.compare_error(a, b))
             }
@@ -821,7 +926,14 @@ impl Vm {
     }
 
     /// `R[first] .. ... .. R[last]`, right to left as Lua 5.1 does, joining runs of strings and numbers at once.
-    fn concat(&mut self, first: usize, last: usize) -> Result<Value, LuaError> {
+    /// Concatenates the stack's `first..=last`, right to left as Lua does. When an operand cannot be concatenated,
+    /// `culprit` gets its slot, for the message to name it.
+    fn concat(
+        &mut self,
+        first: usize,
+        last: usize,
+        culprit: &mut Option<usize>,
+    ) -> Result<Value, LuaError> {
         let mut accumulated = self.stack[last];
         let mut i = last;
         while i > first {
@@ -845,13 +957,18 @@ impl Vm {
                     handler = self.metamethod(accumulated, self.names.concat);
                 }
                 if handler == Value::Nil {
-                    let culprit = if stringy(left) { accumulated } else { left };
+                    let (slot, value) = if stringy(left) {
+                        (i, accumulated)
+                    } else {
+                        (i - 1, left)
+                    };
+                    *culprit = Some(slot);
                     return Err(self.error(format!(
                         "attempt to concatenate a {} value",
-                        Self::type_of(culprit)
+                        Self::type_of(value)
                     )));
                 }
-                accumulated = self.call_meta(handler, &[left, accumulated])?;
+                accumulated = self.call_metamethod(handler, &[left, accumulated], "__concat")?;
                 i -= 1;
             }
         }
@@ -878,12 +995,38 @@ impl Vm {
 
     /// Calls a metamethod (or any function) from inside an instruction with these arguments; its first result.
     pub(crate) fn call_meta(&mut self, function: Value, args: &[Value]) -> Result<Value, LuaError> {
+        self.call_as(function, args, CallSite::Native)
+    }
+
+    /// Calls the handler of a metamethod `event`: as `call_meta`, the handler (if a native) named for the event when
+    /// an instruction set it off, as LuaJIT names it.
+    fn call_metamethod(
+        &mut self,
+        handler: Value,
+        args: &[Value],
+        event: &'static str,
+    ) -> Result<Value, LuaError> {
+        // Set off by a native (`tostring`, `table.concat`), it is a call from that native.
+        let site = if self.call_site == CallSite::None {
+            CallSite::Meta { event }
+        } else {
+            CallSite::Native
+        };
+        self.call_as(handler, args, site)
+    }
+
+    fn call_as(
+        &mut self,
+        function: Value,
+        args: &[Value],
+        site: CallSite,
+    ) -> Result<Value, LuaError> {
         let slot = self.stack.len();
         self.push(function)?;
         for &arg in args {
             self.push(arg)?;
         }
-        let count = self.call_value(slot, args.len())?;
+        let count = self.call_value_as(slot, args.len(), site)?;
         let result = if count > 0 {
             self.stack[slot]
         } else {
@@ -896,16 +1039,36 @@ impl Vm {
     /// Calls the function at `slot` with the `count` arguments after it; its results end up from `slot` on, the stack
     /// ends after them, and their number is returned.
     pub(crate) fn call_value(&mut self, slot: usize, count: usize) -> Result<usize, LuaError> {
+        self.call_value_as(slot, count, CallSite::Native)
+    }
+
+    /// `call_value`, a native callee being called as `site` says.
+    fn call_value_as(
+        &mut self,
+        slot: usize,
+        count: usize,
+        site: CallSite,
+    ) -> Result<usize, LuaError> {
         self.stack.truncate(slot + 1 + count);
         let (function, count) = self.callable(slot, count)?;
         match self.heap.functions.get(function.0) {
-            Function::Native { .. } => self.call_native(function, slot, count, false),
+            Function::Native { .. } => self.call_native(function, slot, count, site),
             Function::Lua { .. } => {
                 self.enter_native()?;
                 let depth = self.frames.len();
+                let caller = std::mem::replace(&mut self.call_site, CallSite::None);
                 let result = self
                     .push_frame(function, slot, count, -1, true)
-                    .and_then(|()| self.execute());
+                    .and_then(|()| {
+                        if let CallSite::Meta { event } = site {
+                            self.frames
+                                .last_mut()
+                                .expect("the frame just pushed")
+                                .metamethod = Some(event);
+                        }
+                        self.execute()
+                    });
+                self.call_site = caller;
                 self.native_depth -= 1;
                 match result {
                     Ok(Exec::Returned) => Ok(self.top - slot),
@@ -956,7 +1119,7 @@ impl Vm {
         function: FuncId,
         slot: usize,
         count: usize,
-        from_lua: bool,
+        site: CallSite,
     ) -> Result<usize, LuaError> {
         let Function::Native {
             function: native, ..
@@ -966,7 +1129,7 @@ impl Vm {
         };
         let native = native.clone();
         self.enter_native()?;
-        let caller = std::mem::replace(&mut self.lua_caller, from_lua);
+        let caller = std::mem::replace(&mut self.call_site, site);
         self.stack.truncate(slot + 1 + count);
         let args = Args {
             base: slot + 1,
@@ -977,7 +1140,7 @@ impl Vm {
             NativeFn::Host(f) => f(self, args),
         };
         self.native_depth -= 1;
-        self.lua_caller = caller;
+        self.call_site = caller;
         let results = result?;
         let start = self.stack.len() - results;
         self.stack.copy_within(start.., slot);
@@ -1045,6 +1208,7 @@ impl Vm {
             varargs,
             boundary,
             catch: None,
+            metamethod: None,
         });
         self.charge_stack()?;
         Ok(())
@@ -1210,7 +1374,7 @@ impl Vm {
                 Some(Catch { handler, want });
             return Ok(Protected::Frame);
         }
-        match self.protect(|vm| vm.call_native(function, slot + 1, count, false))? {
+        match self.protect(|vm| vm.call_native(function, slot + 1, count, CallSite::Native))? {
             Ok(_) if self.yielding => {
                 self.yielding = false;
                 let thread = self.threads.get_mut(self.current.0);
@@ -1308,6 +1472,7 @@ impl Vm {
                         let value = self.heap.raw_get(env, key);
                         let value =
                             if value == Value::Nil && self.heap.table(env).metatable.is_some() {
+                                save_pc!(self, pc);
                                 located!(self, self.index(Value::Table(env), key), pc)
                             } else {
                                 value
@@ -1321,6 +1486,7 @@ impl Vm {
                         if self.heap.table(env).metatable.is_none() {
                             located!(self, self.heap.raw_set(env, key, value), pc);
                         } else {
+                            save_pc!(self, pc);
                             located!(self, self.set_index(Value::Table(env), key, value), pc);
                         }
                     }
@@ -1331,12 +1497,14 @@ impl Vm {
                             Value::Table(t) => {
                                 let value = self.heap.raw_get(t, key);
                                 if value == Value::Nil && self.heap.table(t).metatable.is_some() {
+                                    save_pc!(self, pc);
                                     located!(self, self.index(object, key), pc)
                                 } else {
                                     value
                                 }
                             }
                             _ => {
+                                save_pc!(self, pc);
                                 let result = self.index(object, key);
                                 let result =
                                     result.map_err(|e| self.name_error(e, &proto, pc - 1, table));
@@ -1353,9 +1521,11 @@ impl Vm {
                             Value::Table(t) if self.heap.table(t).metatable.is_none() => {
                                 self.raw_set_checked(t, key, value)
                             }
-                            _ => self
-                                .set_index(object, key, value)
-                                .map_err(|e| self.name_error(e, &proto, pc - 1, table)),
+                            _ => {
+                                save_pc!(self, pc);
+                                self.set_index(object, key, value)
+                                    .map_err(|e| self.name_error(e, &proto, pc - 1, table))
+                            }
                         };
                         located!(self, result, pc);
                     }
@@ -1371,6 +1541,7 @@ impl Vm {
                     Op::SelfMethod { a, object, key } => {
                         let receiver = self.stack[base + usize::from(object)];
                         let key = self.rk(&proto, base, key);
+                        save_pc!(self, pc);
                         let result = self
                             .index(receiver, key)
                             .map_err(|e| self.name_error(e, &proto, pc - 1, object));
@@ -1386,6 +1557,7 @@ impl Vm {
                                 Value::Number(Self::arith_numbers(op, x, y))
                             }
                             _ => {
+                                save_pc!(self, pc);
                                 let result = self.arith(op, x, y);
                                 let culprit = if self.coerce_number(x).is_some() {
                                     c
@@ -1403,6 +1575,7 @@ impl Vm {
                         self.stack[base + usize::from(a)] = value;
                     }
                     Op::Neg { a, b } => {
+                        save_pc!(self, pc);
                         let result = self
                             .negate(self.stack[base + usize::from(b)])
                             .map_err(|e| self.name_error(e, &proto, pc - 1, b));
@@ -1414,6 +1587,7 @@ impl Vm {
                             Value::Boolean(!self.stack[base + usize::from(b)].is_truthy());
                     }
                     Op::Len { a, b } => {
+                        save_pc!(self, pc);
                         let result = self
                             .length(self.stack[base + usize::from(b)])
                             .map_err(|e| self.name_error(e, &proto, pc - 1, b));
@@ -1421,11 +1595,21 @@ impl Vm {
                         self.stack[base + usize::from(a)] = value;
                     }
                     Op::Concat { a, first, last } => {
-                        let value = located!(
-                            self,
-                            self.concat(base + usize::from(first), base + usize::from(last)),
-                            pc
-                        );
+                        save_pc!(self, pc);
+                        let mut culprit = None;
+                        let result = self
+                            .concat(
+                                base + usize::from(first),
+                                base + usize::from(last),
+                                &mut culprit,
+                            )
+                            .map_err(|e| match culprit {
+                                Some(slot) => {
+                                    self.name_error(e, &proto, pc - 1, (slot - base) as u8)
+                                }
+                                None => e,
+                            });
+                        let value = located!(self, result, pc);
                         self.stack[base + usize::from(a)] = value;
                     }
                     Op::Jump { offset } => pc = (pc as i64 + i64::from(offset)) as usize,
@@ -1435,9 +1619,18 @@ impl Vm {
                         let result = match (op, x, y) {
                             (CompareOp::Lt, Value::Number(x), Value::Number(y)) => x < y,
                             (CompareOp::Le, Value::Number(x), Value::Number(y)) => x <= y,
-                            (CompareOp::Eq, _, _) => located!(self, self.equal(x, y), pc),
-                            (CompareOp::Lt, _, _) => located!(self, self.less_than(x, y), pc),
-                            (CompareOp::Le, _, _) => located!(self, self.less_equal(x, y), pc),
+                            (CompareOp::Eq, _, _) => {
+                                save_pc!(self, pc);
+                                located!(self, self.equal(x, y), pc)
+                            }
+                            (CompareOp::Lt, _, _) => {
+                                save_pc!(self, pc);
+                                located!(self, self.less_than(x, y), pc)
+                            }
+                            (CompareOp::Le, _, _) => {
+                                save_pc!(self, pc);
+                                located!(self, self.less_equal(x, y), pc)
+                            }
                         };
                         pc = Self::follow_jump(code, pc, result == expect);
                     }
@@ -1482,8 +1675,9 @@ impl Vm {
                             }
                             continue;
                         }
+                        let site = CallSite::Call { register: func };
                         let produced =
-                            located!(self, self.call_native(function, slot, count, true), pc);
+                            located!(self, self.call_native(function, slot, count, site), pc);
                         if self.yielding {
                             self.yielding = false;
                             let thread = self.threads.get_mut(self.current.0);
@@ -1535,8 +1729,11 @@ impl Vm {
                                 Protected::Done => continue,
                             }
                         }
-                        let produced =
-                            located!(self, self.call_native(function, slot, count, true), pc);
+                        let produced = self.call_native(function, slot, count, CallSite::Tail);
+                        let produced = match produced {
+                            Ok(produced) => produced,
+                            Err(error) => return Err(self.locate_tail(error)),
+                        };
                         if self.yielding {
                             self.yielding = false;
                             let thread = self.threads.get_mut(self.current.0);
@@ -1733,17 +1930,14 @@ impl Vm {
         }
     }
 
-    /// Names the register an error was about (`local 'a'`, `upvalue 'u'`, `global 'x'`, `field 'y'`, `method 'z'`),
-    /// as Lua's messages do: a local active there, else the instruction that last wrote it in straight-line code.
-    fn name_error(&mut self, error: LuaError, proto: &Proto, pc: usize, register: u8) -> LuaError {
-        let LuaError::Runtime {
-            value: Value::String(message),
-            located: false,
-            ..
-        } = error
-        else {
-            return error;
-        };
+    /// What a register held at an instruction, as Lua's messages name it (`("local", "a")`, `("global", "x")`, ...):
+    /// a local active there, else what the instruction that last wrote it in straight-line code read.
+    pub(crate) fn describe_register(
+        &mut self,
+        proto: &Proto,
+        pc: usize,
+        register: u8,
+    ) -> Option<(&'static str, Vec<u8>)> {
         // Naming scans the function's locals for up to 64 instructions: paid as the work it is.
         let work = 64 * (1 + proto.locals.len() as u64 / 16);
         self.fuel = self.fuel.saturating_sub(work);
@@ -1755,56 +1949,101 @@ impl Vm {
                 .find(|l| l.register == register && l.start <= pc && pc < l.end)
                 .map(|l| l.name.clone())
         };
-        let mut name: Option<(&str, Vec<u8>)> =
-            local_name(register).map(|n| ("local", n.into_vec()));
-        if name.is_none() {
-            let constant = |k: usize| match proto.constants[k] {
-                Value::String(s) => Some(self.heap.string(s).to_vec()),
-                _ => None,
-            };
-            for op in proto.code[..pc].iter().rev().take(64) {
-                let (written, described) = match *op {
-                    Op::GetGlobal { a, k } => (a, constant(k as usize).map(|n| ("global", n))),
-                    Op::GetTable { a, key, .. } if key.0 >= Rk::CONSTANT => (
-                        a,
-                        constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("field", n)),
-                    ),
-                    Op::SelfMethod { a, key, .. } if key.0 >= Rk::CONSTANT => (
-                        a,
-                        constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("method", n)),
-                    ),
-                    Op::GetUpvalue { a, upvalue } => (
-                        a,
-                        proto
-                            .upvalue_names
-                            .get(usize::from(upvalue))
-                            .map(|n| ("upvalue", n.to_vec())),
-                    ),
-                    Op::GetCell { a, cell } => {
-                        (a, local_name(cell).map(|n| ("local", n.into_vec())))
-                    }
-                    Op::Move { a, b } => (a, local_name(b).map(|n| ("local", n.into_vec()))),
-                    Op::LoadK { a, .. }
-                    | Op::LoadBool { a, .. }
-                    | Op::GetTable { a, .. }
-                    | Op::SelfMethod { a, .. }
-                    | Op::NewTable { a, .. }
-                    | Op::Arith { a, .. }
-                    | Op::Concat { a, .. } => (a, None),
-                    Op::Jump { .. }
-                    | Op::Call { .. }
-                    | Op::Closure { .. }
-                    | Op::TailCall { .. }
-                    | Op::VarArg { .. } => break,
-                    _ => continue,
-                };
-                if written == register {
-                    name = described;
-                    break;
+        if let Some(name) = local_name(register) {
+            return Some(("local", name.into_vec()));
+        }
+        let constant = |k: usize| match proto.constants[k] {
+            Value::String(s) => Some(self.heap.string(s).to_vec()),
+            _ => None,
+        };
+        for op in proto.code[..pc].iter().rev().take(64) {
+            let (written, described) = match *op {
+                Op::GetGlobal { a, k } => (a, constant(k as usize).map(|n| ("global", n))),
+                Op::GetTable { a, key, .. } if key.0 >= Rk::CONSTANT => (
+                    a,
+                    constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("field", n)),
+                ),
+                Op::SelfMethod { a, key, .. } if key.0 >= Rk::CONSTANT => (
+                    a,
+                    constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("method", n)),
+                ),
+                Op::GetUpvalue { a, upvalue } => (
+                    a,
+                    proto
+                        .upvalue_names
+                        .get(usize::from(upvalue))
+                        .map(|n| ("upvalue", n.to_vec())),
+                ),
+                Op::GetCell { a, cell } => (a, local_name(cell).map(|n| ("local", n.into_vec()))),
+                Op::Move { a, b } => (a, local_name(b).map(|n| ("local", n.into_vec()))),
+                Op::LoadK { a, .. }
+                | Op::LoadBool { a, .. }
+                | Op::GetTable { a, .. }
+                | Op::SelfMethod { a, .. }
+                | Op::NewTable { a, .. }
+                | Op::Arith { a, .. }
+                | Op::Concat { a, .. }
+                | Op::Closure { a, .. } => (a, None),
+                // A call writes its function's register and those above it; the ones below keep what they held.
+                Op::Call { func, .. } | Op::VarArg { a: func, .. } if register < func => continue,
+                Op::Jump { .. } | Op::Call { .. } | Op::TailCall { .. } | Op::VarArg { .. } => {
+                    return None;
                 }
+                _ => continue,
+            };
+            if written == register {
+                return described;
             }
         }
-        let Some((kind, n)) = name else { return error };
+        None
+    }
+
+    /// The running native as its caller named it (`("global", "f")`, `("method", "rep")`, `("metamethod",
+    /// "__index")`), or None when the caller gave it no name ('?' in messages), as LuaJIT names it.
+    pub(crate) fn callee(&mut self) -> Option<(&'static str, Vec<u8>)> {
+        let frame = self.frames.last()?;
+        match self.call_site {
+            CallSite::Call { register } => {
+                let (proto, pc) = (frame.proto.clone(), frame.pc.checked_sub(1)?);
+                self.describe_register(&proto, pc, register)
+            }
+            CallSite::Tail => {
+                if frame.catch.is_some() || self.frames.len() < 2 {
+                    return None;
+                }
+                // A metamethod's frame was set off by an instruction: the native is named for the event.
+                if frame.boundary {
+                    return frame
+                        .metamethod
+                        .map(|event| ("metamethod", event.as_bytes().to_vec()));
+                }
+                let caller = &self.frames[self.frames.len() - 2];
+                let (proto, pc) = (caller.proto.clone(), caller.pc.checked_sub(1)?);
+                let (Op::Call { func, .. } | Op::TailCall { func, .. }) = *proto.code.get(pc)?
+                else {
+                    return None;
+                };
+                self.describe_register(&proto, pc, func)
+            }
+            CallSite::Meta { event } => Some(("metamethod", event.as_bytes().to_vec())),
+            CallSite::Native | CallSite::None => None,
+        }
+    }
+
+    /// Names the register an error was about (`local 'a'`, `upvalue 'u'`, `global 'x'`, `field 'y'`, `method 'z'`),
+    /// as Lua's messages do.
+    fn name_error(&mut self, error: LuaError, proto: &Proto, pc: usize, register: u8) -> LuaError {
+        let LuaError::Runtime {
+            value: Value::String(message),
+            located: false,
+            ..
+        } = error
+        else {
+            return error;
+        };
+        let Some((kind, n)) = self.describe_register(proto, pc, register) else {
+            return error;
+        };
         // "attempt to call a nil value" becomes "attempt to call global 'f' (a nil value)".
         let text = self.heap.string(message);
         let Some(article) = find(text, b" a ").or_else(|| find(text, b" an ")) else {
@@ -2310,6 +2549,8 @@ impl Vm {
 
     fn run_coroutine(&mut self, status: ThreadStatus, args: Vec<Value>) -> Result<Exec, LuaError> {
         self.enter_native()?;
+        // The coroutine runs its own instructions: no native of this thread is running in it.
+        let caller = std::mem::replace(&mut self.call_site, CallSite::None);
         let result = (|| {
             if status == ThreadStatus::Fresh {
                 for arg in &args {
@@ -2318,7 +2559,7 @@ impl Vm {
                 let count = args.len();
                 let (function, count) = self.callable(0, count)?;
                 if let Function::Native { .. } = self.heap.functions.get(function.0) {
-                    let produced = self.call_native(function, 0, count, false)?;
+                    let produced = self.call_native(function, 0, count, CallSite::Native)?;
                     if self.yielding {
                         self.yielding = false;
                         return Err(self.error("attempt to yield across a C-call boundary"));
@@ -2354,6 +2595,7 @@ impl Vm {
             }
             self.execute()
         })();
+        self.call_site = caller;
         self.native_depth -= 1;
         result.map_err(|e| self.locate(e, None))
     }

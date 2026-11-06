@@ -34,6 +34,10 @@ fn length(vm: &Vm, t: TableId) -> i64 {
 }
 
 fn getn(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
+    // LuaJIT's fast path sees a missing argument as nil.
+    if args.count == 0 {
+        return Err(vm.arg_error(args, 0, "table expected, got nil"));
+    }
     let t = vm.check_table(args, 0)?;
     let n = length(vm, t);
     vm.results(&[Value::Number(n as f64)])
@@ -76,6 +80,10 @@ fn insert(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 }
 
 fn remove(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
+    // LuaJIT's fast path sees a missing argument as nil.
+    if args.count == 0 {
+        return Err(vm.arg_error(args, 0, "table expected, got nil"));
+    }
     let t = vm.check_table(args, 0)?;
     let n = length(vm, t);
     let position = vm.opt_integer(args, 1, n)?;

@@ -59,6 +59,10 @@ fn charge_copy(vm: &mut Vm, length: usize) -> Result<(), LuaError> {
 }
 
 fn len(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
+    // LuaJIT's fast path sees a missing argument as nil.
+    if args.count == 0 {
+        return Err(vm.arg_error(args, 0, "string expected, got nil"));
+    }
     let s = vm.check_string(args, 0)?;
     let length = vm.heap.string(s).len();
     vm.results(&[Value::Number(length as f64)])
@@ -66,7 +70,7 @@ fn len(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 
 fn sub(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let (_, s) = bytes_of(vm, args, 0)?;
-    let start = position(vm.opt_integer(args, 1, 1)?, s.len()).max(1);
+    let start = position(vm.check_integer(args, 1)?, s.len()).max(1);
     let end = position(vm.opt_integer(args, 2, -1)?, s.len()).min(s.len() as i64);
     if start > end {
         return vm.push_string(b"");

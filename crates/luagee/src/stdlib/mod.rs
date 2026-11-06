@@ -125,18 +125,19 @@ impl Vm {
     }
 
     /// The name a native error message gives the running function.
-    fn native_name(&self, args: Args) -> &'static str {
-        match self.stack.get(args.base.wrapping_sub(1)) {
-            Some(Value::Function(f)) => match self.heap.functions.get(f.0) {
-                Function::Native { name, .. } => name,
-                Function::Lua { .. } => "?",
-            },
-            _ => "?",
+    /// "bad argument #i to 'name' (message)", the function named as its caller named it. Called as a method, the
+    /// object is argument 0: a bad one is "calling 'name' on bad self".
+    pub(crate) fn arg_error(&mut self, _args: Args, i: usize, message: &str) -> LuaError {
+        let (kind, name) = match self.callee() {
+            Some((kind, name)) => (kind, crate::shown(&name)),
+            None => ("", "?".to_owned()),
+        };
+        if kind == "method" {
+            if i == 0 {
+                return self.error(format!("calling '{name}' on bad self ({message})"));
+            }
+            return self.error(format!("bad argument #{i} to '{name}' ({message})"));
         }
-    }
-
-    pub(crate) fn arg_error(&mut self, args: Args, i: usize, message: &str) -> LuaError {
-        let name = self.native_name(args);
         self.error(format!("bad argument #{} to '{name}' ({message})", i + 1))
     }
 

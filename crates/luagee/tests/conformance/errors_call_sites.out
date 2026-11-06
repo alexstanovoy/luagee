@@ -1,0 +1,45 @@
+false	errors_call_sites.lua:6: 5
+false	errors_call_sites.lua:7: 5.5
+false	true
+false	errors_call_sites.lua:9: 5
+false	5
+false	boom
+false	errors_call_sites.lua:15: boom
+false	lvl2
+false	errors_call_sites.lua:22: bad argument #1 to 'w' (table expected, got number)
+false	bad argument #1 to '?' (string expected, got no value)
+false	errors_call_sites.lua:25: bad argument #1 to '?' (string expected, got no value)
+false	errors_call_sites.lua:28: bad argument #1 to 'tc' (table expected, got number)
+false	errors_call_sites.lua:30: bad argument #1 to 'rep' (string expected, got no value)
+false	errors_call_sites.lua:31: bad argument #1 to 'rep' (number expected, got no value)
+false	errors_call_sites.lua:32: bad argument #1 to 'rep' (number expected, got string)
+false	errors_call_sites.lua:33: bad argument #1 to 'rep' (string expected, got nil)
+false	errors_call_sites.lua:34: bad argument #1 to 'f' (string expected, got no value)
+false	errors_call_sites.lua:35: bad argument #1 to 'rep' (string expected, got no value)
+false	errors_call_sites.lua:36: bad argument #1 to '?' (string expected, got no value)
+false	errors_call_sites.lua:37: bad argument #1 to '__index' (string expected, got table)
+false	errors_call_sites.lua:38: bad argument #1 to '__add' (string expected, got table)
+false	errors_call_sites.lua:39: bad argument #1 to '?' (string expected, got no value)
+false	errors_call_sites.lua:40: attempt to call global 'rep' (a nil value)
+false	bad argument #1 to '?' (table expected, got number)
+true
+false	errors_call_sites.lua:46: attempt to concatenate upvalue 'v4' (a table value)
+false	errors_call_sites.lua:47: attempt to concatenate upvalue 'v4' (a table value)
+false	errors_call_sites.lua:48: attempt to concatenate upvalue 'v4' (a table value)
+false	errors_call_sites.lua:49: attempt to index upvalue 'v2' (a string value)
+true
+false	errors_call_sites.lua:51: attempt to perform arithmetic on upvalue 'v4' (a table value)
+false	errors_call_sites.lua:54: bad argument #2 to 'sub' (number expected, got no value)
+false	errors_call_sites.lua:55: bad argument #1 to 'len' (string expected, got nil)
+false	errors_call_sites.lua:56: bad argument #1 to 'remove' (table expected, got nil)
+false	errors_call_sites.lua:57: bad argument #1 to 'getn' (table expected, got nil)
+false	errors_call_sites.lua:58: bad argument #1 to 'pairs' (value expected)
+false	errors_call_sites.lua:59: bad argument #1 to 'ipairs' (value expected)
+false	errors_call_sites.lua:65: no field x
+false	errors_call_sites.lua:68: no field y
+false	errors_call_sites.lua:72: bad add
+false	errors_call_sites.lua:73: bad argument #1 to '__index' (string expected, got table)
+false	errors_call_sites.lua:75: expected number
+false	errors_call_sites.lua:78: boom
+false	errors_call_sites.lua:80: y
+false	errors_call_sites.lua:81: errors_call_sites.lua:81: attempt to perform arithmetic on a nil value

@@ -87,6 +87,12 @@ impl Lua {
         self.vm.tick_fuel = self.vm.limits.fuel_per_tick;
     }
 
+    /// The fuel the current tick has left; what the tick's calls spent is `fuel_per_tick` minus this.
+    #[must_use]
+    pub fn tick_fuel_left(&self) -> u64 {
+        self.vm.tick_fuel
+    }
+
     /// Compiles source into a function (not run yet). The chunk name is what error positions print.
     pub fn load(&mut self, chunk: &str, source: &[u8]) -> Result<Value, Error> {
         let vm = &mut self.vm;
