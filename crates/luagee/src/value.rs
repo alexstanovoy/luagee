@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{Limit, LuaError};
+use crate::Error;
 
 /// Interpreter ownership is host-only metadata; scripts hash and display only local slot indexes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -24,12 +24,19 @@ pub(crate) const HANDLE_BYTES: usize = 16;
 pub(crate) const VALUE_BYTES: usize = 24;
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
-pub(crate) fn next_owner() -> Result<u64, LuaError> {
-    NEXT_OWNER
+pub(crate) fn next_owner() -> Result<u64, Error> {
+    owner_from(&NEXT_OWNER)
+}
+
+fn owner_from(counter: &AtomicU64) -> Result<u64, Error> {
+    counter
         .try_update(Ordering::Relaxed, Ordering::Relaxed, |owner| {
             owner.checked_add(1)
         })
-        .map_err(|_| LuaError::Limit(Limit::Memory))
+        .map_err(|_| Error::Runtime {
+            message: "interpreter identity space exhausted".to_owned(),
+            traceback: Vec::new(),
+        })
 }
 
 /// A string on the heap. Strings are interned: two strings are equal exactly when their handles are.
@@ -111,3 +118,21 @@ impl Value {
 
 const _: () = assert!(std::mem::size_of::<Handle>() == HANDLE_BYTES);
 const _: () = assert!(std::mem::size_of::<Value>() <= VALUE_BYTES);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Error;
+
+    #[test]
+    fn owner_counter_exhaustion_is_specific_and_does_not_wrap() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(owner_from(&counter).expect("last identity"), u64::MAX - 1);
+        let error = owner_from(&counter).expect_err("identity space exhausted");
+        assert_eq!(error.to_string(), "interpreter identity space exhausted");
+        assert!(matches!(error, Error::Runtime { .. }));
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+        assert!(owner_from(&counter).is_err());
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+}

@@ -233,10 +233,16 @@ pub(crate) struct Proto {
     pub(crate) visited: Cell<u64>,
 }
 
+// Fixed across targets; includes the native Rust header and Rc's strong/weak counters.
+const PROTO_OVERHEAD: usize = 240;
+const _: () =
+    assert!(std::mem::size_of::<Proto>() + 2 * std::mem::size_of::<usize>() <= PROTO_OVERHEAD);
+
 impl Proto {
     /// The bytes this function's code and constants are counted as.
     pub(crate) fn bytes(&self) -> usize {
-        136 + self.code.len() * 16
+        PROTO_OVERHEAD
+            + self.code.len() * 16
             + self.constants.len() * crate::value::VALUE_BYTES
             + self.captures.len() * 2
     }

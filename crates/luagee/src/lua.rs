@@ -96,7 +96,8 @@ pub(crate) fn compile_chunk(
 impl Lua {
     /// An interpreter with these limits and keys.
     pub fn new(limits: Limits, keys: Keys) -> Result<Lua, Error> {
-        let mut vm = Vm::new(limits, keys).map_err(|e| to_error(&mut None, e))?;
+        let owner = crate::value::next_owner()?;
+        let mut vm = Vm::new(limits, keys, owner).map_err(|e| to_error(&mut None, e))?;
         let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
         crate::stdlib::open(&mut vm).map_err(|e| to_error(&mut None, e))?;
         vm.fuel = fuel;

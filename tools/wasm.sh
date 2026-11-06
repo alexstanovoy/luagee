@@ -61,16 +61,17 @@ case "${1:-}" in
 corpus)
     need_target
     runtime=$(wasmtime)
-    # On less stack than wasm's defaults, so that a margin is checked, not hoped for: the module's own (linear
-    # memory) stack is half rustc's default of 1 MiB, wasmtime's stack three quarters of its default of 512 KiB.
-    # tests/hostile/deepest_native_nesting_coroutines.lua takes the most of both a script can (some 350 KiB each).
+    # The linear stack stays half rustc's 1 MiB default; the engine budget is 448 KiB versus wasmtime's 512 KiB.
+    # Wider values and unwind metadata left the former 384 KiB engine gate under 8 KiB above the measured
+    # deepest-coroutine threshold. The extra 64 KiB accommodates toolchain layout variation while retaining
+    # a 64 KiB margin below the default engine budget. Keep timeout instrumentation in focused reproductions.
     cargo rustc --profile test-release -p luagee --example corpus --target "$target" -- \
         -C link-arg=-zstack-size=$((512 << 10))
     runner=${CARGO_TARGET_DIR:-target}/$target/test-release/examples/corpus.wasm
     # The folders are the guest's only files; the suites get a top-level one of their own, as the folder loader
     # resolves a folder only below one. timeout is a hang guard; fuel ends every script long before it.
     run() {
-        "$runtime" run -W max-wasm-stack=$((384 << 10)) -W timeout=1200s --dir "$here::/repo" \
+        "$runtime" run -W max-wasm-stack=$((448 << 10)) -W timeout=1200s --dir "$here::/repo" \
             --dir "$here/crates/luagee/tests/suites::/suites" "$runner" "$@"
     }
     run conformance /repo/crates/luagee/tests/conformance

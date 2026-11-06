@@ -14,10 +14,10 @@ use crate::proto::{ArithOp, Capture, CompareOp, Op, Proto, Rk};
 use crate::table::Table;
 use crate::value::{CellId, FuncId, HANDLE_BYTES, StrId, TableId, ThreadId, VALUE_BYTES, Value};
 
-/// How deeply native functions may nest Lua calls ("C stack overflow" past it), as Lua 5.1's C calls do. A level
-/// takes up to 1.8 KiB of native stack on x86-64 (under wasm, 1 KiB of wasmtime's stack and 0.7 KiB of the module's
-/// own), so the deepest nesting, with the deepest source and patterns at its top, needs some 800 KiB natively and
-/// two thirds of wasmtime's default stack (`tests/hostile/deepest_native_nesting_*.lua`).
+/// How deeply native functions may nest Lua calls ("C stack overflow" past it), as Lua 5.1's C calls do.
+/// Mixed nesting, parsing and pattern matching are checked on a 1 MiB native stack, and under wasmtime with a
+/// 448 KiB engine stack and a 512 KiB module stack (`tests/hostile/deepest_native_nesting_*.lua`). Frame sizes
+/// depend on the toolchain and engine instrumentation; embedders must budget their own callback frames too.
 pub(crate) const MAX_NATIVE_DEPTH: u32 = 200;
 /// How many frames a traceback keeps.
 const TRACEBACK_FRAMES: usize = 16;
@@ -371,8 +371,8 @@ macro_rules! located {
 }
 
 impl Vm {
-    pub(crate) fn new(limits: Limits, keys: crate::Keys) -> Result<Vm, LuaError> {
-        let owner = crate::value::next_owner()?;
+    pub(crate) fn new(limits: Limits, keys: crate::Keys, owner: u64) -> Result<Vm, LuaError> {
+        assert_ne!(owner, 0, "an interpreter has a nonzero owner identity");
         let mut heap = Heap::new(limits.memory, keys.hash, owner);
         let mut intern = |s: &str| heap.intern(s.as_bytes());
         let names = Names {

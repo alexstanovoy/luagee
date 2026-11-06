@@ -209,8 +209,10 @@ The 200-level native limit includes host callbacks and calls through `Vm::call`;
 a callback forwarding into Lua uses two of those levels. Host Rust frames also
 consume native/wasm stack. Keep callbacks small and bound their own Rust recursion;
 the interpreter cannot bound arbitrary Rust code. The regression runner checks
-combined callback reentry and deep parsing on 1 MiB native stacks and wasmtime's
-reduced engine/module stacks. Embedders with larger callback frames need to verify
+combined callback reentry and deep parsing on 1 MiB native stacks, 448 KiB wasmtime
+engine stacks and 512 KiB module stacks. The engine budget leaves 64 KiB below
+wasmtime's default while allowing more layout variation than the former 384 KiB
+gate. Embedders with larger callback frames need to verify
 their own stack margin.
 
 ### Setup and panic boundaries (unreleased fix)
@@ -219,6 +221,9 @@ their own stack margin.
 fuel left by the preceding script. Setup does not spend tick fuel and cannot run
 Lua through `Vm::call`; script execution always uses `Lua::call` and its tick
 accounting. Callbacks receive their active `Vm` directly without any refill.
+`Lua::string`, like `pin` and `load`, is trusted host setup outside script fuel;
+its memory and string-length limits still apply. It neither spends nor refills
+execution tick fuel, including after an exhausted tick.
 
 Call cleanup restores callback depth and invocation context even during host Rust
 unwinding. A Rust panic crossing an interpreter-call boundary retires it, including
@@ -236,7 +241,10 @@ independent work into separate callbacks when those lifetimes are unnecessary.
 Opaque interpreter tags make `Value` 24 bytes and table entries 56 bytes. Slot,
 frame, capture and container accounting use fixed cross-platform bounds with
 compile-time size checks. Interpreter tags use an atomic identity counter and
-need no clock, entropy source, thread or filesystem.
+need no clock, entropy source, thread or filesystem. Exhausting the process-local
+identity space fails construction with `interpreter identity space exhausted`;
+identities never wrap. Compiled prototypes use a fixed 240-byte header charge,
+checked to cover the native Rust header and its `Rc` counters on every target.
 
 ## License
 

@@ -1,9 +1,9 @@
 //! Security regressions at the public embedding boundary.
 
 use std::cell::Cell;
-use std::rc::Rc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::rc::Rc;
 
 use luagee::{Args, Error, GcStress, Keys, Limits, Lua, Value};
 
@@ -641,7 +641,6 @@ fn a_payload_drop_panic_retires_explicit_collection() {
     assert!(lua.exec("after", b"return 71").is_err());
 }
 
-
 #[cfg(not(target_arch = "wasm32"))]
 fn install_panicky(lua: &mut Lua, effects: Rc<Cell<u32>>) {
     register(lua, "host_panic", Rc::new(|_, _| panic!("probe panic")));
@@ -664,7 +663,6 @@ fn install_panicky(lua: &mut Lua, effects: Rc<Cell<u32>>) {
         }),
     );
 }
-
 
 #[cfg(not(target_arch = "wasm32"))]
 fn poke_retired(lua: &mut Lua) {
@@ -760,15 +758,31 @@ fn payload_drop_panic_inside_nested_vm_call_caught_by_the_callback_retires() {
 fn top_level_string_setup_recovers_after_fuel_exhaustion_without_refilling_the_tick() {
     let mut lua = interpreter();
     let ended = lua.exec("exhaust", b"while true do end");
-    assert!(matches!(ended, Err(Error::Limit(luagee::Limit::FuelPerCall))));
+    assert!(matches!(
+        ended,
+        Err(Error::Limit(luagee::Limit::FuelPerCall))
+    ));
     let remaining = lua.tick_fuel_left();
-    let value = lua.string(b"host setup").expect("setup after an exhausted call");
+    let value = lua
+        .string(b"host setup")
+        .expect("setup after an exhausted call");
     assert_eq!(lua.bytes(value), Some(b"host setup".as_slice()));
     assert_eq!(lua.tick_fuel_left(), remaining);
     let ended = lua.exec("exhaust_tick", b"while true do end");
-    assert!(matches!(ended, Err(Error::Limit(luagee::Limit::FuelPerCall))));
-    let value = lua.string(b"host setup after exhausted tick").expect("setup after an exhausted tick");
-    assert_eq!(lua.bytes(value), Some(b"host setup after exhausted tick".as_slice()));
+    assert!(matches!(
+        ended,
+        Err(Error::Limit(luagee::Limit::FuelPerCall))
+    ));
+    let value = lua
+        .string(b"host setup after exhausted tick")
+        .expect("setup after an exhausted tick");
+    assert_eq!(
+        lua.bytes(value),
+        Some(b"host setup after exhausted tick".as_slice())
+    );
     assert_eq!(lua.tick_fuel_left(), 0);
-    assert!(matches!(lua.exec("still_exhausted", b"return 1"), Err(Error::Limit(luagee::Limit::FuelPerTick))));
+    assert!(matches!(
+        lua.exec("still_exhausted", b"return 1"),
+        Err(Error::Limit(luagee::Limit::FuelPerTick))
+    ));
 }
