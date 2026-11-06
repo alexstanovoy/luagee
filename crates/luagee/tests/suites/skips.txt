@@ -11,7 +11,7 @@ omit lua-5.1-tests/code.lua -- testc: needs the testC library of a debug build o
 omit lua-5.1-tests/main.lua -- os: runs the standalone interpreter through os.execute and files
 skip lua-5.1-tests/attrib.lua:3-140 -- package: require searching package.path through files written with io (luagee's require reads modules through the host's loader)
 skip lua-5.1-tests/attrib.lua:176-210 -- package: C libraries through package.loadlib
-skip lua-5.1-tests/attrib.lua:214-228 -- fix: package.preload
+skip lua-5.1-tests/attrib.lua:227-227 -- package: package.path (luagee's require reads modules through the host's loader)
 skip lua-5.1-tests/big.lua:3-12 -- bound: a 32 MiB string is past the sandbox's string length bound (4 MiB), which overflows before the concatenation the test overflows
 skip lua-5.1-tests/calls.lua:243-243 -- dump: string.dump
 skip lua-5.1-tests/calls.lua:245-246 -- dump: loads the dump of line 243

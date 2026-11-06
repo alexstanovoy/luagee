@@ -29,7 +29,6 @@ pub(super) fn open(vm: &mut Vm) -> Result<(), LuaError> {
         ("rawequal", rawequal),
         ("rawget", rawget),
         ("rawset", rawset),
-        ("require", require),
         ("select", select),
         ("setfenv", setfenv),
         ("setmetatable", setmetatable),
@@ -49,8 +48,13 @@ pub(super) fn open(vm: &mut Vm) -> Result<(), LuaError> {
     vm.set_field(globals, "_VERSION", version)?;
     let package = vm.heap.new_table(0, 4)?;
     vm.set_field(package, "loaded", Value::Table(vm.loaded))?;
+    let preload = vm.heap.new_table(0, 0)?;
+    vm.set_field(package, "preload", Value::Table(preload))?;
     vm.register(package, "seeall", seeall)?;
     vm.set_field(globals, "package", Value::Table(package))?;
+    // require reads package.preload from this table, whatever the global `package` becomes, as in Lua.
+    let require = vm.native("require", require, vec![Value::Table(package)])?;
+    vm.set_field(globals, "require", require)?;
     vm.set_field(vm.loaded, "_G", Value::Table(globals))?;
     vm.set_field(vm.loaded, "package", Value::Table(package))?;
     Ok(())
@@ -670,6 +674,20 @@ fn dofile(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     vm.results(&values)
 }
 
+/// The loader `package.preload` has for a module, the first place Lua's require looks.
+fn preloader(vm: &mut Vm, args: Args, name: StrId) -> Result<Option<Value>, LuaError> {
+    let Value::Table(package) = vm.native_upvalue(args, 0) else {
+        unreachable!("require is made with the package table")
+    };
+    match vm.get_field(package, "preload")? {
+        Value::Table(preload) => Ok(match vm.heap.raw_get(preload, Value::String(name)) {
+            Value::Nil => None,
+            loader => Some(loader),
+        }),
+        _ => Err(vm.error("'package.preload' must be a table")),
+    }
+}
+
 fn require(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let name = module_argument(vm, args)?;
     let loaded = vm.heap.raw_get(vm.loaded, Value::String(name));
@@ -680,31 +698,39 @@ fn require(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         }
         return vm.results(&[loaded]);
     }
+    let preloaded = preloader(vm, args, name)?;
     // While a module runs, its entry is a sentinel (the loaded table itself), so a cycle is an error.
     vm.heap
         .raw_set(vm.loaded, Value::String(name), Value::Table(vm.loaded))?;
-    let path: Vec<u8> = vm
-        .heap
-        .string(name)
-        .iter()
-        .map(|&c| if c == b'.' { b'/' } else { c })
-        .collect();
-    let slot = vm.stack.len();
-    let produced = run_module(vm, args, &path, Some(Value::String(name)));
-    let produced = match produced {
-        Ok(n) => n,
+    let result = match preloaded {
+        Some(loader) => vm.call_meta(loader, &[Value::String(name)]),
+        None => {
+            let path: Vec<u8> = vm
+                .heap
+                .string(name)
+                .iter()
+                .map(|&c| if c == b'.' { b'/' } else { c })
+                .collect();
+            let slot = vm.stack.len();
+            run_module(vm, args, &path, Some(Value::String(name))).map(|produced| {
+                let result = if produced > 0 {
+                    vm.stack[slot]
+                } else {
+                    Value::Nil
+                };
+                vm.stack.truncate(slot);
+                result
+            })
+        }
+    };
+    let result = match result {
+        Ok(result) => result,
         Err(e) => {
             vm.heap
                 .raw_set(vm.loaded, Value::String(name), Value::Nil)?;
             return Err(e);
         }
     };
-    let result = if produced > 0 {
-        vm.stack[slot]
-    } else {
-        Value::Nil
-    };
-    vm.stack.truncate(slot);
     let current = vm.heap.raw_get(vm.loaded, Value::String(name));
     let value = if result != Value::Nil {
         result

@@ -1,0 +1,8 @@
+loading	greeting
+world	true	true
+true	true
+set by the loader
+false	base_require_preload.lua:13: broken loader
+42
+false	'package.preload' must be a table
+table	true	declared	42	true
