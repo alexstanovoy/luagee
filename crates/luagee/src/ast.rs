@@ -49,6 +49,8 @@ pub(crate) enum Statement {
         values: Vec<Expr>,
         body: Block,
         line: u32,
+        /// The line of the first value after `in`, where the iterator's calls are (as in LuaJIT).
+        call_line: u32,
     },
     LocalFunction {
         name: Name,

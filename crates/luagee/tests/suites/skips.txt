@@ -27,7 +27,6 @@ skip lua-5.1-tests/errors.lua:39-41 -- luajit: LuaJIT accepts empty statements (
 skip lua-5.1-tests/errors.lua:76-76 -- luajit: LuaJIT names the variable of `(aaa or aaa)()` in its error
 skip lua-5.1-tests/errors.lua:78-87 -- fix: names through jumps
 skip lua-5.1-tests/errors.lua:111-111 -- io: io.stdin
-skip lua-5.1-tests/errors.lua:126-126 -- fix: for-in line
 skip lua-5.1-tests/errors.lua:142-167 -- fix: traceback
 skip lua-5.1-tests/errors.lua:171-172 -- fix: error in error handling
 skip lua-5.1-tests/errors.lua:174-182 -- fix: error in error handling 2

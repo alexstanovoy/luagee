@@ -1,0 +1,4 @@
+[string "..."]:4: attempt to call a number value
+[string "..."]:3: attempt to call a number value
+[string "for k in..."]:3: attempt to call a nil value
+[string "local t..."]:2: in the iterator

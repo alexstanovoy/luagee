@@ -871,7 +871,8 @@ impl Compiler<'_> {
                 values,
                 body,
                 line,
-            } => self.generic_for(names, values, body, *line),
+                call_line,
+            } => self.generic_for(names, values, body, (*line, *call_line)),
             Statement::LocalFunction { name, body } => {
                 self.f().line = body.line;
                 let register = self.alloc(1)?;
@@ -1028,7 +1029,7 @@ impl Compiler<'_> {
         names: &[Name],
         values: &[Expr],
         body: &Block,
-        line: u32,
+        (line, call_line): (u32, u32),
     ) -> Compile<()> {
         self.f().line = line;
         let base = self.alloc(0)?;
@@ -1049,7 +1050,7 @@ impl Compiler<'_> {
             f.infos[local.info].end = call;
         }
         self.patch(to_call, call);
-        self.f().line = line;
+        self.f().line = call_line;
         let f = self.alloc(3)?;
         self.set_free(u32::from(f));
         self.emit(Op::Move {

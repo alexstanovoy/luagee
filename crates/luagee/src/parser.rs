@@ -464,6 +464,7 @@ impl<'a> Parser<'a> {
                     names.push(self.name()?);
                 }
                 self.expect(Token::In, "in")?;
+                let call_line = self.line;
                 let values = self.expr_list()?;
                 self.expect(Token::Do, "do")?;
                 let body = self.block()?;
@@ -473,6 +474,7 @@ impl<'a> Parser<'a> {
                     values,
                     body,
                     line,
+                    call_line,
                 })
             }
             _ => Err(self.error_near("'=' or 'in' expected")),
