@@ -1931,15 +1931,16 @@ impl Vm {
     }
 
     /// What a register held at an instruction, as Lua's messages name it (`("local", "a")`, `("global", "x")`, ...):
-    /// a local active there, else what the instruction that last wrote it in straight-line code read.
+    /// a local active there, else what the last instruction before it that wrote the register read, following moves,
+    /// as LuaJIT finds it (straight back through the code, jumps and all).
     pub(crate) fn describe_register(
         &mut self,
         proto: &Proto,
         pc: usize,
         register: u8,
     ) -> Option<(&'static str, Vec<u8>)> {
-        // Naming scans the function's locals for up to 64 instructions: paid as the work it is.
-        let work = 64 * (1 + proto.locals.len() as u64 / 16);
+        // The scan walks back through the function and its locals: paid as the work it is.
+        let work = 1 + pc as u64 / 8 + proto.locals.len() as u64 / 8;
         self.fuel = self.fuel.saturating_sub(work);
         let local_name = |register: u8| {
             proto
@@ -1949,53 +1950,84 @@ impl Vm {
                 .find(|l| l.register == register && l.start <= pc && pc < l.end)
                 .map(|l| l.name.clone())
         };
-        if let Some(name) = local_name(register) {
-            return Some(("local", name.into_vec()));
-        }
         let constant = |k: usize| match proto.constants[k] {
             Value::String(s) => Some(self.heap.string(s).to_vec()),
             _ => None,
         };
-        for op in proto.code[..pc].iter().rev().take(64) {
-            let (written, described) = match *op {
-                Op::GetGlobal { a, k } => (a, constant(k as usize).map(|n| ("global", n))),
-                Op::GetTable { a, key, .. } if key.0 >= Rk::CONSTANT => (
-                    a,
-                    constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("field", n)),
-                ),
-                Op::SelfMethod { a, key, .. } if key.0 >= Rk::CONSTANT => (
-                    a,
-                    constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("method", n)),
-                ),
-                Op::GetUpvalue { a, upvalue } => (
-                    a,
-                    proto
-                        .upvalue_names
-                        .get(usize::from(upvalue))
-                        .map(|n| ("upvalue", n.to_vec())),
-                ),
-                Op::GetCell { a, cell } => (a, local_name(cell).map(|n| ("local", n.into_vec()))),
-                Op::Move { a, b } => (a, local_name(b).map(|n| ("local", n.into_vec()))),
-                Op::LoadK { a, .. }
-                | Op::LoadBool { a, .. }
-                | Op::GetTable { a, .. }
-                | Op::SelfMethod { a, .. }
-                | Op::NewTable { a, .. }
-                | Op::Arith { a, .. }
-                | Op::Concat { a, .. }
-                | Op::Closure { a, .. } => (a, None),
-                // A call writes its function's register and those above it; the ones below keep what they held.
-                Op::Call { func, .. } | Op::VarArg { a: func, .. } if register < func => continue,
-                Op::Jump { .. } | Op::Call { .. } | Op::TailCall { .. } | Op::VarArg { .. } => {
-                    return None;
-                }
-                _ => continue,
-            };
-            if written == register {
-                return described;
+        let mut register = register;
+        let mut i = pc.min(proto.code.len());
+        'register: loop {
+            if let Some(name) = local_name(register) {
+                return Some(("local", name.into_vec()));
             }
+            while i > 0 {
+                i -= 1;
+                let r = usize::from(register);
+                let within = |first: u8, count: usize| {
+                    usize::from(first) <= r && r < usize::from(first) + count
+                };
+                match proto.code[i] {
+                    Op::GetGlobal { a, k } if a == register => {
+                        return constant(k as usize).map(|n| ("global", n));
+                    }
+                    Op::GetTable { a, key, .. } if a == register => {
+                        return (key.0 >= Rk::CONSTANT)
+                            .then(|| {
+                                constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("field", n))
+                            })
+                            .flatten();
+                    }
+                    Op::SelfMethod { a, key, .. } if a == register => {
+                        return (key.0 >= Rk::CONSTANT)
+                            .then(|| {
+                                constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("method", n))
+                            })
+                            .flatten();
+                    }
+                    Op::GetUpvalue { a, upvalue } if a == register => {
+                        return proto
+                            .upvalue_names
+                            .get(usize::from(upvalue))
+                            .map(|n| ("upvalue", n.to_vec()));
+                    }
+                    Op::GetCell { a, cell } if a == register => {
+                        return local_name(cell).map(|n| ("local", n.into_vec()));
+                    }
+                    Op::Move { a, b } if a == register => {
+                        register = b;
+                        continue 'register;
+                    }
+                    Op::LoadK { a, .. }
+                    | Op::LoadBool { a, .. }
+                    | Op::NewCell { a }
+                    | Op::NewTable { a, .. }
+                    | Op::Arith { a, .. }
+                    | Op::Neg { a, .. }
+                    | Op::Not { a, .. }
+                    | Op::Len { a, .. }
+                    | Op::Concat { a, .. }
+                    | Op::Closure { a, .. }
+                        if a == register =>
+                    {
+                        return None;
+                    }
+                    Op::SelfMethod { a, .. } if within(a, 2) => return None,
+                    Op::LoadNil { a, count } if within(a, usize::from(count) + 1) => return None,
+                    Op::ForPrep { a, .. } | Op::ForLoop { a, .. } if within(a, 4) => return None,
+                    Op::ForEachLoop { a, .. } if within(a, 4) => return None,
+                    // A call or `...` writes its first register and every one above it.
+                    Op::Call { func: a, .. }
+                    | Op::TailCall { func: a, .. }
+                    | Op::VarArg { a, .. }
+                        if usize::from(a) <= r =>
+                    {
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+            return None;
         }
-        None
     }
 
     /// The running native as its caller named it (`("global", "f")`, `("method", "rep")`, `("metamethod",

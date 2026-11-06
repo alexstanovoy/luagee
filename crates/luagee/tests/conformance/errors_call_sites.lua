@@ -79,3 +79,17 @@ local c = coroutine.wrap(function() error("boom") end)
 try(c)
 try(function() local d = coroutine.wrap(function() error("y", 0) end) d() end)
 try(function() local d = coroutine.wrap(function() local x = nil + 1 end) d() end)
+
+-- Names found past jumps and moves, as LuaJIT finds them.
+local v1, v5 = 1, "x"
+local function f1() return 1 end
+try(function() v2[(211 or f1())] = v2[v1] end)
+try(function() v1[-1] = v5[string.upper((-1 == -16))] end)
+try(function() local x = (nil .. (v1 * 2^53)) end)
+try(function() local x = math.ceil("%d", ("1e2" or v2)) end)
+try(function() local a = v2 local b = a.x.y end)
+try(function() for i = 1, 2 do local q = v2.k + i end end)
+
+-- tonumber asks for its string before it checks the base.
+try(function() local x = tonumber(nil, 37) end)
+try(function() local x = tonumber(v2.k0, v4) end)

@@ -1,4 +1,5 @@
-# Coverage-guided fuzz targets: any input as Lua source, compiled and run under small limits. A workspace of its
+# Coverage-guided fuzz targets: any input as Lua source (or Lua programs made from it), compiled and run under small
+# limits. A workspace of its
 # own, so the fuzzer's flags and libFuzzer stay out of the main build. `fuzz.sh` builds and runs them on stable Rust.
 [package]
 name = "luagee_fuzz"
@@ -23,8 +24,43 @@ debug-assertions = true
 overflow-checks = true
 
 [[bin]]
-name = "run"
-path = "fuzz_targets/run.rs"
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "run_bytes"
+path = "fuzz_targets/run_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "run_structured"
+path = "fuzz_targets/run_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stdlib"
+path = "fuzz_targets/stdlib.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "differential"
+path = "fuzz_targets/differential.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "determinism"
+path = "fuzz_targets/determinism.rs"
 test = false
 doc = false
 bench = false

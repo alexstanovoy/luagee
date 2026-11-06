@@ -433,10 +433,11 @@ fn tonumber(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         let n = vm.coerce_number(value).map_or(Value::Nil, Value::Number);
         return vm.results(&[n]);
     }
+    // LuaJIT asks for the string before it checks the base.
+    let s = vm.check_string(args, 0)?;
     if !(2..=36).contains(&base) {
         return Err(vm.arg_error(args, 1, "base out of range"));
     }
-    let s = vm.check_string(args, 0)?;
     vm.charge_fuel(vm.heap.string(s).len() as u64 / 16)?;
     let text = vm.heap.string(s);
     let result = parse_in_base(text, base as u32).map_or(Value::Nil, Value::Number);
