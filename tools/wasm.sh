@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# luagee under WebAssembly (wasm32-wasip1, run by a pinned wasmtime): the corpora.
+# luagee under WebAssembly (wasm32-wasip1, run by a pinned wasmtime): the corpora, the binary size, the speed.
 #
 #   tools/wasm.sh corpus   build examples/corpus.rs for wasm32-wasip1 and run it under wasmtime on the conformance and
 #                          hostile corpora, on one thread and less stack than wasm's defaults, then on every
 #                          fuzz/corpus/* folder (each input run as a script): what the merge gate runs
+#   tools/wasm.sh size     the size of a minimal host embedding luagee (release, then wasm-opt -Oz)
+#   tools/wasm.sh bench    tools/bench kernels, native against wasmtime, interleaved, median of 5
 #
 # Tools are pinned by version and sha256 and downloaded into a fresh folder under temp/wasm-tools; nothing runs
 # before its archive's checksum matches. A missing Rust target is installed with rustup. Any missing piece fails.
@@ -18,6 +20,10 @@ wasmtime_version=v50.0.1
 wasmtime_archive=wasmtime-$wasmtime_version-x86_64-linux.tar.xz
 wasmtime_url=https://github.com/bytecodealliance/wasmtime/releases/download/$wasmtime_version/$wasmtime_archive
 wasmtime_sha256=685466455dd42a14774a86c36c8f2e45cbb9bd6d92a850139315df60a75498a5
+binaryen_version=version_133
+binaryen_archive=binaryen-$binaryen_version-x86_64-linux.tar.gz
+binaryen_url=https://github.com/WebAssembly/binaryen/releases/download/$binaryen_version/$binaryen_archive
+binaryen_sha256=2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489
 
 # fetch NAME URL SHA256 MEMBER: prints the path of MEMBER (a path inside the archive) once the archive is verified.
 # The tool's folder appears only after its archive matched, so a folder that exists holds a verified tool.
@@ -44,6 +50,7 @@ fetch() {
     echo "$kept/$member"
 }
 wasmtime() { fetch "$wasmtime_version" "$wasmtime_url" "$wasmtime_sha256" "${wasmtime_archive%.tar.xz}/wasmtime"; }
+wasm_opt() { fetch "$binaryen_version" "$binaryen_url" "$binaryen_sha256" "binaryen-$binaryen_version/bin/wasm-opt"; }
 
 need_target() {
     rustup target list --installed | grep -qx "$target" || rustup target add "$target"
@@ -71,6 +78,33 @@ corpus)
         fi
     done
     [ "$fuzzed" = 1 ] || echo "wasm.sh: no fuzz corpus yet (fuzz/fuzz.sh smoke seeds one); the gate runs that first"
+    ;;
+size)
+    rustup target list --installed | grep -qx wasm32-unknown-unknown || rustup target add wasm32-unknown-unknown
+    optimizer=$(wasm_opt)
+    out=$here/temp/wasm-size
+    mkdir -p "$out"
+    # Each setting in a target folder of its own, so that switching settings rebuilds nothing twice.
+    for level in 3 s z; do
+        CARGO_PROFILE_RELEASE_OPT_LEVEL=$level CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_PANIC=abort \
+            cargo build --quiet --release -p luagee --no-default-features --example embed \
+            --target wasm32-unknown-unknown --target-dir "$out/target-$level"
+        built=$out/target-$level/wasm32-unknown-unknown/release/examples/embed.wasm
+        "$optimizer" -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+            --enable-mutable-globals "$built" -o "$out/embed-$level-oz.wasm"
+        printf 'opt-level=%s lto=fat: %8d bytes, wasm-opt -Oz: %8d bytes, gzip -9 of that: %8d bytes\n' "$level" \
+            "$(stat -c %s "$built")" "$(stat -c %s "$out/embed-$level-oz.wasm")" \
+            "$(gzip -9 --stdout "$out/embed-$level-oz.wasm" | wc -c)"
+    done
+    ;;
+bench)
+    need_target
+    runtime=$(wasmtime)
+    cargo build --quiet --release -p luagee --example lua
+    cargo build --quiet --release -p luagee --example lua --target "$target"
+    # Compiled ahead, so that the timings are the interpreter's, not Cranelift's.
+    "$runtime" compile -o temp/lua.cwasm "target/$target/release/examples/lua.wasm"
+    python3 -I tools/bench/bench.py --wasm "$runtime run --allow-precompiled --dir $here/tools/bench::$here/tools/bench $here/temp/lua.cwasm" 5
     ;;
 *)
     sed -n '2,12p' "$0"

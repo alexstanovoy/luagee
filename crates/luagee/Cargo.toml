@@ -22,6 +22,10 @@ name = "lua"
 required-features = ["fs"]
 
 [[example]]
+name = "embed"
+crate-type = ["cdylib"]
+
+[[example]]
 name = "corpus"
 required-features = ["fs"]
 
