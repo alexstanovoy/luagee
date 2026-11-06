@@ -30,6 +30,12 @@ The conformance corpus (`crates/luagee/tests/conformance`) holds scripts with th
 luagee prints the same, byte for byte. `tools/lua_diff/lua_diff.py` re-records them from a LuaJIT build and compares
 the two on random programs.
 
+Three other implementations' test suites run as well (`crates/luagee/tests/suites`, each with its provenance and
+license): PUC-Rio's Lua 5.1 tests, LuaJIT's test-cleanup tree and the Luau conformance scripts that are Lua 5.1.
+`skips.txt` there lists what does not run as written, each with its reason: what the sandbox leaves out (`io`, `os`,
+most of `debug`, `string.dump`, `newproxy`, weak tables), the places where LuaJIT, whose behaviour luagee follows,
+differs from PUC Lua or Luau, and the differences above.
+
 ## The sandbox
 
 A script is treated as hostile input. Whatever it does, the host keeps running:
@@ -68,6 +74,16 @@ line how it must end, and the tests check that it does.
 - Nested coroutine resumes stop at 300 levels ("C stack overflow"); LuaJIT goes deeper.
 - Syntax that only recent LuaJIT builds accept (`//`, `&`, `<<`, `!=`, `+=`) does not parse.
 - Bounds raise errors where LuaJIT would allocate without limit (a 10 GB `string.rep`, for one).
+- Scripts cannot steer the collector: `collectgarbage("stop")`, `"step"` and the tuning options change nothing, and
+  `collectgarbage("count")` and `gcinfo` count the storage the interpreter keeps for reuse, so they do not fall back
+  as LuaJIT's do once garbage is freed.
+- `load` reads its reader to the end before compiling, so a syntax error does not stop the reading early.
+- A function's limits (200 locals, 60 upvalues) are checked once the whole chunk has parsed: a chunk with a syntax
+  error further on reports that error instead.
+- Tracebacks and `error`'s levels see Lua functions only: `debug.traceback` lists no `[C]` frames, and a level past a
+  native function has no position. A message handler written in Lua has no room to run for a stack overflow, so
+  `xpcall` returns "error in error handling" there.
+- The length of a table with holes is a border, as Lua promises, but not always the one LuaJIT picks.
 
 ## Numbers and determinism
 
