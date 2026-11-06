@@ -40,6 +40,9 @@ pub enum ModuleNameError {
     Colon,
     /// It has a control character, NUL among them.
     Control,
+    /// A component is a device name on Windows (`CON`, `NUL`, `COM1`, `LPT1`, ... with any extension), or ends with a
+    /// dot or a space, which Windows strips: either names something other than a file in the folder.
+    Device,
 }
 
 impl ModuleName {
@@ -81,6 +84,9 @@ impl FromStr for ModuleName {
             if component.starts_with('.') {
                 return Err(ModuleNameError::Hidden);
             }
+            if is_device(component) {
+                return Err(ModuleNameError::Device);
+            }
             components.push(component);
         }
         if components.is_empty() {
@@ -93,6 +99,28 @@ impl FromStr for ModuleName {
             name: components.join("/"),
         })
     }
+}
+
+/// Whether Windows would read a component as a device, or change it by stripping a trailing dot or space.
+fn is_device(component: &str) -> bool {
+    if component.ends_with(['.', ' ']) {
+        return true;
+    }
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit())
+    };
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || numbered("COM")
+        || numbered("LPT")
 }
 
 fn refusal(c: char) -> Option<ModuleNameError> {
@@ -140,6 +168,9 @@ impl fmt::Display for ModuleNameError {
             ModuleNameError::Control => {
                 f.write_str("a module name may not have control characters")
             }
+            ModuleNameError::Device => f.write_str(
+                "a module name's components may not be device names or end with a dot or a space",
+            ),
         }
     }
 }

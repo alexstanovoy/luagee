@@ -426,7 +426,7 @@ impl<'a> Lexer<'a> {
         let digits: Vec<u8> = text.iter().copied().filter(|&c| c != b'_').collect();
         number::parse(&digits)
             .map(Token::Number)
-            .ok_or_else(|| self.error(format!("malformed number near '{}'", text.escape_ascii())))
+            .ok_or_else(|| self.error(format!("malformed number near '{}'", crate::shown(text))))
     }
 }
 

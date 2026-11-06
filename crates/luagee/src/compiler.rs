@@ -303,13 +303,7 @@ struct LocalVar {
     info: usize,
 }
 
-struct Label {
-    name: Name,
-    pc: usize,
-}
-
 struct PendingGoto {
-    name: Name,
     jump: usize,
     active: usize,
     line: u32,
@@ -323,8 +317,10 @@ struct BlockState {
     is_loop: bool,
     is_repeat: bool,
     breaks: Vec<usize>,
-    labels: Vec<Label>,
-    gotos: Vec<PendingGoto>,
+    /// Labels by name: where each is. Maps, so that many labels and gotos compile in n log n.
+    labels: BTreeMap<Name, usize>,
+    /// Gotos not resolved yet, by the label they want.
+    gotos: BTreeMap<Name, Vec<PendingGoto>>,
 }
 
 struct FunctionState {
@@ -696,8 +692,8 @@ impl Compiler<'_> {
             is_loop,
             is_repeat,
             breaks: Vec::new(),
-            labels: Vec::new(),
-            gotos: Vec::new(),
+            labels: BTreeMap::new(),
+            gotos: BTreeMap::new(),
         };
         f.blocks.push(state);
     }
@@ -750,23 +746,31 @@ impl Compiler<'_> {
                 .expect("break was checked to be in a loop");
             outer.breaks.extend(breaks);
         }
-        let mut gotos = block.gotos;
+        let gotos = block.gotos;
         if gotos.is_empty() {
             return Ok(());
         }
         match self.f().blocks.last_mut() {
             Some(parent) => {
-                for mut goto in gotos.drain(..) {
-                    goto.active = goto.active.min(block.active);
-                    parent.gotos.push(goto);
+                for (name, list) in gotos {
+                    let moved = list.into_iter().map(|goto| PendingGoto {
+                        active: goto.active.min(block.active),
+                        ..goto
+                    });
+                    parent.gotos.entry(name).or_default().extend(moved);
                 }
                 Ok(())
             }
             None => {
-                let goto = &gotos[0];
+                // The first unresolved goto in the source is the one reported.
+                let (name, goto) = gotos
+                    .iter()
+                    .flat_map(|(name, list)| list.iter().map(move |goto| (name, goto)))
+                    .min_by_key(|(_, goto)| goto.jump)
+                    .expect("a pending goto");
                 Err(self.syntax(
                     goto.line,
-                    format!("undefined label '{}'", String::from_utf8_lossy(&goto.name)),
+                    format!("undefined label '{}'", crate::shown(name)),
                 ))
             }
         }
@@ -901,7 +905,7 @@ impl Compiler<'_> {
             .blocks
             .iter()
             .rev()
-            .find_map(|b| b.labels.iter().find(|l| l.name == *name).map(|l| l.pc));
+            .find_map(|b| b.labels.get(name).copied());
         if let Some(pc) = target {
             self.patch(jump, pc);
             return Ok(());
@@ -912,12 +916,9 @@ impl Compiler<'_> {
             .last_mut()
             .expect("a block")
             .gotos
-            .push(PendingGoto {
-                name: name.clone(),
-                jump,
-                active,
-                line,
-            });
+            .entry(name.clone())
+            .or_default()
+            .push(PendingGoto { jump, active, line });
         Ok(())
     }
 
@@ -928,13 +929,9 @@ impl Compiler<'_> {
             .last()
             .expect("a block")
             .labels
-            .iter()
-            .any(|l| l.name == *name)
+            .contains_key(name)
         {
-            return Err(self.syntax(
-                line,
-                format!("duplicate label '{}'", String::from_utf8_lossy(name)),
-            ));
+            return Err(self.syntax(line, format!("duplicate label '{}'", crate::shown(name))));
         }
         let pc = self.pc();
         let block = self.f().blocks.last().expect("a block");
@@ -944,30 +941,32 @@ impl Compiler<'_> {
         } else {
             self.f().locals.len()
         };
-        let pending = std::mem::take(&mut self.f().blocks.last_mut().expect("a block").gotos);
-        let mut kept = Vec::new();
+        let pending = self
+            .f()
+            .blocks
+            .last_mut()
+            .expect("a block")
+            .gotos
+            .remove(name)
+            .unwrap_or_default();
         for goto in pending {
-            if goto.name != *name {
-                kept.push(goto);
-                continue;
-            }
             if goto.active < active {
                 let local = &self.f().locals[goto.active].name;
                 let message = format!(
                     "<goto {}> jumps into the scope of local '{}'",
-                    String::from_utf8_lossy(name),
-                    String::from_utf8_lossy(local)
+                    crate::shown(name),
+                    crate::shown(local)
                 );
                 return Err(self.syntax(goto.line, message));
             }
             self.patch(goto.jump, pc);
         }
-        let block = self.f().blocks.last_mut().expect("a block");
-        block.gotos = kept;
-        block.labels.push(Label {
-            name: name.clone(),
-            pc,
-        });
+        self.f()
+            .blocks
+            .last_mut()
+            .expect("a block")
+            .labels
+            .insert(name.clone(), pc);
         Ok(())
     }
 

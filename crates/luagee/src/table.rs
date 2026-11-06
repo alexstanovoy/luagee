@@ -45,7 +45,10 @@ impl Table {
 
     /// The bytes this table holds, as the interpreter counts them.
     pub(crate) fn bytes(&self) -> usize {
-        64 + self.array.capacity() * 16 + self.entries.capacity() * 40 + self.index.capacity() * 4
+        crate::heap::TABLE_SIZE
+            + self.array.capacity() * 16
+            + self.entries.capacity() * 40
+            + self.index.capacity() * 4
     }
 
     fn array_slot(&self, key: Value) -> Option<usize> {

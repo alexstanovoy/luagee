@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use luagee::{Error, FolderLoader, Limit, Limits, Lua};
+use luagee::{Error, FolderLoader, GcStress, Limit, Limits, Lua};
 
 /// The Rust stack an interpreter runs on, as a host should give it.
 const STACK: usize = 16 << 20;
@@ -30,8 +30,14 @@ fn scripts(folder: &str) -> Vec<PathBuf> {
     scripts
 }
 
-/// Runs a script on a thread of its own with these limits: what it printed, and how it ended.
-fn run(script: &Path, limits: Limits) -> (Vec<u8>, Result<(), Error>) {
+/// Runs a script on a thread of its own with this native stack, these limits and this collector mode: what it
+/// printed, and how it ended.
+fn run(
+    script: &Path,
+    limits: Limits,
+    stack: usize,
+    stress: GcStress,
+) -> (Vec<u8>, Result<(), Error>) {
     let script = script.to_path_buf();
     let (done, outcome) = mpsc::channel();
     let name = script
@@ -42,13 +48,21 @@ fn run(script: &Path, limits: Limits) -> (Vec<u8>, Result<(), Error>) {
     let chunk = name.clone();
     std::thread::Builder::new()
         .name(name.clone())
-        .stack_size(STACK)
+        .stack_size(stack)
         .spawn(move || {
             let source = std::fs::read(&script).expect("read the script");
             let folder = script.parent().expect("a folder").to_path_buf();
             let printed = Rc::new(RefCell::new(Vec::new()));
-            let mut lua = Lua::new(limits, 7).expect("an interpreter");
+            let mut lua = Lua::new(
+                limits,
+                luagee::Keys {
+                    hash: [7, 7],
+                    random: 7,
+                },
+            )
+            .expect("an interpreter");
             let sink = printed.clone();
+            lua.set_gc_stress(stress);
             lua.set_print(Box::new(move |line| {
                 sink.borrow_mut().extend_from_slice(line)
             }));
@@ -68,6 +82,30 @@ fn run(script: &Path, limits: Limits) -> (Vec<u8>, Result<(), Error>) {
 
 #[test]
 fn conformance_scripts_print_what_luajit_prints() {
+    conformance(STACK, GcStress::Off);
+}
+
+/// The collector misses no root: a whole collection at every point changes no output.
+#[test]
+fn conformance_scripts_print_the_same_when_a_whole_collection_runs_at_every_instruction() {
+    conformance(STACK, GcStress::Full);
+}
+
+/// The collector misses no barrier and frees nothing reached again: with an incremental collection always under
+/// way, a few steps at every instruction, no output changes.
+#[test]
+fn conformance_scripts_print_the_same_when_a_collection_is_always_under_way() {
+    conformance(STACK, GcStress::Incremental);
+}
+
+/// wasm runs on one thread with a small native stack: the corpora pass on 1 MiB.
+#[test]
+fn the_corpora_pass_on_a_one_megabyte_native_stack() {
+    conformance(1 << 20, GcStress::Off);
+    hostile(1 << 20);
+}
+
+fn conformance(stack: usize, stress: GcStress) {
     let limits = Limits {
         fuel_per_call: 1 << 36,
         fuel_per_tick: 1 << 36,
@@ -76,7 +114,7 @@ fn conformance_scripts_print_what_luajit_prints() {
     let mut failures = Vec::new();
     for script in scripts("conformance") {
         let expected = std::fs::read(script.with_extension("out")).expect("the recorded output");
-        let (printed, ended) = run(&script, limits);
+        let (printed, ended) = run(&script, limits, stack, stress);
         if let Err(error) = ended {
             failures.push(format!("{}: {error}", script.display()));
         } else if printed != expected {
@@ -134,6 +172,10 @@ fn expectation(script: &Path) -> Expectation {
 
 #[test]
 fn hostile_scripts_end_as_the_sandbox_promises() {
+    hostile(STACK);
+}
+
+fn hostile(stack: usize) {
     let limits = Limits {
         fuel_per_call: 5_000_000,
         fuel_per_tick: 5_000_000,
@@ -142,7 +184,7 @@ fn hostile_scripts_end_as_the_sandbox_promises() {
     };
     let mut failures = Vec::new();
     for script in scripts("hostile") {
-        let (printed, ended) = run(&script, limits);
+        let (printed, ended) = run(&script, limits, stack, GcStress::Off);
         let printed = String::from_utf8_lossy(&printed);
         let printed = printed.strip_suffix('\n').unwrap_or(&printed);
         let fine = match (expectation(&script), &ended) {

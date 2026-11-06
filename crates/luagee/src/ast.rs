@@ -142,3 +142,55 @@ impl Expr {
         )
     }
 }
+
+/// Drops an expression tree with a worklist instead of recursion: a chain of a million `+` nodes is a million boxes
+/// deep, and dropping it recursively would run out of native stack (wasm's above all).
+impl Drop for Expr {
+    fn drop(&mut self) {
+        let mut pending: Vec<Expr> = Vec::new();
+        take_children(&mut self.kind, &mut pending);
+        while let Some(mut expr) = pending.pop() {
+            take_children(&mut expr.kind, &mut pending);
+            // `expr` drops here with no expression children left: no recursion.
+        }
+    }
+}
+
+/// Moves an expression's child expressions out into `pending`, leaving it a leaf.
+fn take_children(kind: &mut ExprKind, pending: &mut Vec<Expr>) {
+    match std::mem::replace(kind, ExprKind::Nil) {
+        ExprKind::Binary(_, left, right) | ExprKind::Index(left, right) => {
+            pending.push(*left);
+            pending.push(*right);
+        }
+        ExprKind::Unary(_, inner) | ExprKind::Paren(inner) => pending.push(*inner),
+        ExprKind::Call(function, args) => {
+            pending.push(*function);
+            pending.extend(args);
+        }
+        ExprKind::Method(object, _, args) => {
+            pending.push(*object);
+            pending.extend(args);
+        }
+        ExprKind::Table(fields) => {
+            for field in fields {
+                match field {
+                    Field::Positional(value) => pending.push(value),
+                    Field::Keyed(key, value) => {
+                        pending.push(key);
+                        pending.push(value);
+                    }
+                }
+            }
+        }
+        // A function body's statements nest only as deep as the parser allowed.
+        ExprKind::Function(_)
+        | ExprKind::Nil
+        | ExprKind::True
+        | ExprKind::False
+        | ExprKind::Dots
+        | ExprKind::Number(_)
+        | ExprKind::String(_)
+        | ExprKind::Name(_) => {}
+    }
+}

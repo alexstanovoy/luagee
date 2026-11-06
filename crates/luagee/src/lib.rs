@@ -69,12 +69,21 @@ mod value;
 mod vm;
 
 pub use error::{Error, Limit};
+
+/// A script's bytes as an error message shows them: at most 60 of them, so that no message copies a huge string.
+pub(crate) fn shown(bytes: &[u8]) -> String {
+    const SHOWN: usize = 60;
+    if bytes.len() <= SHOWN {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    format!("{}...", String::from_utf8_lossy(&bytes[..SHOWN]))
+}
 pub use heap::HostFn;
 pub use limits::Limits;
 #[cfg(feature = "fs")]
 pub use loader::FolderLoader;
 pub use loader::Loader;
-pub use lua::{HostFunction, Lua};
+pub use lua::{HostFunction, Keys, Lua};
 pub use module_name::{ModuleName, ModuleNameError};
 pub use value::{FuncId, StrId, TableId, ThreadId, UserdataId, Value};
-pub use vm::{Args, LuaError, PrintSink, Vm};
+pub use vm::{Args, GcStress, LuaError, PrintSink, Traceback, Vm};

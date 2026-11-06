@@ -16,6 +16,8 @@ fn names_scripts_build_by_joining_stay_inside_the_folder() {
             "scripts/hero/items/some-name.lua",
         ),
         ("dir/file.with.dots", "dir/file.with.dots.lua"),
+        ("console", "console.lua"),
+        ("com10", "com10.lua"),
     ] {
         assert_eq!(file(name).as_deref(), Ok(expected), "{name:?}");
     }
@@ -35,6 +37,13 @@ fn names_that_could_leave_the_folder_are_refused() {
         ("scripts/x\n", ModuleNameError::Control),
         ("", ModuleNameError::Empty),
         ("././/", ModuleNameError::Empty),
+        ("con", ModuleNameError::Device),
+        ("lib/NUL.lua", ModuleNameError::Device),
+        ("Com1", ModuleNameError::Device),
+        ("lpt9.txt", ModuleNameError::Device),
+        ("lib/aux", ModuleNameError::Device),
+        ("lib/x.", ModuleNameError::Device),
+        ("lib/x ", ModuleNameError::Device),
     ] {
         assert_eq!(file(name), Err(refused), "{name:?}");
     }

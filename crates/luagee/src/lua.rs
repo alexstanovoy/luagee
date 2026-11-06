@@ -11,6 +11,18 @@ use crate::{Error, Limit, Limits};
 /// A host function: it reads its arguments with [`Vm`]'s accessors and pushes its results, returning their count.
 pub type HostFunction = Rc<crate::heap::HostFn>;
 
+/// What an interpreter's randomness comes from: both chosen by the host, as the library takes nothing from the
+/// operating system (it runs the same everywhere, wasm included).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Keys {
+    /// The key of the table hash. It must be secret to the scripts and different for every interpreter (draw it from
+    /// the host's entropy): a script that learned it could choose keys that collide. Iteration order never depends
+    /// on it, so it changes no script's output.
+    pub hash: [u64; 2],
+    /// The seed of `math.random`'s stream: the same seed and calls give the same numbers.
+    pub random: u64,
+}
+
 /// A sandboxed interpreter with the standard library open. Interpreters share nothing: a host isolates scripts by
 /// giving each group its own.
 pub struct Lua {
@@ -53,9 +65,9 @@ pub(crate) fn compile_chunk(
 }
 
 impl Lua {
-    /// An interpreter with these limits; `seed` keys its table hashing and seeds `math.random`.
-    pub fn new(limits: Limits, seed: u64) -> Result<Lua, Error> {
-        let mut vm = Vm::new(limits, seed).map_err(|e| to_error(&mut None, e))?;
+    /// An interpreter with these limits and keys.
+    pub fn new(limits: Limits, keys: Keys) -> Result<Lua, Error> {
+        let mut vm = Vm::new(limits, keys).map_err(|e| to_error(&mut None, e))?;
         crate::stdlib::open(&mut vm).map_err(|e| to_error(&mut None, e))?;
         Ok(Lua { vm })
     }
@@ -217,9 +229,21 @@ impl Lua {
         self.vm.heap.memory
     }
 
-    /// Runs the collector now.
-    pub fn collect(&mut self) {
-        self.vm.collect();
+    /// Runs a whole collection now. It fails only when what is alive is over the memory cap.
+    pub fn collect(&mut self) -> Result<(), Error> {
+        let vm = &mut self.vm;
+        vm.fuel = u64::MAX;
+        let result = vm.collect();
+        vm.fuel = 0;
+        result.map_err(|e| to_error(&mut Some(vm), e))
+    }
+
+    /// A test mode of the collector: collect far more often than needed, so that a value the collector fails to see
+    /// shows up at once. For tests and fuzzing; it makes everything much slower.
+    #[doc(hidden)]
+    pub fn set_gc_stress(&mut self, stress: crate::vm::GcStress) {
+        self.vm.gc_stress = stress;
+        self.vm.gc_threshold = self.vm.next_threshold(self.vm.heap.memory);
     }
 
     /// The interpreter, for host functions' argument accessors.
@@ -252,7 +276,10 @@ fn to_error(vm: &mut Option<&mut Vm>, error: LuaError) -> Error {
                 (_, Value::Nil) => "nil".to_owned(),
                 (_, other) => format!("(error object is a {} value)", other.type_name()),
             };
-            Error::Runtime { message, traceback }
+            Error::Runtime {
+                message,
+                traceback: traceback.lines(),
+            }
         }
     }
 }

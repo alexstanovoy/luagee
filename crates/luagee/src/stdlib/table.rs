@@ -59,7 +59,10 @@ fn insert(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
             let position = vm.check_integer(args, 1)?;
             let value = vm.arg(args, 2);
             if position <= n {
-                vm.charge_fuel((n - position.max(0)) as u64)?;
+                // Every element from `position` to `n` moves: paid before one moves.
+                let moves = (i128::from(n) - i128::from(position) + 1)
+                    .clamp(0, i128::from(u64::MAX)) as u64;
+                vm.charge_fuel(moves)?;
                 for i in (position..=n).rev() {
                     let moved = get(vm, t, i);
                     set(vm, t, i + 1, moved)?;
@@ -104,11 +107,19 @@ fn concat(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         _ => vm.check_integer(args, 3)?,
     };
     let mut out = Vec::new();
-    let mut i = first;
-    while i <= last {
+    for i in first..=last {
+        // Each piece is paid and its length checked before it is copied.
         match get(vm, t, i) {
-            Value::String(s) => out.extend_from_slice(vm.heap.string(s)),
-            Value::Number(n) => out.extend_from_slice(crate::number::format(n).as_bytes()),
+            Value::String(s) => {
+                let piece = vm.heap.string_rc(s);
+                charge_piece(vm, out.len(), piece.len() + separator.len())?;
+                out.extend_from_slice(&piece);
+            }
+            Value::Number(n) => {
+                let piece = crate::number::format(n);
+                charge_piece(vm, out.len(), piece.len() + separator.len())?;
+                out.extend_from_slice(piece.as_bytes());
+            }
             other => {
                 let message = format!(
                     "invalid value ({}) at index {i} in table for 'concat'",
@@ -120,14 +131,17 @@ fn concat(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         if i < last {
             out.extend_from_slice(&separator);
         }
-        if out.len() > vm.limits.string_length {
-            return Err(vm.string_overflow());
-        }
-        vm.charge_fuel(1)?;
-        i += 1;
     }
-    vm.charge_fuel(out.len() as u64 / 16)?;
     vm.push_string(&out)
+}
+
+/// Pays for a piece of `length` bytes about to be appended to an output of `so_far`, and checks the result's length.
+fn charge_piece(vm: &mut Vm, so_far: usize, length: usize) -> Result<(), LuaError> {
+    vm.charge_fuel(1 + length as u64 / 16)?;
+    if so_far + length > vm.limits.string_length {
+        return Err(vm.string_overflow());
+    }
+    Ok(())
 }
 
 fn foreach(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {

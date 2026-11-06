@@ -157,6 +157,15 @@ impl<'a> Matcher<'a> {
         }
     }
 
+    fn spend_many(&mut self, amount: u64) -> Result<(), PatternError> {
+        if self.fuel < amount {
+            self.fuel = 0;
+            return Err(PatternError::Limit(self.fuel_limit));
+        }
+        self.fuel -= amount;
+        Ok(())
+    }
+
     fn spend(&mut self) -> Result<(), PatternError> {
         if self.fuel == 0 {
             return Err(PatternError::Limit(self.fuel_limit));
@@ -364,10 +373,12 @@ impl<'a> Matcher<'a> {
             return Err(PatternError::Message("invalid capture index"));
         };
         let end = s + length;
-        if end <= self.source.len() && self.source[start..start + length] == self.source[s..end] {
-            for _ in 0..length / 16 {
-                self.spend()?;
-            }
+        if end > self.source.len() {
+            return Ok(None);
+        }
+        // The comparison is paid before it runs, whether it matches or not.
+        self.spend_many(1 + length as u64 / 16)?;
+        if self.source[start..start + length] == self.source[s..end] {
             Ok(Some(end))
         } else {
             Ok(None)

@@ -20,7 +20,7 @@ const LIMITS: Limits = Limits {
 };
 
 fuzz_target!(|data: &[u8]| {
-    let mut lua = Lua::new(LIMITS, 1).expect("an interpreter");
+    let mut lua = Lua::new(LIMITS, luagee::Keys { hash: [1, 1], random: 1 }).expect("an interpreter");
     lua.set_loader(|_: &luagee::ModuleName| Some(b"return ...".to_vec()));
     // Loaded first: the input may use up the source limits, which last the interpreter's life.
     let after = lua

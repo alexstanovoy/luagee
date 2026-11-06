@@ -7,7 +7,14 @@ use std::rc::Rc;
 use luagee::{Error, Limit, Limits, Lua, Value};
 
 fn lua(limits: Limits) -> Lua {
-    Lua::new(limits, 3).expect("an interpreter")
+    Lua::new(
+        limits,
+        luagee::Keys {
+            hash: [3, 3],
+            random: 3,
+        },
+    )
+    .expect("an interpreter")
 }
 
 #[test]
@@ -68,6 +75,64 @@ fn garbage_made_across_many_calls_is_collected_under_a_small_cap() {
         );
     }
     assert!(lua.memory() < 4 << 20);
+}
+
+/// A collection of a large heap costs fuel like any work: it runs only as far as the call's fuel goes, and the calls
+/// after it finish it.
+#[test]
+fn a_collection_runs_only_as_far_as_the_fuel_and_later_calls_finish_it() {
+    let mut lua = lua(Limits {
+        fuel_per_call: 40_000,
+        fuel_per_tick: 40_000,
+        memory: 128 << 20,
+        ..Limits::DEFAULT
+    });
+    // Filling pays for the collections it sets off too, so some calls run out of fuel on the way; what they made
+    // stays.
+    let fill = lua
+        .load(
+            "fill",
+            b"kept = kept or {} for i = 1, 500 do kept[#kept + 1] = ('x'):rep(200) .. #kept end",
+        )
+        .expect("compiles");
+    lua.pin(fill);
+    let count = lua.load("count", b"return #kept").expect("compiles");
+    lua.pin(count);
+    for _ in 0..4000 {
+        lua.begin_tick();
+        let _ = lua.call(fill, &[]);
+        lua.begin_tick();
+        if matches!(lua.call(count, &[]).as_deref(), Ok([Value::Number(n)]) if *n >= 200_000.0) {
+            break;
+        }
+    }
+    lua.collect().expect("the tables fit the cap");
+    let full = lua.memory();
+    lua.begin_tick();
+    let dropped = lua.exec("drop", b"kept = nil collectgarbage()");
+    assert!(
+        matches!(dropped, Err(Error::Limit(Limit::FuelPerCall))),
+        "a whole collection of 200000 strings needs more than one call's fuel: {dropped:?}"
+    );
+    assert!(
+        lua.memory() >= full,
+        "the sweep did not run past the fuel: {} < {full}",
+        lua.memory()
+    );
+    let idle = lua
+        .load("idle", b"local x = 0 for i = 1, 1000 do x = x + i end")
+        .expect("compiles");
+    lua.pin(idle);
+    for _ in 0..40 {
+        lua.begin_tick();
+        let _ = lua.call(idle, &[]);
+    }
+    // What stays is the slots the strings were in, and the index of strings.
+    assert!(
+        lua.memory() < full / 4,
+        "later calls finished the collection: {} of {full}",
+        lua.memory()
+    );
 }
 
 #[test]

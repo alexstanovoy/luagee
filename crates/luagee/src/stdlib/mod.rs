@@ -161,7 +161,7 @@ impl Vm {
     }
 
     pub(crate) fn check_number(&mut self, args: Args, i: usize) -> Result<f64, LuaError> {
-        match self.to_number(self.arg(args, i)) {
+        match self.coerce_number(self.arg(args, i)) {
             Some(n) => Ok(n),
             None => Err(self.arg_type_error(args, i, "number")),
         }

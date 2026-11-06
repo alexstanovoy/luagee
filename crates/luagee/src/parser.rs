@@ -90,8 +90,8 @@ const UNARY_PRIORITY: u8 = 8;
 
 fn describe(token: &Token) -> String {
     match token {
-        Token::Name(n) => String::from_utf8_lossy(n).into_owned(),
-        Token::String(s) => String::from_utf8_lossy(s).into_owned(),
+        Token::Name(n) => crate::shown(n),
+        Token::String(s) => crate::shown(s),
         Token::Number(n) => crate::number::format(*n),
         Token::Eof => "<eof>".into(),
         other => {

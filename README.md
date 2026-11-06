@@ -4,9 +4,10 @@ A sandboxed Lua 5.1 interpreter with LuaJIT-compatible extensions, in safe Rust,
 under hard limits. No `unsafe`, no dependencies, and it builds for `wasm32-unknown-unknown`.
 
 ```rust
-use luagee::{Limits, Lua};
+use luagee::{Keys, Limits, Lua};
 
-let mut lua = Lua::new(Limits::DEFAULT, 1)?;
+// The hash key must be secret to the scripts and differ per interpreter: draw it from the host's entropy.
+let mut lua = Lua::new(Limits::DEFAULT, Keys { hash: [entropy_0, entropy_1], random: seed })?;
 lua.set_print(Box::new(|line| print!("{}", String::from_utf8_lossy(line))));
 let results = lua.exec("hello", b"local t = {} for i = 1, 3 do t[i] = i * i end return table.concat(t, ' ')")?;
 ```
@@ -36,14 +37,18 @@ A script is treated as hostile input. Whatever it does, the host keeps running:
 - Every call runs on fuel counted in VM instructions, and every library function pays for its work: bytes copied,
   pattern-matching steps, values moved, comparisons, allocations, the collector's walks. Fuel is bounded per call and
   per host tick.
-- Memory is capped by the interpreter's own count of what it holds, the same on every platform.
+- Memory is capped by the interpreter's own count of what it holds (objects, the storage they sit in, stacks,
+  compiled code), the same on every platform.
+- The collector is incremental and pays fuel for every value it traces and every slot it sweeps, as it goes: its
+  work never outruns a call's fuel, and the next call goes on where it stopped.
 - Running out of fuel or memory, or loading too much source (per module, in all, or too many modules), ends the call
   with `Error::Limit`. No `pcall` catches it, so no script can retry its way past a bound.
 - The other bounds raise Lua's own errors, which scripts may catch: "stack overflow" (Lua calls are frames on the
   interpreter's heap), "C stack overflow" (native code calling back into Lua nests at most 300 deep), "string length
   overflow", "pattern too complex", "chunk has too many syntax levels". All Rust recursion is bounded; a few
   megabytes of thread stack are enough (16 MiB is ample).
-- Table keys are hashed with a keyed SipHash the script never sees, so no script can choose keys that collide.
+- Table keys are hashed with a keyed SipHash the script never sees, so no script can choose keys that collide. The
+  hash key and `math.random`'s seed are separate, and both come from the host.
 - No IO, OS, FFI, JIT or bytecode: `load`, `loadstring` and `dofile` take source text only. There is no
   `string.dump`, `newproxy`, `io`, `os`, `ffi` or `jit`, and `debug` has only `traceback` and a `getinfo` that reports
   a function's source and lines.

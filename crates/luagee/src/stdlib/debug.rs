@@ -22,7 +22,7 @@ fn traceback(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         text.push(b'\n');
     }
     text.extend_from_slice(b"stack traceback:");
-    for line in vm.traceback() {
+    for line in vm.traceback().lines() {
         text.extend_from_slice(b"\n\t");
         text.extend_from_slice(line.as_bytes());
     }

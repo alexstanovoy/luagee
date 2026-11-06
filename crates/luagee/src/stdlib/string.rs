@@ -353,6 +353,7 @@ fn set_upvalue(vm: &mut Vm, args: Args, i: usize, value: Value) {
         && let Function::Native { upvalues, .. } = vm.heap.functions.get_mut(f.0)
     {
         upvalues[i] = value;
+        vm.heap.barrier(value);
     }
 }
 
@@ -493,13 +494,22 @@ fn add_value(
 
 fn append(vm: &mut Vm, out: &mut Vec<u8>, value: Value) -> Result<(), LuaError> {
     match value {
-        Value::String(s) => out.extend_from_slice(vm.heap.string(s)),
-        Value::Number(n) => out.extend_from_slice(number::format(n).as_bytes()),
-        _ => {}
+        Value::String(s) => {
+            let piece = vm.heap.string_rc(s);
+            append_bytes(vm, out, &piece)
+        }
+        Value::Number(n) => append_bytes(vm, out, number::format(n).as_bytes()),
+        _ => Ok(()),
     }
-    if out.len() > vm.limits.string_length {
+}
+
+/// Appends to an output after paying for the bytes and checking the result's length: no work before the check.
+fn append_bytes(vm: &mut Vm, out: &mut Vec<u8>, piece: &[u8]) -> Result<(), LuaError> {
+    vm.charge_fuel(piece.len() as u64 / 16)?;
+    if out.len() + piece.len() > vm.limits.string_length {
         return Err(vm.string_overflow());
     }
+    out.extend_from_slice(piece);
     Ok(())
 }
 
@@ -605,7 +615,7 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                 let mut text = vec![n as u8];
                 pad_bytes(&spec, &mut text);
                 argument += 1;
-                out.extend_from_slice(&text);
+                append_bytes(vm, &mut out, &text)?;
                 continue;
             }
             b'e' | b'E' | b'f' | b'F' | b'g' | b'G' => {
@@ -622,7 +632,15 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                 let value = vm.check_any(args, argument)?;
                 let shown = vm.display_value(value)?;
                 let mut text = match shown {
-                    Value::String(s) => vm.heap.string(s).to_vec(),
+                    Value::String(s) => {
+                        let piece = vm.heap.string_rc(s);
+                        let kept = spec.precision.map_or(piece.len(), |p| p.min(piece.len()));
+                        vm.charge_fuel(kept as u64 / 16)?;
+                        if out.len() + kept > vm.limits.string_length {
+                            return Err(vm.string_overflow());
+                        }
+                        piece[..kept].to_vec()
+                    }
                     Value::Number(n) => number::format(n).into_bytes(),
                     _ => return Err(vm.arg_type_error(args, argument, "string")),
                 };
@@ -631,25 +649,18 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                 }
                 pad_bytes(&spec, &mut text);
                 argument += 1;
-                out.extend_from_slice(&text);
-                if out.len() > vm.limits.string_length {
-                    return Err(vm.string_overflow());
-                }
+                append_bytes(vm, &mut out, &text)?;
                 continue;
             }
             other => {
-                let shown = String::from_utf8_lossy(&template[start - 1..i]).into_owned();
+                let shown = crate::shown(&template[start - 1..i]);
                 let _ = other;
                 return Err(vm.error(format!("invalid option '{shown}' to 'format'")));
             }
         };
         argument += 1;
-        out.extend_from_slice(text.as_bytes());
-        if out.len() > vm.limits.string_length {
-            return Err(vm.string_overflow());
-        }
+        append_bytes(vm, &mut out, text.as_bytes())?;
     }
-    charge_copy(vm, out.len())?;
     vm.push_string(&out)
 }
 

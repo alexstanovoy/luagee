@@ -8,9 +8,10 @@ use std::rc::Rc;
 
 use crate::Limit;
 use crate::Limits;
-use crate::heap::{Arena, Function, Heap, NativeFn};
+use crate::heap::{Arena, Function, Heap, NativeFn, Phase};
 use crate::number;
 use crate::proto::{ArithOp, Capture, CompareOp, Op, Proto, Rk};
+use crate::table::Table;
 use crate::value::{CellId, FuncId, StrId, TableId, ThreadId, Value};
 
 /// How deeply native functions may nest Lua calls ("C stack overflow" past it). Each level is a few kilobytes of
@@ -24,6 +25,8 @@ const SLOT_BYTES: usize = 16;
 const FRAME_BYTES: usize = 64;
 /// The bytes a coroutine is counted as, beyond its stack.
 const THREAD_BYTES: usize = 256;
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(crate::heap::slot_size::<ThreadState>() <= THREAD_BYTES);
 
 /// Why a call ended early, inside the interpreter: what host functions return to raise an error.
 #[derive(Clone, Debug)]
@@ -31,12 +34,27 @@ pub enum LuaError {
     /// A Lua error, catchable by `pcall`.
     Runtime {
         value: Value,
-        traceback: Vec<String>,
+        traceback: Traceback,
         /// Whether the error position is already in the message (or must not be added).
         located: bool,
     },
     /// A limit was crossed: nothing in the script can catch it.
     Limit(Limit),
+}
+
+/// Where the Lua calls running at an error stood, innermost first: kept as functions and instruction indexes, and
+/// turned into text only when the error reaches the host (most errors are caught and never shown).
+#[derive(Clone, Debug, Default)]
+pub struct Traceback(Vec<(Rc<Proto>, usize)>);
+
+impl Traceback {
+    /// `chunk:line` per frame, innermost first.
+    pub(crate) fn lines(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .map(|(proto, pc)| Vm::position(proto, *pc))
+            .collect()
+    }
 }
 
 /// A native function's arguments: `count` values on the stack from `base`.
@@ -51,7 +69,6 @@ pub(crate) struct Frame {
     pub(crate) function: FuncId,
     pub(crate) proto: Rc<Proto>,
     pub(crate) upvalues: Rc<[CellId]>,
-    pub(crate) env: TableId,
     pub(crate) pc: usize,
     pub(crate) base: usize,
     /// Where the function sat: its results go there.
@@ -93,9 +110,17 @@ pub(crate) struct ThreadState {
     /// The native nesting when this coroutine was last resumed.
     pub(crate) depth: u32,
     pub(crate) resumer: Option<ThreadId>,
+    /// The bytes of this coroutine's stack already counted against the memory cap (while it runs, `Vm::stack_charged`
+    /// holds them).
+    pub(crate) charged: usize,
 }
 
 impl ThreadState {
+    /// The counted bytes of a coroutine out of its slot's storage: its stack and frames.
+    fn bytes(&self) -> usize {
+        THREAD_BYTES + self.stack.capacity() * SLOT_BYTES + self.frames.capacity() * FRAME_BYTES
+    }
+
     fn new() -> ThreadState {
         ThreadState {
             stack: Vec::new(),
@@ -105,6 +130,7 @@ impl ThreadState {
             pending: None,
             depth: 0,
             resumer: None,
+            charged: 0,
         }
     }
 }
@@ -129,6 +155,27 @@ pub(crate) enum Protected {
     Done,
     /// Ran `coroutine.yield`: the coroutine suspends.
     Yielded,
+}
+
+/// The collector's test modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GcStress {
+    /// Collect when memory says so.
+    Off,
+    /// A whole collection at every one of the collector's points.
+    Full,
+    /// Always an incremental collection under way, a few values traced or slots swept per point: the most interleaving that still lets a collection end.
+    Incremental,
+}
+
+impl GcStress {
+    fn step(self) -> usize {
+        if self == GcStress::Incremental {
+            8
+        } else {
+            GC_STEP
+        }
+    }
 }
 
 /// How the loop stopped.
@@ -191,6 +238,16 @@ pub struct Vm {
     pub(crate) gc_threshold: usize,
     pub(crate) gc_epoch: u64,
     pub(crate) gc_requested: bool,
+    /// The arena the sweep is in (strings, tables, functions, cells, userdata, threads).
+    gc_arena: usize,
+    /// The counted bytes the sweep kept so far.
+    gc_kept: usize,
+    /// Memory as counted when the sweep began.
+    gc_memory_at_sweep: usize,
+    /// The bytes of compiled code the current collection found alive.
+    pub(crate) gc_protos: usize,
+    /// A test mode that collects far more often than needed, to find a root or a barrier missing.
+    pub(crate) gc_stress: GcStress,
     pub(crate) stack_charged: usize,
     pub(crate) scripts_loaded: usize,
     pub(crate) modules_loaded: u32,
@@ -203,8 +260,19 @@ pub struct Vm {
 pub(crate) const ALLOCATION_FUEL: u64 = 4;
 /// The values copied for one unit of fuel, where one instruction moves many (calls, returns, `...`, constructors).
 pub(crate) const VALUES_PER_FUEL: usize = 8;
-/// The bytes of live memory a collection walks for one unit of fuel.
-const GC_BYTES_PER_FUEL: usize = 64;
+/// The objects the collector traces or sweeps for one unit of fuel.
+const GC_OBJECTS_PER_FUEL: usize = 4;
+/// The work (gray values traced, slots swept) of one step of an incremental collection.
+const GC_STEP: usize = 256;
+/// The counted bytes of a function object.
+fn function_bytes(function: &Function) -> usize {
+    crate::heap::FUNCTION_SIZE
+        + match function {
+            Function::Lua { upvalues, .. } => upvalues.len() * 8,
+            Function::Native { upvalues, .. } => upvalues.len() * 16,
+        }
+}
+
 /// The smallest collection threshold.
 const MIN_THRESHOLD: usize = 1 << 20;
 
@@ -218,8 +286,8 @@ macro_rules! located {
 }
 
 impl Vm {
-    pub(crate) fn new(limits: Limits, seed: u64) -> Result<Vm, LuaError> {
-        let mut heap = Heap::new(limits.memory, seed);
+    pub(crate) fn new(limits: Limits, keys: crate::Keys) -> Result<Vm, LuaError> {
+        let mut heap = Heap::new(limits.memory, keys.hash);
         let mut intern = |s: &str| heap.intern(s.as_bytes());
         let names = Names {
             index: intern("__index")?,
@@ -269,10 +337,15 @@ impl Vm {
             gc_threshold: MIN_THRESHOLD,
             gc_epoch: 0,
             gc_requested: false,
+            gc_arena: 0,
+            gc_kept: 0,
+            gc_memory_at_sweep: 0,
+            gc_protos: 0,
+            gc_stress: GcStress::Off,
             stack_charged: 0,
             scripts_loaded: 0,
             modules_loaded: 0,
-            random: crate::stdlib::Random::new(seed),
+            random: crate::stdlib::Random::new(keys.random),
             print: None,
             loader: None,
         })
@@ -285,7 +358,7 @@ impl Vm {
         match self.heap.intern(message.as_ref()) {
             Ok(s) => LuaError::Runtime {
                 value: Value::String(s),
-                traceback: Vec::new(),
+                traceback: Traceback::default(),
                 located: false,
             },
             Err(e) => e,
@@ -324,14 +397,9 @@ impl Vm {
         else {
             return error;
         };
-        let mut traceback = Vec::new();
-        for (i, frame) in self.frames.iter().rev().take(TRACEBACK_FRAMES).enumerate() {
-            let at = if i == 0 {
-                pc.unwrap_or(frame.pc)
-            } else {
-                frame.pc
-            };
-            traceback.push(Self::position(&frame.proto, at.saturating_sub(1)));
+        let mut traceback = self.traceback();
+        if let (Some(pc), Some((_, at))) = (pc, traceback.0.first_mut()) {
+            *at = pc.saturating_sub(1);
         }
         let value = match (value, self.frames.last()) {
             (Value::String(s), Some(frame)) => {
@@ -389,13 +457,15 @@ impl Vm {
         }
     }
 
-    pub(crate) fn traceback(&self) -> Vec<String> {
-        self.frames
-            .iter()
-            .rev()
-            .take(TRACEBACK_FRAMES)
-            .map(|f| Self::position(&f.proto, f.pc.saturating_sub(1)))
-            .collect()
+    pub(crate) fn traceback(&self) -> Traceback {
+        Traceback(
+            self.frames
+                .iter()
+                .rev()
+                .take(TRACEBACK_FRAMES)
+                .map(|f| (f.proto.clone(), f.pc.saturating_sub(1)))
+                .collect(),
+        )
     }
 
     // --- the stack -------------------------------------------------------------------------------------------
@@ -408,10 +478,16 @@ impl Vm {
             return Ok(());
         }
         self.stack.resize(len, Value::Nil);
-        let capacity = self.stack.capacity() * SLOT_BYTES;
-        if capacity > self.stack_charged {
-            self.heap.charge(capacity - self.stack_charged)?;
-            self.stack_charged = capacity;
+        self.charge_stack()
+    }
+
+    /// Counts what the running coroutine's stack and frames grew by since they were last counted.
+    #[inline]
+    fn charge_stack(&mut self) -> Result<(), LuaError> {
+        let bytes = self.stack.capacity() * SLOT_BYTES + self.frames.capacity() * FRAME_BYTES;
+        if bytes > self.stack_charged {
+            self.heap.charge(bytes - self.stack_charged)?;
+            self.stack_charged = bytes;
         }
         Ok(())
     }
@@ -467,7 +543,12 @@ impl Vm {
 
     /// A value as a number, converting numeric strings, as arithmetic does.
     #[inline]
-    pub(crate) fn to_number(&self, value: Value) -> Option<f64> {
+    pub(crate) fn coerce_number(&mut self, value: Value) -> Option<f64> {
+        // Reading a numeric string is work in its length: paid (the next instruction stops when fuel ran out).
+        if let Value::String(s) = value {
+            let cost = 1 + self.heap.string(s).len() as u64 / 16;
+            self.fuel = self.fuel.saturating_sub(cost);
+        }
         match value {
             Value::Number(n) => Some(n),
             Value::String(s) => number::parse(self.heap.string(s)),
@@ -599,7 +680,7 @@ impl Vm {
     }
 
     pub(crate) fn arith(&mut self, op: ArithOp, a: Value, b: Value) -> Result<Value, LuaError> {
-        if let (Some(x), Some(y)) = (self.to_number(a), self.to_number(b)) {
+        if let (Some(x), Some(y)) = (self.coerce_number(a), self.coerce_number(b)) {
             return Ok(Value::Number(Self::arith_numbers(op, x, y)));
         }
         let event = self.arith_event(op);
@@ -608,7 +689,11 @@ impl Vm {
             handler = self.metamethod(b, event);
         }
         if handler == Value::Nil {
-            let culprit = if self.to_number(a).is_some() { b } else { a };
+            let culprit = if self.coerce_number(a).is_some() {
+                b
+            } else {
+                a
+            };
             return Err(self.error(format!(
                 "attempt to perform arithmetic on a {} value",
                 Self::type_of(culprit)
@@ -618,7 +703,7 @@ impl Vm {
     }
 
     pub(crate) fn negate(&mut self, a: Value) -> Result<Value, LuaError> {
-        if let Some(x) = self.to_number(a) {
+        if let Some(x) = self.coerce_number(a) {
             return Ok(Value::Number(number::neg(x)));
         }
         let handler = self.metamethod(a, self.names.unm);
@@ -691,10 +776,19 @@ impl Vm {
         }
     }
 
+    /// Pays for comparing two strings: up to the shorter one's bytes.
+    fn charge_compare(&mut self, x: StrId, y: StrId) -> Result<(), LuaError> {
+        let length = self.heap.string(x).len().min(self.heap.string(y).len());
+        self.charge_fuel(length as u64 / 16)
+    }
+
     pub(crate) fn less_than(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
         match (a, b) {
             (Value::Number(x), Value::Number(y)) => Ok(x < y),
-            (Value::String(x), Value::String(y)) => Ok(self.heap.string(x) < self.heap.string(y)),
+            (Value::String(x), Value::String(y)) => {
+                self.charge_compare(x, y)?;
+                Ok(self.heap.string(x) < self.heap.string(y))
+            }
             _ => {
                 let handler = self.order_handler(a, b, self.names.lt);
                 if handler == Value::Nil {
@@ -708,7 +802,10 @@ impl Vm {
     pub(crate) fn less_equal(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
         match (a, b) {
             (Value::Number(x), Value::Number(y)) => Ok(x <= y),
-            (Value::String(x), Value::String(y)) => Ok(self.heap.string(x) <= self.heap.string(y)),
+            (Value::String(x), Value::String(y)) => {
+                self.charge_compare(x, y)?;
+                Ok(self.heap.string(x) <= self.heap.string(y))
+            }
             _ => {
                 let handler = self.order_handler(a, b, self.names.le);
                 if handler != Value::Nil {
@@ -913,14 +1010,12 @@ impl Vm {
             return Err(self.error("stack overflow"));
         }
         let Function::Lua {
-            proto,
-            upvalues,
-            env,
+            proto, upvalues, ..
         } = self.heap.functions.get(function.0)
         else {
             unreachable!("a Lua function")
         };
-        let (proto, upvalues, env) = (proto.clone(), upvalues.clone(), *env);
+        let (proto, upvalues) = (proto.clone(), upvalues.clone());
         let params = usize::from(proto.params);
         let given = count.min(params);
         let first = slot + 1;
@@ -943,7 +1038,6 @@ impl Vm {
             function,
             proto,
             upvalues,
-            env,
             pc: 0,
             base,
             slot,
@@ -952,6 +1046,7 @@ impl Vm {
             boundary,
             catch: None,
         });
+        self.charge_stack()?;
         Ok(())
     }
 
@@ -1154,9 +1249,12 @@ impl Vm {
                     return Err(LuaError::Limit(self.fuel_limit));
                 }
                 self.fuel -= 1;
-                if self.heap.memory >= self.gc_threshold || self.gc_requested {
+                if self.heap.phase != Phase::Idle
+                    || self.heap.memory >= self.gc_threshold
+                    || self.gc_requested
+                {
                     self.frames.last_mut().expect("a running frame").pc = pc;
-                    self.collect();
+                    located!(self, self.gc_point(), pc);
                 }
                 let op = code[pc];
                 pc += 1;
@@ -1192,7 +1290,7 @@ impl Vm {
                         let Value::Cell(cell) = self.stack[base + usize::from(cell)] else {
                             unreachable!("a cell register")
                         };
-                        *self.heap.cells.get_mut(cell.0) = self.stack[base + usize::from(b)];
+                        self.heap.set_cell(cell, self.stack[base + usize::from(b)]);
                     }
                     Op::GetUpvalue { a, upvalue } => {
                         let cell = self.frames.last().expect("a running frame").upvalues
@@ -1202,10 +1300,10 @@ impl Vm {
                     Op::SetUpvalue { upvalue, b } => {
                         let cell = self.frames.last().expect("a running frame").upvalues
                             [usize::from(upvalue)];
-                        *self.heap.cells.get_mut(cell.0) = self.stack[base + usize::from(b)];
+                        self.heap.set_cell(cell, self.stack[base + usize::from(b)]);
                     }
                     Op::GetGlobal { a, k } => {
-                        let env = self.frames.last().expect("a running frame").env;
+                        let env = self.running_env();
                         let key = proto.constants[k as usize];
                         let value = self.heap.raw_get(env, key);
                         let value =
@@ -1217,7 +1315,7 @@ impl Vm {
                         self.stack[base + usize::from(a)] = value;
                     }
                     Op::SetGlobal { b, k } => {
-                        let env = self.frames.last().expect("a running frame").env;
+                        let env = self.running_env();
                         let key = proto.constants[k as usize];
                         let value = self.stack[base + usize::from(b)];
                         if self.heap.table(env).metatable.is_none() {
@@ -1289,7 +1387,11 @@ impl Vm {
                             }
                             _ => {
                                 let result = self.arith(op, x, y);
-                                let culprit = if self.to_number(x).is_some() { c } else { b };
+                                let culprit = if self.coerce_number(x).is_some() {
+                                    c
+                                } else {
+                                    b
+                                };
                                 let result = match culprit.0 {
                                     r if r < Rk::CONSTANT => result
                                         .map_err(|e| self.name_error(e, &proto, pc - 1, r as u8)),
@@ -1469,9 +1571,9 @@ impl Vm {
                     }
                     Op::ForPrep { a, offset } => {
                         let a = base + usize::from(a);
-                        let start = self.to_number(self.stack[a]);
-                        let limit = self.to_number(self.stack[a + 1]);
-                        let step = self.to_number(self.stack[a + 2]);
+                        let start = self.coerce_number(self.stack[a]);
+                        let limit = self.coerce_number(self.stack[a + 1]);
+                        let step = self.coerce_number(self.stack[a + 2]);
                         let (Some(start), Some(limit), Some(step)) = (start, limit, step) else {
                             let message = if start.is_none() {
                                 "'for' initial value must be a number"
@@ -1541,8 +1643,8 @@ impl Vm {
                     }
                     Op::Closure { a, proto: index } => {
                         let child = proto.protos[index as usize].clone();
+                        let env = self.running_env();
                         let frame = self.frames.last().expect("a running frame");
-                        let env = frame.env;
                         let mut upvalues = Vec::with_capacity(child.captures.len());
                         for capture in &child.captures {
                             upvalues.push(match *capture {
@@ -1597,6 +1699,17 @@ impl Vm {
         }
     }
 
+    /// The running function's environment, read from the function itself (never a copy that `setfenv` could leave
+    /// stale).
+    #[inline]
+    fn running_env(&self) -> TableId {
+        let function = self.frames.last().expect("a running frame").function;
+        match self.heap.functions.get(function.0) {
+            Function::Lua { env, .. } => *env,
+            Function::Native { .. } => unreachable!("a frame runs a Lua function"),
+        }
+    }
+
     /// The operand value of an `Rk`.
     #[inline]
     fn rk(&self, proto: &Proto, base: usize, rk: Rk) -> Value {
@@ -1631,6 +1744,9 @@ impl Vm {
         else {
             return error;
         };
+        // Naming scans the function's locals for up to 64 instructions: paid as the work it is.
+        let work = 64 * (1 + proto.locals.len() as u64 / 16);
+        self.fuel = self.fuel.saturating_sub(work);
         let local_name = |register: u8| {
             proto
                 .locals
@@ -1703,7 +1819,7 @@ impl Vm {
         match self.heap.intern(&rewritten) {
             Ok(s) => LuaError::Runtime {
                 value: Value::String(s),
-                traceback: Vec::new(),
+                traceback: Traceback::default(),
                 located: false,
             },
             Err(e) => e,
@@ -1732,23 +1848,86 @@ impl Vm {
     }
 
     // --- the collector ---------------------------------------------------------------------------------------
+    //
+    // Incremental mark and sweep. Marking traces a few gray values at each of the collector's points (between two
+    // instructions), behind a write barrier; then the roots are traced once more and the sweep frees what is unmarked,
+    // a few slots at each point. Every step pays fuel as it goes and stops when the fuel is gone, so the collector's
+    // work never outruns the call's fuel; the next point goes on from there. Memory is recounted from what the sweep
+    // kept, plus what was charged while it ran.
 
-    /// `collectgarbage("collect")`: a collection at the next instruction, paid for now by the memory it will walk.
-    pub(crate) fn request_collection(&mut self) -> Result<(), LuaError> {
-        self.charge_fuel((self.heap.memory / GC_BYTES_PER_FUEL) as u64)?;
+    /// `collectgarbage("collect")`: a whole collection at the next instruction.
+    pub(crate) fn request_collection(&mut self) {
         self.gc_requested = true;
+    }
+
+    /// The collector's point between two instructions: a step of the collection under way, else the start of one
+    /// when memory reached the threshold. A requested collection, a stress mode or memory past the cap run whole
+    /// collections now. Fails when, after a collection, what is alive is still over the cap.
+    #[inline]
+    fn gc_point(&mut self) -> Result<(), LuaError> {
+        if self.gc_requested || self.gc_stress == GcStress::Full {
+            return self.collect();
+        }
+        if self.heap.phase == Phase::Idle {
+            if self.heap.memory < self.gc_threshold {
+                return Ok(());
+            }
+            self.gc_start();
+        }
+        // Past the cap, finish now rather than let allocation outrun the collection.
+        if self.heap.memory > self.heap.cap {
+            return self.gc_complete();
+        }
+        self.gc_advance(self.gc_stress.step())
+    }
+
+    /// A whole collection now: the one under way finished, then a new one from the start (the host's `collect`,
+    /// `collectgarbage("collect")`).
+    pub(crate) fn collect(&mut self) -> Result<(), LuaError> {
+        self.gc_requested = false;
+        self.gc_complete()?;
+        self.gc_start();
+        self.gc_complete()
+    }
+
+    /// Runs the collection under way to its end.
+    fn gc_complete(&mut self) -> Result<(), LuaError> {
+        // Each advance with no bound ends its phase (or runs out of fuel): marking, then sweeping.
+        for _ in 0..2 {
+            if self.heap.phase == Phase::Idle {
+                return Ok(());
+            }
+            self.gc_advance(usize::MAX)?;
+        }
+        assert_eq!(
+            self.heap.phase,
+            Phase::Idle,
+            "two unbounded advances end a collection"
+        );
         Ok(())
     }
 
-    /// Marks everything reachable and frees the rest; recounts memory from what survived. The walk is paid in fuel
-    /// by the memory it covered, so no script makes the collector run for free.
-    pub(crate) fn collect(&mut self) {
-        self.gc_requested = false;
-        self.gc_epoch += 1;
-        let epoch = self.gc_epoch;
-        let mut gray: Vec<Value> = Vec::new();
-        let mut live = 0usize;
+    /// Up to `budget` work of the collection under way: gray values traced, or slots swept.
+    fn gc_advance(&mut self, budget: usize) -> Result<(), LuaError> {
+        match self.heap.phase {
+            Phase::Idle => Ok(()),
+            Phase::Marking => {
+                if self.trace_gray(budget)? {
+                    self.gc_end_marking()
+                } else {
+                    Ok(())
+                }
+            }
+            Phase::Sweeping => self.gc_sweep(budget),
+        }
+    }
+
+    /// Every root, in one place: the running coroutine's stack and frames, what the host pinned, the registry. A
+    /// suspended coroutine is not a root; it is reached through whatever holds it.
+    fn push_roots(&mut self) {
+        let gray = &mut self.heap.gray;
         gray.extend_from_slice(&self.stack);
+        Self::push_frames(&self.frames, gray);
         gray.extend_from_slice(&self.pinned);
         gray.push(Value::Table(self.globals));
         gray.push(Value::Table(self.loaded));
@@ -1758,133 +1937,291 @@ impl Vm {
         gray.push(Value::Thread(self.main));
         gray.push(Value::Thread(self.current));
         let names = &self.names;
-        for name in [
-            names.index,
-            names.newindex,
-            names.call,
-            names.add,
-            names.sub,
-            names.mul,
-            names.div,
-            names.modulo,
-            names.pow,
-            names.unm,
-            names.concat,
-            names.len,
-            names.eq,
-            names.lt,
-            names.le,
-            names.tostring,
-            names.metatable,
-            names.name,
-        ] {
-            gray.push(Value::String(name));
-        }
-        let mut protos: Vec<Rc<Proto>> = Vec::new();
-        for frame in &self.frames {
+        gray.extend(
+            [
+                names.index,
+                names.newindex,
+                names.call,
+                names.add,
+                names.sub,
+                names.mul,
+                names.div,
+                names.modulo,
+                names.pow,
+                names.unm,
+                names.concat,
+                names.len,
+                names.eq,
+                names.lt,
+                names.le,
+                names.tostring,
+                names.metatable,
+                names.name,
+            ]
+            .map(Value::String),
+        );
+    }
+
+    /// What a list of frames holds beyond its stack: the functions running, and the handlers of `xpcall`s waiting.
+    fn push_frames(frames: &[Frame], gray: &mut Vec<Value>) {
+        for frame in frames {
             gray.push(Value::Function(frame.function));
-        }
-        live += self.stack.capacity() * SLOT_BYTES + self.frames.capacity() * FRAME_BYTES;
-        while let Some(value) = gray.pop() {
-            match value {
-                Value::String(s) => {
-                    if self.heap.strings.mark(s.0) {
-                        live += crate::heap::STRING_OVERHEAD + self.heap.string(s).len();
-                    }
-                }
-                Value::Table(t) => {
-                    if self.heap.tables.mark(t.0) {
-                        let table = self.heap.table(t);
-                        live += table.bytes();
-                        gray.extend_from_slice(table.array());
-                        for (k, v) in table.pairs() {
-                            gray.push(k);
-                            gray.push(v);
-                        }
-                        if let Some(mt) = table.metatable {
-                            gray.push(Value::Table(mt));
-                        }
-                    }
-                }
-                Value::Function(f) => {
-                    if self.heap.functions.mark(f.0) {
-                        live += crate::heap::FUNCTION_SIZE;
-                        match self.heap.functions.get(f.0) {
-                            Function::Lua {
-                                proto,
-                                upvalues,
-                                env,
-                            } => {
-                                live += upvalues.len() * 8;
-                                gray.extend(upvalues.iter().map(|c| Value::Cell(*c)));
-                                gray.push(Value::Table(*env));
-                                protos.push(proto.clone());
-                            }
-                            Function::Native { upvalues, .. } => {
-                                live += upvalues.len() * 16;
-                                gray.extend_from_slice(upvalues);
-                            }
-                        }
-                    }
-                }
-                Value::Cell(c) => {
-                    if self.heap.cells.mark(c.0) {
-                        live += crate::heap::CELL_SIZE;
-                        gray.push(*self.heap.cells.get(c.0));
-                    }
-                }
-                Value::Userdata(u) => {
-                    if self.heap.userdata.mark(u.0) {
-                        live += crate::heap::USERDATA_SIZE;
-                        if let Some(mt) = self.heap.userdata.get(u.0).metatable {
-                            gray.push(Value::Table(mt));
-                        }
-                    }
-                }
-                Value::Thread(t) => {
-                    if self.threads.mark(t.0) {
-                        let thread = self.threads.get(t.0);
-                        live += THREAD_BYTES
-                            + thread.stack.capacity() * SLOT_BYTES
-                            + thread.frames.capacity() * FRAME_BYTES;
-                        gray.extend_from_slice(&thread.stack);
-                        gray.extend(thread.frames.iter().map(|f| Value::Function(f.function)));
-                    }
-                }
-                Value::Nil | Value::Boolean(_) | Value::Number(_) => {}
-            }
-            while let Some(proto) = protos.pop() {
-                if proto.visited.replace(epoch) == epoch {
-                    continue;
-                }
-                live += proto.bytes();
-                gray.extend_from_slice(&proto.constants);
-                protos.extend(proto.protos.iter().cloned());
+            if let Some(catch) = frame.catch {
+                gray.push(catch.handler);
             }
         }
-        self.heap.strings.sweep(|_, _| {});
-        self.heap.tables.sweep(|_, _| {});
-        self.heap.functions.sweep(|_, _| {});
-        self.heap.cells.sweep(|_, _| {});
-        self.heap.userdata.sweep(|_, _| {});
-        self.threads.sweep(|_, _| {});
-        let size = self.heap.intern_index_size();
-        self.heap.rebuild_intern(size);
-        live += size * 4;
+    }
+
+    fn gc_start(&mut self) {
+        assert_eq!(self.heap.phase, Phase::Idle, "one collection at a time");
+        self.gc_epoch += 1;
+        self.gc_protos = 0;
+        self.heap.gray.clear();
+        self.heap.phase = Phase::Marking;
+        let heap = &mut self.heap;
+        heap.strings.begin_collection();
+        heap.tables.begin_collection();
+        heap.functions.begin_collection();
+        heap.cells.begin_collection();
+        heap.userdata.begin_collection();
+        self.threads.begin_collection();
+        self.push_roots();
+    }
+
+    /// Collect again when memory doubles (at least a megabyte later), never past the cap; at once under stress.
+    pub(crate) fn next_threshold(&self, live: usize) -> usize {
+        if self.gc_stress == GcStress::Off {
+            (live * 2).max(live + MIN_THRESHOLD).min(self.heap.cap)
+        } else {
+            0
+        }
+    }
+
+    /// Traces gray values until none is left (true) or `budget` work is done (false), paying fuel as it goes: the work
+    /// never outruns the fuel left by more than the one object traced last.
+    fn trace_gray(&mut self, budget: usize) -> Result<bool, LuaError> {
+        let affordable = self.affordable_work();
+        let mut traced = 0usize;
+        while traced < budget {
+            if traced >= affordable {
+                return Err(self.out_of_fuel());
+            }
+            let Some(value) = self.heap.gray.pop() else {
+                self.charge_fuel((traced / GC_OBJECTS_PER_FUEL) as u64)?;
+                return Ok(true);
+            };
+            traced += self.trace(value);
+        }
+        self.charge_fuel((traced / GC_OBJECTS_PER_FUEL) as u64)?;
+        Ok(false)
+    }
+
+    /// The collector work the fuel left pays for.
+    fn affordable_work(&self) -> usize {
+        usize::try_from(self.fuel)
+            .map_or(usize::MAX, |fuel| fuel.saturating_mul(GC_OBJECTS_PER_FUEL))
+    }
+
+    fn out_of_fuel(&mut self) -> LuaError {
+        self.fuel = 0;
+        LuaError::Limit(self.fuel_limit)
+    }
+
+    /// The end of marking: the roots once more (they changed while marking went on) and every gray value traced; then
+    /// the sweep begins. Out of fuel on the way, marking stays unfinished, and the next point ends it.
+    fn gc_end_marking(&mut self) -> Result<(), LuaError> {
+        self.push_roots();
+        let done = self.trace_gray(usize::MAX)?;
+        assert!(done, "an unbounded trace ends with no gray value left");
+        self.heap.phase = Phase::Sweeping;
+        self.gc_arena = 0;
+        self.gc_kept = 0;
+        self.gc_memory_at_sweep = self.heap.memory;
+        Ok(())
+    }
+
+    /// Sweeps up to `budget` slots, arena after arena, paying fuel as it goes; recounts memory at the end.
+    fn gc_sweep(&mut self, budget: usize) -> Result<(), LuaError> {
+        let affordable = self.affordable_work();
+        let mut walked = 0usize;
+        while walked < budget {
+            if walked >= affordable {
+                return Err(self.out_of_fuel());
+            }
+            let step = (budget - walked).min(affordable - walked);
+            let heap = &mut self.heap;
+            let (kept, slots) = match self.gc_arena {
+                0 => heap.sweep_strings(step),
+                1 => heap.tables.sweep(step, Table::bytes, |_, _| ()),
+                2 => heap.functions.sweep(step, function_bytes, |_, _| ()),
+                3 => heap
+                    .cells
+                    .sweep(step, |_| crate::heap::CELL_SIZE, |_, _| ()),
+                4 => heap
+                    .userdata
+                    .sweep(step, |_| crate::heap::USERDATA_SIZE, |_, _| ()),
+                5 => self.threads.sweep(step, ThreadState::bytes, |_, _| ()),
+                _ => unreachable!("six arenas"),
+            };
+            self.gc_kept += kept;
+            walked += slots;
+            if self.gc_arena_swept() {
+                self.gc_arena += 1;
+                if self.gc_arena == 6 {
+                    self.charge_fuel((walked / GC_OBJECTS_PER_FUEL) as u64)?;
+                    return self.gc_end_sweep();
+                }
+            }
+        }
+        self.charge_fuel((walked / GC_OBJECTS_PER_FUEL) as u64)
+    }
+
+    /// When the arena being swept is done: counts its storage (and what goes with it) and ends its sweep.
+    fn gc_arena_swept(&mut self) -> bool {
+        let heap = &mut self.heap;
+        let storage = match self.gc_arena {
+            0 if heap.strings.is_swept() => {
+                // Shrinking the string index walks it: done when the fuel pays for it, else left for another time.
+                let cost = (heap.intern_size() / GC_OBJECTS_PER_FUEL) as u64;
+                if cost <= self.fuel && heap.shrink_intern() {
+                    self.fuel -= cost;
+                }
+                heap.strings.end_sweep(crate::heap::STRING_OVERHEAD)
+                    + heap.intern_size() * crate::heap::INTERN_ENTRY
+            }
+            1 if heap.tables.is_swept() => heap.tables.end_sweep(crate::heap::TABLE_SIZE),
+            2 if heap.functions.is_swept() => heap.functions.end_sweep(crate::heap::FUNCTION_SIZE),
+            3 if heap.cells.is_swept() => heap.cells.end_sweep(crate::heap::CELL_SIZE),
+            4 if heap.userdata.is_swept() => heap.userdata.end_sweep(crate::heap::USERDATA_SIZE),
+            // The running coroutine's stack is out of its slot: counted with the arena, as the others are.
+            5 if self.threads.is_swept() => {
+                self.threads.end_sweep(THREAD_BYTES)
+                    + self.stack.capacity() * SLOT_BYTES
+                    + self.frames.capacity() * FRAME_BYTES
+            }
+            _ => return false,
+        };
+        self.gc_kept += storage;
+        true
+    }
+
+    /// The end of the sweep: memory is what was kept, plus what was charged since the sweep began (an object made
+    /// in an arena the sweep had yet to reach is counted twice, which errs on the safe side until the next count).
+    fn gc_end_sweep(&mut self) -> Result<(), LuaError> {
+        let charged_since = self.heap.memory - self.gc_memory_at_sweep;
+        let live = self.gc_kept + self.gc_protos + charged_since;
         self.heap.memory = live;
-        self.stack_charged = self.stack.capacity() * SLOT_BYTES;
-        self.fuel = self.fuel.saturating_sub((live / GC_BYTES_PER_FUEL) as u64);
-        // Collect again when memory doubles, or halfway to the cap, whichever comes first.
-        let halfway = live + (self.heap.cap.saturating_sub(live)) / 2;
-        self.gc_threshold = (live * 2).max(MIN_THRESHOLD).min(halfway.max(live + 1));
+        self.heap.phase = Phase::Idle;
+        self.gc_threshold = self.next_threshold(live);
+        if live > self.heap.cap {
+            return Err(LuaError::Limit(Limit::Memory));
+        }
+        Ok(())
+    }
+
+    /// Marks one value and grays what it refers to; returns the work it was (0 for a value already marked).
+    fn trace(&mut self, value: Value) -> usize {
+        let heap = &mut self.heap;
+        match value {
+            Value::String(s) => usize::from(heap.strings.mark(s.0)),
+            Value::Table(t) => {
+                if !heap.tables.mark(t.0) {
+                    return 0;
+                }
+                let table = heap.tables.get(t.0);
+                let mut children: Vec<Value> = table.array().to_vec();
+                for (k, v) in table.pairs() {
+                    children.push(k);
+                    children.push(v);
+                }
+                if let Some(mt) = table.metatable {
+                    children.push(Value::Table(mt));
+                }
+                let work = 1 + children.len();
+                heap.gray.extend(children);
+                work
+            }
+            Value::Function(f) => {
+                if !heap.functions.mark(f.0) {
+                    return 0;
+                }
+                match heap.functions.get(f.0) {
+                    Function::Lua {
+                        proto,
+                        upvalues,
+                        env,
+                    } => {
+                        let (proto, cells, env) = (proto.clone(), upvalues.clone(), *env);
+                        heap.gray.extend(cells.iter().map(|c| Value::Cell(*c)));
+                        heap.gray.push(Value::Table(env));
+                        1 + cells.len() + self.trace_proto(proto)
+                    }
+                    Function::Native { upvalues, .. } => {
+                        let upvalues = upvalues.to_vec();
+                        let work = 1 + upvalues.len();
+                        heap.gray.extend(upvalues);
+                        work
+                    }
+                }
+            }
+            Value::Cell(c) => {
+                if !heap.cells.mark(c.0) {
+                    return 0;
+                }
+                let inner = *heap.cells.get(c.0);
+                heap.gray.push(inner);
+                1
+            }
+            Value::Userdata(u) => {
+                if !heap.userdata.mark(u.0) {
+                    return 0;
+                }
+                if let Some(mt) = heap.userdata.get(u.0).metatable {
+                    heap.gray.push(Value::Table(mt));
+                }
+                1
+            }
+            Value::Thread(t) => {
+                if !self.threads.mark(t.0) {
+                    return 0;
+                }
+                let thread = self.threads.get(t.0);
+                self.heap.gray.extend_from_slice(&thread.stack);
+                Self::push_frames(&thread.frames, &mut self.heap.gray);
+                if let Some(resumer) = thread.resumer {
+                    self.heap.gray.push(Value::Thread(resumer));
+                }
+                1 + thread.stack.len() + thread.frames.len()
+            }
+            Value::Nil | Value::Boolean(_) | Value::Number(_) => 0,
+        }
+    }
+
+    /// Grays a function's constants and its nested functions' (once per collection); returns the work.
+    fn trace_proto(&mut self, proto: Rc<Proto>) -> usize {
+        let epoch = self.gc_epoch;
+        let mut protos = vec![proto];
+        let mut work = 0;
+        while let Some(proto) = protos.pop() {
+            if proto.visited.replace(epoch) == epoch {
+                continue;
+            }
+            self.gc_protos += proto.bytes();
+            self.heap.gray.extend_from_slice(&proto.constants);
+            protos.extend(proto.protos.iter().cloned());
+            work += 1 + proto.constants.len();
+        }
+        work
     }
 
     // --- coroutines ------------------------------------------------------------------------------------------
 
     pub(crate) fn new_thread(&mut self, function: Value) -> Result<ThreadId, LuaError> {
-        self.heap.charge(THREAD_BYTES)?;
+        self.heap
+            .charge(THREAD_BYTES + self.threads.growth() * THREAD_BYTES)?;
         let mut thread = ThreadState::new();
         thread.stack.push(function);
+        self.heap.barrier(function);
         Ok(ThreadId(self.threads.insert(thread)))
     }
 
@@ -1894,13 +2231,20 @@ impl Vm {
         let thread = self.threads.get_mut(from.0);
         std::mem::swap(&mut thread.stack, &mut self.stack);
         std::mem::swap(&mut thread.frames, &mut self.frames);
+        std::mem::swap(&mut thread.charged, &mut self.stack_charged);
         thread.top = self.top;
+        // A coroutine traced before it ran has new values on its stack now: gray them, as a store's barrier would.
+        if self.heap.phase == Phase::Marking {
+            self.heap.gray.extend_from_slice(&thread.stack);
+            Self::push_frames(&thread.frames, &mut self.heap.gray);
+        }
         let thread = self.threads.get_mut(to.0);
         std::mem::swap(&mut thread.stack, &mut self.stack);
         std::mem::swap(&mut thread.frames, &mut self.frames);
+        // Each coroutine's stack is counted on its own: what one grows is charged however large another's is.
+        std::mem::swap(&mut thread.charged, &mut self.stack_charged);
         self.top = thread.top;
         self.current = to;
-        self.stack_charged = self.stack_charged.max(self.stack.capacity() * SLOT_BYTES);
     }
 
     /// Resumes `co` with `args`; Ok(Ok(values)) when it yielded or returned, Ok(Err(error value)) when it failed.

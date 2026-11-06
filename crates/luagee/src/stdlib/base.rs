@@ -89,11 +89,11 @@ fn collectgarbage(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     };
     match option.as_slice() {
         b"collect" => {
-            vm.request_collection()?;
+            vm.request_collection();
             vm.results(&[Value::Number(0.0)])
         }
         b"step" => {
-            vm.request_collection()?;
+            vm.request_collection();
             vm.results(&[Value::Boolean(true)])
         }
         b"count" => {
@@ -104,7 +104,7 @@ fn collectgarbage(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         b"stop" | b"restart" => vm.results(&[Value::Number(0.0)]),
         b"setpause" | b"setstepmul" => vm.results(&[Value::Number(200.0)]),
         _ => {
-            let message = format!("invalid option '{}'", String::from_utf8_lossy(&option));
+            let message = format!("invalid option '{}'", crate::shown(&option));
             Err(vm.arg_error(args, 0, &message))
         }
     }
@@ -171,15 +171,13 @@ fn getfenv(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     vm.results(&[Value::Table(env)])
 }
 
-/// Gives a Lua function a new environment, in its running frames too.
+/// Gives a Lua function a new environment; its running activations (in every coroutine) read it from the function.
 pub(crate) fn set_env(vm: &mut Vm, f: crate::value::FuncId, table: TableId) -> bool {
     match vm.heap.functions.get_mut(f.0) {
         Function::Lua { env, .. } => *env = table,
         Function::Native { .. } => return false,
     }
-    for frame in vm.frames.iter_mut().filter(|frame| frame.function == f) {
-        frame.env = table;
-    }
+    vm.heap.barrier(Value::Table(table));
     true
 }
 
@@ -224,7 +222,7 @@ fn setmetatable(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     {
         return Err(vm.error("cannot change a protected metatable"));
     }
-    vm.heap.table_mut(table).metatable = metatable;
+    vm.heap.set_metatable(table, metatable);
     vm.results(&[Value::Table(table)])
 }
 
@@ -351,17 +349,19 @@ fn print(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
             line.push(b'\t');
         }
         let shown = vm.display_value(vm.stack[args.base + i])?;
-        match shown {
-            Value::String(s) => line.extend_from_slice(vm.heap.string(s)),
-            Value::Number(n) => line.extend_from_slice(crate::number::format(n).as_bytes()),
+        let piece: std::rc::Rc<[u8]> = match shown {
+            Value::String(s) => vm.heap.string_rc(s),
+            Value::Number(n) => crate::number::format(n).as_bytes().into(),
             _ => return Err(vm.error("'tostring' must return a string to 'print'")),
-        }
-        if line.len() > vm.limits.string_length {
+        };
+        // Paid and checked before the copy.
+        vm.charge_fuel(1 + piece.len() as u64 / 16)?;
+        if line.len() + piece.len() > vm.limits.string_length {
             return Err(vm.string_overflow());
         }
+        line.extend_from_slice(&piece);
     }
     line.push(b'\n');
-    vm.charge_fuel(line.len() as u64 / 16)?;
     if let Some(sink) = vm.print.as_mut() {
         sink(&line);
     }
@@ -411,7 +411,7 @@ fn tonumber(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let value = vm.check_any(args, 0)?;
     let base = vm.opt_integer(args, 1, 10)?;
     if base == 10 {
-        let n = vm.to_number(value).map_or(Value::Nil, Value::Number);
+        let n = vm.coerce_number(value).map_or(Value::Nil, Value::Number);
         return vm.results(&[n]);
     }
     if !(2..=36).contains(&base) {
@@ -613,7 +613,7 @@ fn load(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 
 /// Reads a module through the host's loader: the module name checked to stay in the script folder.
 fn read_module(vm: &mut Vm, args: Args, name: &[u8]) -> Result<Vec<u8>, LuaError> {
-    let text = String::from_utf8_lossy(name).into_owned();
+    let text = crate::shown(name);
     let module: ModuleName = match text.parse() {
         Ok(module) => module,
         Err(e) => return Err(vm.error(format!("bad module name '{text}': {e}"))),
@@ -628,13 +628,13 @@ fn read_module(vm: &mut Vm, args: Args, name: &[u8]) -> Result<Vec<u8>, LuaError
 
 fn run_module(vm: &mut Vm, args: Args, name: &[u8], arg: Option<Value>) -> Result<usize, LuaError> {
     let source = read_module(vm, args, name)?;
-    let chunk = format!("@{}", String::from_utf8_lossy(name));
+    let chunk = format!("@{}", crate::shown(name));
     let function = match compile(vm, &source, &chunk_id(chunk.as_bytes()))? {
         Ok(function) => function,
         Err(message) => {
             return Err(vm.error(format!(
                 "error loading module '{}':\n\t{message}",
-                String::from_utf8_lossy(name)
+                crate::shown(name)
             )));
         }
     };
@@ -651,8 +651,23 @@ fn run_module(vm: &mut Vm, args: Args, name: &[u8], arg: Option<Value>) -> Resul
     Ok(produced)
 }
 
-fn dofile(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
+/// A module name argument, refused at once when it is too long to be one (so no work scales with a huge string).
+fn module_argument(vm: &mut Vm, args: Args) -> Result<crate::value::StrId, LuaError> {
     let name = vm.check_string(args, 0)?;
+    let length = vm.heap.string(name).len();
+    vm.charge_fuel(1 + length as u64 / 16)?;
+    if length > ModuleName::MAX_LENGTH {
+        let shown = crate::shown(vm.heap.string(name));
+        return Err(vm.error(format!(
+            "bad module name '{shown}': {}",
+            crate::ModuleNameError::TooLong
+        )));
+    }
+    Ok(name)
+}
+
+fn dofile(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
+    let name = module_argument(vm, args)?;
     let name = vm.heap.string(name).to_vec();
     let slot = vm.stack.len();
     let produced = run_module(vm, args, &name, None)?;
@@ -662,11 +677,11 @@ fn dofile(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 }
 
 fn require(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
-    let name = vm.check_string(args, 0)?;
+    let name = module_argument(vm, args)?;
     let loaded = vm.heap.raw_get(vm.loaded, Value::String(name));
     if loaded.is_truthy() {
         if loaded == Value::Table(vm.loaded) {
-            let text = String::from_utf8_lossy(vm.heap.string(name)).into_owned();
+            let text = crate::shown(vm.heap.string(name));
             return Err(vm.error(format!("loop or previous error loading module '{text}'")));
         }
         return vm.results(&[loaded]);
@@ -710,6 +725,7 @@ fn require(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 
 fn module(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let name = vm.check_string(args, 0)?;
+    vm.charge_fuel(1 + vm.heap.string(name).len() as u64 / 16)?;
     let name_bytes = vm.heap.string(name).to_vec();
     let existing = vm.heap.raw_get(vm.loaded, Value::String(name));
     let table = match existing {
@@ -729,7 +745,7 @@ fn module(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                     _ => {
                         return Err(vm.error(format!(
                             "name conflict for module '{}'",
-                            String::from_utf8_lossy(&name_bytes)
+                            crate::shown(&name_bytes)
                         )));
                     }
                 };
@@ -766,7 +782,7 @@ fn seeall(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         Some(mt) => mt,
         None => {
             let mt = vm.heap.new_table(0, 1)?;
-            vm.heap.table_mut(table).metatable = Some(mt);
+            vm.heap.set_metatable(table, Some(mt));
             mt
         }
     };
