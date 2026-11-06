@@ -1,0 +1,8 @@
+local t = host.make(17)
+assert(host.read(t) == 17)
+local u = host.object(9)
+assert(host.object_value(u) == 9)
+assert(host.convert('8.9', nil, 123, {}) == 8)
+assert(host.optional() == 7)
+local x, y = host.invoke(function() return t, u end)
+assert(x == t and y == u)

@@ -66,7 +66,7 @@ corpus)
     # tests/hostile/deepest_native_nesting_coroutines.lua takes the most of both a script can (some 350 KiB each).
     cargo rustc --profile test-release -p luagee --example corpus --target "$target" -- \
         -C link-arg=-zstack-size=$((512 << 10))
-    runner=target/$target/test-release/examples/corpus.wasm
+    runner=${CARGO_TARGET_DIR:-target}/$target/test-release/examples/corpus.wasm
     # The folders are the guest's only files; the suites get a top-level one of their own, as the folder loader
     # resolves a folder only below one. timeout is a hang guard; fuel ends every script long before it.
     run() {
@@ -76,6 +76,7 @@ corpus)
     run conformance /repo/crates/luagee/tests/conformance
     run hostile /repo/crates/luagee/tests/hostile
     run suites
+    run host-api
     fuzzed=0
     for corpus in fuzz/corpus/*/; do
         if [ -d "$corpus" ]; then

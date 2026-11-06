@@ -26,12 +26,15 @@ triple=$(rustc -vV | sed -n 's/^host: //p')
 build() {
     cargo build --manifest-path "$here/Cargo.toml" --release --bins --target "$triple"
 }
-targets=(parse run_bytes run_structured stdlib differential determinism)
+targets=(parse run_bytes run_structured stdlib differential determinism host_api)
 dictionary() { # target
-    case $1 in parse | run_bytes | determinism) echo "-dict=$here/lua.dict" ;; esac
+    case $1 in parse | run_bytes | determinism | host_api) echo "-dict=$here/lua.dict" ;; esac
 }
 seed() { # target
     mkdir -p "$here/corpus/$1" "$here/artifacts/$1"
+    if [ "$1" = host_api ]; then
+        cp -n "$here"/../crates/luagee/tests/host_api/*.lua "$here/corpus/$1/"
+    fi
     cp -n "$here"/../crates/luagee/tests/conformance/*.lua "$here"/../crates/luagee/tests/hostile/*.lua "$here/corpus/$1/"
 }
 reference() {
@@ -41,7 +44,7 @@ reference() {
     fi
 }
 binary() { # target
-    echo "$here/target/$triple/release/$1"
+    echo "${CARGO_TARGET_DIR:-$here/target}/$triple/release/$1"
 }
 case "${1:-}" in
 build) build ;;

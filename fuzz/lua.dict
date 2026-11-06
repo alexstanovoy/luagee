@@ -155,3 +155,13 @@
 "%1"
 "(.-)"
 "[^%s]+"
+
+"host.make(1)"
+"host.read(t)"
+"host.object(1)"
+"host.object_value(u)"
+"host.invoke(function() collectgarbage() end)"
+"host.collect(function() collectgarbage() end, 1)"
+"host.remember(t)"
+"host.forget()"
+"host.retain()"

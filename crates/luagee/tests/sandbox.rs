@@ -27,7 +27,7 @@ fn calls_of_one_tick_share_its_fuel_and_a_new_tick_refills_it() {
     let spin = lua
         .load("spin", b"for i = 1, 600000 do end")
         .expect("compiles");
-    lua.pin(spin);
+    lua.pin(spin).expect("root fits");
     assert!(lua.call(spin, &[]).is_ok(), "the first call fits the tick");
     let second = lua.call(spin, &[]);
     assert!(
@@ -66,7 +66,7 @@ fn garbage_made_across_many_calls_is_collected_under_a_small_cap() {
             b"local t = {} for i = 1, 20000 do t[i % 100 + 1] = {i, tostring(i)} end",
         )
         .expect("compiles");
-    lua.pin(churn);
+    lua.pin(churn).expect("root fits");
     for _ in 0..50 {
         lua.begin_tick();
         assert!(
@@ -95,9 +95,9 @@ fn a_collection_runs_only_as_far_as_the_fuel_and_later_calls_finish_it() {
             b"kept = kept or {} for i = 1, 500 do kept[#kept + 1] = ('x'):rep(200) .. #kept end",
         )
         .expect("compiles");
-    lua.pin(fill);
+    lua.pin(fill).expect("root fits");
     let count = lua.load("count", b"return #kept").expect("compiles");
-    lua.pin(count);
+    lua.pin(count).expect("root fits");
     for _ in 0..4000 {
         lua.begin_tick();
         let _ = lua.call(fill, &[]);
@@ -122,7 +122,7 @@ fn a_collection_runs_only_as_far_as_the_fuel_and_later_calls_finish_it() {
     let idle = lua
         .load("idle", b"local x = 0 for i = 1, 1000 do x = x + i end")
         .expect("compiles");
-    lua.pin(idle);
+    lua.pin(idle).expect("root fits");
     for _ in 0..40 {
         lua.begin_tick();
         let _ = lua.call(idle, &[]);
@@ -147,7 +147,7 @@ fn memory_a_script_keeps_across_calls_runs_into_the_cap() {
             b"kept = kept or {} for i = 1, 5000 do kept[#kept + 1] = ('x'):rep(64) .. #kept end",
         )
         .expect("compiles");
-    lua.pin(hoard);
+    lua.pin(hoard).expect("root fits");
     let mut ended = Ok(Vec::new());
     for _ in 0..100 {
         lua.begin_tick();

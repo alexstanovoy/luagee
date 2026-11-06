@@ -120,3 +120,52 @@ rustup.
 ## License
 
 MIT, see [LICENSE](LICENSE).
+# Embedding API changes (unreleased, 0.1)
+
+Added public callback argument access (`Args::len/is_empty`, zero-based `Vm::arg`,
+`check_*`, `opt_integer`, `opt_string`, `arg_error`), `results`, `new_string` and
+`bytes`. Callbacks can create empty tables, read/write raw fields, set table
+metatables, create typed userdata, and call Lua without refilling fuel or escaping
+the native recursion bound. `charge_fuel` charges application work before doing it.
+
+`Vm::pin/unpin` keep live handles across reentry and between calls. **Breaking:**
+`Lua::pin` now returns `Result<(), Error>` and `Lua::unpin` returns
+`Result<bool, Error>`: root storage is bounded; inside callbacks, scans and pinning
+also consume fuel. Outside calls, `Lua::pin/unpin` work even after script fuel was
+exhausted, like other setup operations. Duplicate pins
+require matching releases. `begin_tick` also refreshes the fuel available to host
+setup operations; callbacks cannot access it. Explicit host collection preserves
+the remaining fuel for subsequent setup operations.
+
+Host callbacks are trusted Rust code: bound their work, charge fuel before scans
+or copies, and propagate `LuaError::Limit` unchanged. The interpreter checks host
+result counts instead of allowing them to read caller stack slots. Callback
+arguments are valid only during that callback. Every heap handle must belong to
+the interpreter using it and remain live: pin values before reentry if Lua cannot
+reach them, including callback captures, nested call results and runtime error
+objects. Release those roots on error paths too. Allocation alone does not collect;
+calling Lua can. Do not cache unpinned handles across calls or interpreters.
+
+`Vm::userdata(data, metatable, retained_bytes)` accounts for the payload's inline
+size plus declared owned allocations (such as a vector's capacity), both before
+creation and after collection. The host must bound payload allocations before
+creating them and declare retained storage accurately. Lua handles inside a payload
+are not traced; root them separately. `userdata_ref::<T>` checks the actual Rust
+type, independent of the metatable. Seal private metatables with `__metatable`;
+scripts cannot change userdata metatables or manufacture typed payloads. The older
+`Lua::userdata(Box<dyn Any>, ...)` now counts the boxed payload's inline size too;
+use `Vm::userdata` when retaining additional owned allocation.
+
+```rust
+use std::rc::Rc;
+use luagee::{Keys, Limits, Lua, Value};
+
+let mut lua = Lua::new(Limits::DEFAULT, Keys { hash: [1, 2], random: 3 })?;
+let echo = lua.function("echo", Rc::new(|vm, args| {
+    let value = vm.check_any(args, 0)?;
+    vm.results(&[value])
+}))?;
+lua.set_global("echo", echo)?;
+assert_eq!(lua.exec("example", b"return echo(7)")?, vec![Value::Number(7.0)]);
+# Ok::<(), luagee::Error>(())
+```

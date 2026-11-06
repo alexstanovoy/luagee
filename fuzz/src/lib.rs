@@ -3,6 +3,8 @@
 #![allow(unsafe_code)]
 
 pub mod generate;
+#[path = "../../crates/luagee/tests/support/host_api.rs"]
+mod host_api;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::RefCell;
@@ -159,7 +161,23 @@ pub const KEYS: Keys = Keys {
 /// ends in the memory limit), and an interpreter that still runs a function within a few ticks (a collection the
 /// script left under way may take a call's fuel or two first).
 pub fn check_run(source: &[u8]) {
+    let (lua, _) = interpreter(KEYS);
+    check_interpreter(lua, source);
+}
+
+/// Exercises the external callback surface under both collection schedules, selected by input bytes.
+pub fn check_host(source: &[u8]) {
     let (mut lua, _) = interpreter(KEYS);
+    host_api::install(&mut lua).expect("callbacks fit");
+    lua.set_gc_stress(match source.first().map(|n| n % 3) {
+        Some(1) => luagee::GcStress::Full,
+        Some(2) => luagee::GcStress::Incremental,
+        _ => luagee::GcStress::Off,
+    });
+    check_interpreter(lua, source);
+}
+
+fn check_interpreter(mut lua: Lua, source: &[u8]) {
     // Loaded first: the input may use up the source limits, which last the interpreter's life.
     let after = lua
         .load(
@@ -167,7 +185,7 @@ pub fn check_run(source: &[u8]) {
             b"local t = {} for i = 1, 10 do t[i] = i end return #t",
         )
         .expect("compiles");
-    lua.pin(after);
+    lua.pin(after).expect("root fits");
     let (_ended, peak) = peak_while(|| lua.exec("fuzz", source));
     let ceiling = LIMITS.memory + LIMITS.memory / 4;
     assert!(

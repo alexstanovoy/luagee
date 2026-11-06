@@ -56,6 +56,7 @@ mod ast;
 mod compiler;
 mod error;
 mod heap;
+mod host;
 mod lexer;
 mod limits;
 mod loader;

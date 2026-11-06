@@ -280,6 +280,7 @@ pub(crate) enum Function {
 
 /// A userdata object.
 pub(crate) struct Userdata {
+    pub(crate) bytes: usize,
     pub(crate) data: Box<dyn Any>,
     pub(crate) metatable: Option<TableId>,
 }
@@ -585,13 +586,28 @@ impl Heap {
         data: Box<dyn Any>,
         metatable: Option<TableId>,
     ) -> Result<UserdataId, LuaError> {
-        self.charge(USERDATA_SIZE + self.userdata.growth() * USERDATA_SIZE)?;
+        let bytes = std::mem::size_of_val(data.as_ref());
+        self.new_userdata_charged(data, metatable, bytes)
+    }
+
+    pub(crate) fn new_userdata_charged(
+        &mut self,
+        data: Box<dyn Any>,
+        metatable: Option<TableId>,
+        bytes: usize,
+    ) -> Result<UserdataId, LuaError> {
+        let size = bytes
+            .checked_add(USERDATA_SIZE + self.userdata.growth() * USERDATA_SIZE)
+            .ok_or(LuaError::Limit(crate::Limit::Memory))?;
+        self.charge(size)?;
         if let Some(mt) = metatable {
             self.barrier(Value::Table(mt));
         }
-        Ok(UserdataId(
-            self.userdata.insert(Userdata { data, metatable }),
-        ))
+        Ok(UserdataId(self.userdata.insert(Userdata {
+            data,
+            metatable,
+            bytes,
+        })))
     }
 
     /// The hash of a table key (not nil, not NaN).

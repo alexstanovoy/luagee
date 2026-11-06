@@ -450,7 +450,7 @@ impl FileSuite {
             let ended = (|| {
                 lua.exec("prelude", prelude.as_bytes())?;
                 let main = lua.load(&file, &source)?;
-                lua.pin(main);
+                lua.pin(main).expect("root fits");
                 let driver = lua.load("driver", driver.as_bytes())?;
                 lua.call(driver, &[main]).map(|_| ())
             })();
@@ -812,14 +812,14 @@ fn run_luajit_file(file: &LuajitFile) -> Ran {
     isolated(LUAJIT, &file.file, move |lua| {
         let runner = (|| {
             let case = lua.load("case", CASE.as_bytes())?;
-            lua.pin(case);
+            lua.pin(case).expect("root fits");
             let chunk = lua.load(&name, code.as_bytes())?;
-            lua.pin(chunk);
+            lua.pin(chunk).expect("root fits");
             lua.exec("seal", SEAL.as_bytes())?;
             let tests = lua.call(chunk, &[])?;
             let runner = lua.call(case, &tests)?;
             let runner = runner.first().copied().unwrap_or_default();
-            lua.pin(runner);
+            lua.pin(runner).expect("root fits");
             Ok(runner)
         })();
         cases

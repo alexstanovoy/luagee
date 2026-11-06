@@ -87,6 +87,12 @@ impl Lua {
     /// Starts a host tick: the fuel all calls of the tick may spend is full again.
     pub fn begin_tick(&mut self) {
         self.vm.tick_fuel = self.vm.limits.fuel_per_tick;
+        self.vm.fuel = self.vm.limits.fuel_per_call.min(self.vm.tick_fuel);
+        self.vm.fuel_limit = if self.vm.limits.fuel_per_call <= self.vm.tick_fuel {
+            Limit::FuelPerCall
+        } else {
+            Limit::FuelPerTick
+        };
     }
 
     /// The fuel the current tick has left; what the tick's calls spent is `fuel_per_tick` minus this.
@@ -151,15 +157,20 @@ impl Lua {
     }
 
     /// Keeps a value alive across calls until [`unpin`](Self::unpin).
-    pub fn pin(&mut self, value: Value) {
-        self.vm.pinned.push(value);
+    pub fn pin(&mut self, value: Value) -> Result<(), Error> {
+        // Setup, like `load`, is outside script execution; a result can be rooted after the call spent its fuel.
+        let fuel = std::mem::replace(&mut self.vm.fuel, u64::MAX);
+        let result = self.vm.pin(value);
+        self.vm.fuel = fuel;
+        result.map_err(|e| to_error(&mut Some(&mut self.vm), e))
     }
 
-    /// Lets the collector take a pinned value again.
-    pub fn unpin(&mut self, value: Value) {
-        if let Some(i) = self.vm.pinned.iter().rposition(|v| *v == value) {
-            self.vm.pinned.swap_remove(i);
-        }
+    /// Releases one matching pin; false if it was not pinned. Root storage and scans are bounded.
+    pub fn unpin(&mut self, value: Value) -> Result<bool, Error> {
+        let fuel = std::mem::replace(&mut self.vm.fuel, u64::MAX);
+        let result = self.vm.unpin(value);
+        self.vm.fuel = fuel;
+        result.map_err(|e| to_error(&mut Some(&mut self.vm), e))
     }
 
     /// A string value.
@@ -244,9 +255,9 @@ impl Lua {
     /// Runs a whole collection now. It fails only when what is alive is over the memory cap.
     pub fn collect(&mut self) -> Result<(), Error> {
         let vm = &mut self.vm;
-        vm.fuel = u64::MAX;
+        let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
         let result = vm.collect();
-        vm.fuel = 0;
+        vm.fuel = fuel;
         result.map_err(|e| to_error(&mut Some(vm), e))
     }
 

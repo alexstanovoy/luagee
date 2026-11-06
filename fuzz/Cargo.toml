@@ -64,3 +64,10 @@ path = "fuzz_targets/determinism.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "host_api"
+path = "fuzz_targets/host_api.rs"
+test = false
+doc = false
+bench = false

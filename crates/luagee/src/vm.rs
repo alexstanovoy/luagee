@@ -429,7 +429,7 @@ impl Vm {
 
     /// Spends fuel for work a native does (bytes copied, pattern steps).
     #[inline]
-    pub(crate) fn charge_fuel(&mut self, amount: u64) -> Result<(), LuaError> {
+    pub fn charge_fuel(&mut self, amount: u64) -> Result<(), LuaError> {
         if self.fuel < amount {
             self.fuel = 0;
             return Err(LuaError::Limit(self.fuel_limit));
@@ -649,10 +649,14 @@ impl Vm {
         Ok(())
     }
 
+    /// A zero-based argument, or nil when absent. `args` is valid only during the callback that received it.
     #[inline]
-    pub(crate) fn arg(&self, args: Args, i: usize) -> Value {
+    pub fn arg(&self, args: Args, i: usize) -> Value {
         if i < args.count {
-            self.stack[args.base + i]
+            self.stack
+                .get(args.base.saturating_add(i))
+                .copied()
+                .unwrap_or(Value::Nil)
         } else {
             Value::Nil
         }
@@ -677,7 +681,8 @@ impl Vm {
         }
     }
 
-    pub(crate) fn new_string(&mut self, bytes: &[u8]) -> Result<Value, LuaError> {
+    /// Interns bytes under the string-length, fuel and memory bounds. Pin the result before reentry if needed.
+    pub fn new_string(&mut self, bytes: &[u8]) -> Result<Value, LuaError> {
         if bytes.len() > self.limits.string_length {
             return Err(self.string_overflow());
         }
@@ -1195,6 +1200,7 @@ impl Vm {
             base: slot + 1,
             count,
         };
+        let result_start = self.stack.len();
         let result = match &native {
             NativeFn::Builtin(f) => f(self, args),
             NativeFn::Host(f) => f(self, args),
@@ -1202,6 +1208,11 @@ impl Vm {
         self.native_depth -= 1;
         self.call_site = caller;
         let results = result?;
+        if matches!(native, NativeFn::Host(_))
+            && results > self.stack.len().saturating_sub(result_start)
+        {
+            return Err(self.error("invalid host result count"));
+        }
         let start = self.stack.len() - results;
         self.stack.copy_within(start.., slot);
         self.stack.truncate(slot + results);
@@ -2398,7 +2409,7 @@ impl Vm {
                     .sweep(step, |_| crate::heap::CELL_SIZE, |_, _| ()),
                 4 => heap
                     .userdata
-                    .sweep(step, |_| crate::heap::USERDATA_SIZE, |_, _| ()),
+                    .sweep(step, |u| crate::heap::USERDATA_SIZE + u.bytes, |_, _| ()),
                 5 => self.threads.sweep(step, ThreadState::bytes, |_, _| ()),
                 _ => unreachable!("six arenas"),
             };
@@ -2435,6 +2446,7 @@ impl Vm {
             // The running coroutine's stack is out of its slot: counted with the arena, as the others are.
             5 if self.threads.is_swept() => {
                 self.threads.end_sweep(THREAD_BYTES)
+                    + self.pinned.capacity() * SLOT_BYTES
                     + self.stack.capacity() * SLOT_BYTES
                     + self.frames.capacity() * FRAME_BYTES
             }

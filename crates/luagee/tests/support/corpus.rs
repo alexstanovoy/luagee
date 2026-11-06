@@ -8,6 +8,13 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+#[allow(
+    clippy::duplicate_mod,
+    reason = "the wasm runner also includes the external embedding test module"
+)]
+#[path = "host_api.rs"]
+mod host_api;
+
 use luagee::{Error, GcStress, Limit, Limits, Loader, Lua};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +88,13 @@ impl Kind {
         let fail = |what: String| Err(format!("{}: {what}", script.display()));
         let mut lua = interpreter(self.limits(), stress, loader);
         if self == Kind::Fuzz {
+            if script
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|n| n == "host_api")
+            {
+                host_api::install(&mut lua.lua).map_err(|e| e.to_string())?;
+            }
             return match survives(&mut lua.lua, &source) {
                 Ok(()) => Ok(()),
                 Err(what) => fail(what),
@@ -181,7 +195,7 @@ pub fn survives(lua: &mut Lua, input: &[u8]) -> Result<(), String> {
             b"local t = {} for i = 1, 10 do t[i] = i end return #t",
         )
         .map_err(|e| format!("the probe does not compile: {e}"))?;
-    lua.pin(after);
+    lua.pin(after).expect("root fits");
     let _ = lua.exec("fuzz", input);
     let ceiling = FUZZ_LIMITS.memory + FUZZ_LIMITS.memory / 4;
     if lua.memory() > ceiling {
