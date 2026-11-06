@@ -1,0 +1,111 @@
+attempt to call local 'a' (a nil value)
+attempt to call global 'undefined_function' (a nil value)
+attempt to call field 'field' (a nil value)
+attempt to call method 'method' (a nil value)
+attempt to call upvalue 'up' (a nil value)
+attempt to perform arithmetic on a nil value
+attempt to perform arithmetic on a table value
+attempt to perform arithmetic on a string value
+attempt to perform arithmetic on upvalue 't' (a table value)
+attempt to index field 'b' (a nil value)
+attempt to index upvalue 'up' (a nil value)
+attempt to index global 'undefined_global' (a nil value)
+attempt to index field 'a' (a nil value)
+attempt to get length of a nil value
+attempt to get length of a number value
+attempt to perform arithmetic on a table value
+attempt to perform arithmetic on a string value
+attempt to concatenate a nil value
+attempt to concatenate a table value
+attempt to concatenate a table value
+attempt to compare number with string
+attempt to compare two table values
+attempt to compare nil with number
+attempt to compare table with number
+attempt to compare two boolean values
+attempt to index local 'a' (a number value)
+attempt to index field 'y' (a nil value)
+table index is nil
+table index is NaN
+'for' limit must be a number
+'for' initial value must be a number
+'for' step must be a number
+attempt to call a number value
+custom
+custom
+nil
+nil
+12
+assertion failed!
+assert msg
+7
+bad argument #1 to 'rep' (string expected, got no value)
+bad argument #2 to 'rep' (number expected, got no value)
+bad argument #2 to 'rep' (number expected, got string)
+bad argument #1 to 'sub' (string expected, got no value)
+bad argument #2 to 'format' (number expected, got string)
+bad argument #2 to 'format' (value expected)
+invalid option '%y' to 'format'
+invalid option '%' to 'format'
+bad argument #1 to 'char' (invalid value)
+bad argument #1 to 'char' (invalid value)
+bad argument #1 to 'setmetatable' (table expected, got number)
+bad argument #2 to 'setmetatable' (nil or table expected)
+cannot change a protected metatable
+bad argument #1 to 'getmetatable' (value expected)
+bad argument #1 to 'tostring' (value expected)
+bad argument #1 to 'tonumber' (value expected)
+bad argument #2 to 'tonumber' (base out of range)
+bad argument #2 to 'tonumber' (base out of range)
+no error
+bad argument #1 to 'ipairs' (value expected)
+bad argument #1 to 'pairs' (table expected, got nil)
+invalid key to 'next'
+bad argument #1 to 'select' (index out of range)
+bad argument #1 to 'select' (number expected, got string)
+bad argument #1 to 'unpack' (table expected, got no value)
+bad argument #1 to 'rawset' (table expected, got number)
+bad argument #1 to 'rawget' (table expected, got number)
+wrong number of arguments to 'insert'
+bad argument #1 to 'insert' (table expected, got nil)
+no error
+invalid value (table) at index 2 in table for 'concat'
+no error
+bad argument #2 to 'sort' (function expected, got number)
+attempt to compare string with number
+no error
+bad argument #1 to 'floor' (number expected, got no value)
+bad argument #1 to 'floor' (number expected, got string)
+bad argument #1 to 'max' (number expected, got no value)
+bad argument #1 to 'resume' (coroutine expected)
+bad argument #1 to 'create' (function expected, got number)
+in wrap
+bad argument #1 to 'loadstring' (function expected, got no value)
+no error
+bad argument #2 to 'setfenv' (table expected, got number)
+'setfenv' cannot change environment of given object
+bad argument #1 to 'getfenv' (number expected, got string)
+bad argument #3 to 'gsub' (string/function/table expected)
+no error
+no error
+malformed pattern (ends with '%')
+malformed pattern (missing ']')
+invalid capture index
+no error
+unbalanced pattern
+missing '[' after '%f' in pattern
+unfinished capture
+invalid capture index
+no error
+bad argument #2 to 'byte' (number expected, got table)
+attempt to call method 'nomethod' (a nil value)
+attempt to call field 'nofunction' (a nil value)
+attempt to index field 'y' (a nil value)
+attempt to perform arithmetic on a table value
+attempt to concatenate a nil value
+attempt to index field 'a' (a nil value)
+attempt to index a nil value
+attempt to index field 'q' (a nil value)
+attempt to call a nil value
+attempt to call a nil value
+attempt to get length of field 'nothing' (a nil value)

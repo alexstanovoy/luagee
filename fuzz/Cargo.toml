@@ -1,0 +1,30 @@
+# Coverage-guided fuzz targets: any input as Lua source, compiled and run under small limits. A workspace of its
+# own, so the fuzzer's flags and libFuzzer stay out of the main build. `fuzz.sh` builds and runs them on stable Rust.
+[package]
+name = "luagee_fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+luagee = { path = "../crates/luagee", default-features = false }
+libfuzzer-sys = "0.4"
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "run"
+path = "fuzz_targets/run.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,2020 @@
+//! The interpreter: the dispatch loop, calls, metamethods, errors, coroutines and the collector.
+//!
+//! Lua calls are frames on the interpreter's own stack, never Rust recursion. A native function (a library
+//! function or a metamethod run from inside an instruction) that calls back into Lua nests the loop once, and that
+//! nesting is bounded; a coroutine cannot yield across it, as in Lua 5.1.
+
+use std::rc::Rc;
+
+use crate::Limit;
+use crate::Limits;
+use crate::heap::{Arena, Function, Heap, NativeFn};
+use crate::number;
+use crate::proto::{ArithOp, Capture, CompareOp, Op, Proto, Rk};
+use crate::value::{CellId, FuncId, StrId, TableId, ThreadId, Value};
+
+/// How deeply native functions may nest Lua calls ("C stack overflow" past it). Each level is a few kilobytes of
+/// Rust stack, so an interpreter wants a thread with a few megabytes of stack (16 MiB is ample).
+pub(crate) const MAX_NATIVE_DEPTH: u32 = 300;
+/// How many frames a traceback keeps.
+const TRACEBACK_FRAMES: usize = 16;
+/// The slots of a coroutine's stack, counted as this many bytes each.
+const SLOT_BYTES: usize = 16;
+/// The bytes a frame is counted as.
+const FRAME_BYTES: usize = 64;
+/// The bytes a coroutine is counted as, beyond its stack.
+const THREAD_BYTES: usize = 256;
+
+/// Why a call ended early, inside the interpreter: what host functions return to raise an error.
+#[derive(Clone, Debug)]
+pub enum LuaError {
+    /// A Lua error, catchable by `pcall`.
+    Runtime {
+        value: Value,
+        traceback: Vec<String>,
+        /// Whether the error position is already in the message (or must not be added).
+        located: bool,
+    },
+    /// A limit was crossed: nothing in the script can catch it.
+    Limit(Limit),
+}
+
+/// A native function's arguments: `count` values on the stack from `base`.
+#[derive(Clone, Copy, Debug)]
+pub struct Args {
+    pub(crate) base: usize,
+    pub(crate) count: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Frame {
+    pub(crate) function: FuncId,
+    pub(crate) proto: Rc<Proto>,
+    pub(crate) upvalues: Rc<[CellId]>,
+    pub(crate) env: TableId,
+    pub(crate) pc: usize,
+    pub(crate) base: usize,
+    /// Where the function sat: its results go there.
+    pub(crate) slot: usize,
+    /// The results the caller wants, -1 for all.
+    pub(crate) want: i32,
+    pub(crate) varargs: (usize, usize),
+    /// Whether returning from this frame ends the loop that runs it (a call from Rust).
+    pub(crate) boundary: bool,
+    /// Set when this frame is the function a `pcall` or `xpcall` runs: errors below it stop here.
+    pub(crate) catch: Option<Catch>,
+}
+
+/// A `pcall` or `xpcall` waiting on its function's frame: its handler (nil for `pcall`) and the results its caller
+/// wants. The `pcall` itself sat in the slot just below the frame's.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Catch {
+    pub(crate) handler: Value,
+    pub(crate) want: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThreadStatus {
+    Fresh,
+    Suspended,
+    Running,
+    Normal,
+    Dead,
+}
+
+#[derive(Debug)]
+pub(crate) struct ThreadState {
+    pub(crate) stack: Vec<Value>,
+    pub(crate) frames: Vec<Frame>,
+    pub(crate) top: usize,
+    pub(crate) status: ThreadStatus,
+    /// Where a suspended coroutine's yield left its values and where the values a resume passes in go.
+    pub(crate) pending: Option<Pending>,
+    /// The native nesting when this coroutine was last resumed.
+    pub(crate) depth: u32,
+    pub(crate) resumer: Option<ThreadId>,
+}
+
+impl ThreadState {
+    fn new() -> ThreadState {
+        ThreadState {
+            stack: Vec::new(),
+            frames: Vec::new(),
+            top: 0,
+            status: ThreadStatus::Fresh,
+            pending: None,
+            depth: 0,
+            resumer: None,
+        }
+    }
+}
+
+/// A yield waiting for its resume.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Pending {
+    /// Where the yielded values start.
+    pub(crate) values: usize,
+    /// Where the resume's values go, as the yield call's (or the `pcall` around it) results.
+    pub(crate) slot: usize,
+    pub(crate) want: i32,
+    /// Whether the yield ran inside `pcall(coroutine.yield, ...)`: the resume's values then follow a `true`.
+    pub(crate) protected: bool,
+}
+
+/// What a `pcall` called from Lua did.
+pub(crate) enum Protected {
+    /// Pushed its function's frame.
+    Frame,
+    /// Ran a native function and left its results.
+    Done,
+    /// Ran `coroutine.yield`: the coroutine suspends.
+    Yielded,
+}
+
+/// How the loop stopped.
+pub(crate) enum Exec {
+    Returned,
+    Yielded,
+}
+
+/// The metamethod names, interned once.
+pub(crate) struct Names {
+    pub(crate) index: StrId,
+    pub(crate) newindex: StrId,
+    pub(crate) call: StrId,
+    pub(crate) add: StrId,
+    pub(crate) sub: StrId,
+    pub(crate) mul: StrId,
+    pub(crate) div: StrId,
+    pub(crate) modulo: StrId,
+    pub(crate) pow: StrId,
+    pub(crate) unm: StrId,
+    pub(crate) concat: StrId,
+    pub(crate) len: StrId,
+    pub(crate) eq: StrId,
+    pub(crate) lt: StrId,
+    pub(crate) le: StrId,
+    pub(crate) tostring: StrId,
+    pub(crate) metatable: StrId,
+    pub(crate) name: StrId,
+}
+
+/// The host's sink for `print`.
+pub type PrintSink = Box<dyn FnMut(&[u8])>;
+
+/// The interpreter's state; host functions get it to read their arguments and push their results.
+pub struct Vm {
+    pub(crate) heap: Heap,
+    pub(crate) stack: Vec<Value>,
+    pub(crate) frames: Vec<Frame>,
+    /// The end of the values an open call or `...` left.
+    pub(crate) top: usize,
+    pub(crate) threads: Arena<ThreadState>,
+    pub(crate) current: ThreadId,
+    pub(crate) main: ThreadId,
+    pub(crate) globals: TableId,
+    /// Modules `require` has loaded (`package.loaded`).
+    pub(crate) loaded: TableId,
+    pub(crate) string_meta: Option<TableId>,
+    pub(crate) names: Names,
+    /// Values the host keeps across calls.
+    pub(crate) pinned: Vec<Value>,
+    pub(crate) limits: Limits,
+    pub(crate) fuel: u64,
+    /// Which limit runs out when `fuel` does.
+    pub(crate) fuel_limit: Limit,
+    pub(crate) tick_fuel: u64,
+    pub(crate) native_depth: u32,
+    /// Whether the running native was called straight from Lua code (so `error`'s level 1 has a position).
+    pub(crate) lua_caller: bool,
+    pub(crate) yielding: bool,
+    pub(crate) gc_threshold: usize,
+    pub(crate) gc_epoch: u64,
+    pub(crate) gc_requested: bool,
+    pub(crate) stack_charged: usize,
+    pub(crate) scripts_loaded: usize,
+    pub(crate) modules_loaded: u32,
+    pub(crate) random: crate::stdlib::Random,
+    pub(crate) print: Option<PrintSink>,
+    pub(crate) loader: Option<Box<dyn crate::Loader>>,
+}
+
+/// The fuel an allocation costs beyond its instruction (a string, table or closure: made, counted, collected later).
+pub(crate) const ALLOCATION_FUEL: u64 = 4;
+/// The values copied for one unit of fuel, where one instruction moves many (calls, returns, `...`, constructors).
+pub(crate) const VALUES_PER_FUEL: usize = 8;
+/// The bytes of live memory a collection walks for one unit of fuel.
+const GC_BYTES_PER_FUEL: usize = 64;
+/// The smallest collection threshold.
+const MIN_THRESHOLD: usize = 1 << 20;
+
+macro_rules! located {
+    ($vm:ident, $result:expr, $pc:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(error) => return Err($vm.locate(error, Some($pc))),
+        }
+    };
+}
+
+impl Vm {
+    pub(crate) fn new(limits: Limits, seed: u64) -> Result<Vm, LuaError> {
+        let mut heap = Heap::new(limits.memory, seed);
+        let mut intern = |s: &str| heap.intern(s.as_bytes());
+        let names = Names {
+            index: intern("__index")?,
+            newindex: intern("__newindex")?,
+            call: intern("__call")?,
+            add: intern("__add")?,
+            sub: intern("__sub")?,
+            mul: intern("__mul")?,
+            div: intern("__div")?,
+            modulo: intern("__mod")?,
+            pow: intern("__pow")?,
+            unm: intern("__unm")?,
+            concat: intern("__concat")?,
+            len: intern("__len")?,
+            eq: intern("__eq")?,
+            lt: intern("__lt")?,
+            le: intern("__le")?,
+            tostring: intern("__tostring")?,
+            metatable: intern("__metatable")?,
+            name: intern("__name")?,
+        };
+        let globals = heap.new_table(0, 64)?;
+        let loaded = heap.new_table(0, 16)?;
+        let mut threads = Arena::default();
+        let main = ThreadId(threads.insert(ThreadState::new()));
+        threads.get_mut(main.0).status = ThreadStatus::Running;
+        Ok(Vm {
+            heap,
+            stack: Vec::new(),
+            frames: Vec::new(),
+            top: 0,
+            threads,
+            current: main,
+            main,
+            globals,
+            loaded,
+            string_meta: None,
+            names,
+            pinned: Vec::new(),
+            limits,
+            fuel: limits.fuel_per_call,
+            fuel_limit: Limit::FuelPerCall,
+            tick_fuel: limits.fuel_per_tick,
+            native_depth: 0,
+            lua_caller: false,
+            yielding: false,
+            gc_threshold: MIN_THRESHOLD,
+            gc_epoch: 0,
+            gc_requested: false,
+            stack_charged: 0,
+            scripts_loaded: 0,
+            modules_loaded: 0,
+            random: crate::stdlib::Random::new(seed),
+            print: None,
+            loader: None,
+        })
+    }
+
+    // --- errors ----------------------------------------------------------------------------------------------
+
+    /// A runtime error with a message; the position of the running Lua code is added where it is raised.
+    pub fn error(&mut self, message: impl AsRef<[u8]>) -> LuaError {
+        match self.heap.intern(message.as_ref()) {
+            Ok(s) => LuaError::Runtime {
+                value: Value::String(s),
+                traceback: Vec::new(),
+                located: false,
+            },
+            Err(e) => e,
+        }
+    }
+
+    /// Lua's error for a string longer than the longest a script may build.
+    pub(crate) fn string_overflow(&mut self) -> LuaError {
+        self.error("string length overflow")
+    }
+
+    /// Spends fuel for work a native does (bytes copied, pattern steps).
+    #[inline]
+    pub(crate) fn charge_fuel(&mut self, amount: u64) -> Result<(), LuaError> {
+        if self.fuel < amount {
+            self.fuel = 0;
+            return Err(LuaError::Limit(self.fuel_limit));
+        }
+        self.fuel -= amount;
+        Ok(())
+    }
+
+    /// `chunk:line` of a frame's current instruction.
+    fn position(proto: &Proto, pc: usize) -> String {
+        let line = proto.lines.get(pc).copied().unwrap_or(proto.line);
+        format!("{}:{}", proto.chunk, line)
+    }
+
+    /// Adds the position (of the running frame at `pc`, else its saved pc) and a traceback to an error not located yet.
+    pub(crate) fn locate(&mut self, error: LuaError, pc: Option<usize>) -> LuaError {
+        let LuaError::Runtime {
+            value,
+            located: false,
+            ..
+        } = error
+        else {
+            return error;
+        };
+        let mut traceback = Vec::new();
+        for (i, frame) in self.frames.iter().rev().take(TRACEBACK_FRAMES).enumerate() {
+            let at = if i == 0 {
+                pc.unwrap_or(frame.pc)
+            } else {
+                frame.pc
+            };
+            traceback.push(Self::position(&frame.proto, at.saturating_sub(1)));
+        }
+        let value = match (value, self.frames.last()) {
+            (Value::String(s), Some(frame)) => {
+                let at = pc.unwrap_or(frame.pc).saturating_sub(1);
+                let mut text = Self::position(&frame.proto, at).into_bytes();
+                text.extend_from_slice(b": ");
+                text.extend_from_slice(self.heap.string(s));
+                match self.heap.intern(&text) {
+                    Ok(s) => Value::String(s),
+                    Err(e) => return e,
+                }
+            }
+            (value, _) => value,
+        };
+        LuaError::Runtime {
+            value,
+            traceback,
+            located: true,
+        }
+    }
+
+    /// Marks an error as located without adding a position (raised by a native that no Lua code called directly).
+    pub(crate) fn locate_nowhere(&mut self, error: LuaError) -> LuaError {
+        match error {
+            LuaError::Runtime { value, .. } => LuaError::Runtime {
+                value,
+                traceback: self.traceback(),
+                located: true,
+            },
+            other => other,
+        }
+    }
+
+    /// The `chunk:line: ` prefix for `error(message, level)`: level 1 is the function calling `error`.
+    pub(crate) fn where_(&self, level: usize) -> Vec<u8> {
+        if level == 0 {
+            return Vec::new();
+        }
+        let mut frames = self.frames.iter().rev();
+        let mut frame = frames.next();
+        for _ in 1..level {
+            // A frame a native called (a boundary, or a pcall's function) has a native one level up: no position.
+            match frame {
+                Some(f) if !f.boundary && f.catch.is_none() => frame = frames.next(),
+                _ => return Vec::new(),
+            }
+        }
+        match frame {
+            Some(frame) => format!(
+                "{}: ",
+                Self::position(&frame.proto, frame.pc.saturating_sub(1))
+            )
+            .into_bytes(),
+            None => Vec::new(),
+        }
+    }
+
+    pub(crate) fn traceback(&self) -> Vec<String> {
+        self.frames
+            .iter()
+            .rev()
+            .take(TRACEBACK_FRAMES)
+            .map(|f| Self::position(&f.proto, f.pc.saturating_sub(1)))
+            .collect()
+    }
+
+    // --- the stack -------------------------------------------------------------------------------------------
+
+    /// Makes the stack exactly `len` long (new slots nil), counting what it grows by.
+    #[inline]
+    pub(crate) fn set_stack(&mut self, len: usize) -> Result<(), LuaError> {
+        if len <= self.stack.len() {
+            self.stack.truncate(len);
+            return Ok(());
+        }
+        self.stack.resize(len, Value::Nil);
+        let capacity = self.stack.capacity() * SLOT_BYTES;
+        if capacity > self.stack_charged {
+            self.heap.charge(capacity - self.stack_charged)?;
+            self.stack_charged = capacity;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn push(&mut self, value: Value) -> Result<(), LuaError> {
+        let len = self.stack.len();
+        self.set_stack(len + 1)?;
+        self.stack[len] = value;
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn arg(&self, args: Args, i: usize) -> Value {
+        if i < args.count {
+            self.stack[args.base + i]
+        } else {
+            Value::Nil
+        }
+    }
+
+    // --- objects ---------------------------------------------------------------------------------------------
+
+    pub(crate) fn metatable(&self, value: Value) -> Option<TableId> {
+        match value {
+            Value::Table(t) => self.heap.table(t).metatable,
+            Value::Userdata(u) => self.heap.userdata.get(u.0).metatable,
+            Value::String(_) => self.string_meta,
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn metamethod(&self, value: Value, name: StrId) -> Value {
+        match self.metatable(value) {
+            Some(mt) => self.heap.raw_get(mt, Value::String(name)),
+            None => Value::Nil,
+        }
+    }
+
+    pub(crate) fn new_string(&mut self, bytes: &[u8]) -> Result<Value, LuaError> {
+        if bytes.len() > self.limits.string_length {
+            return Err(self.string_overflow());
+        }
+        // Making a string (hashing, interning, collecting it later) costs more than an instruction.
+        self.charge_fuel(ALLOCATION_FUEL + (bytes.len() / 16) as u64)?;
+        Ok(Value::String(self.heap.intern(bytes)?))
+    }
+
+    /// A number as a string (for concatenation and `tostring`).
+    pub(crate) fn number_string(&mut self, n: f64) -> Result<StrId, LuaError> {
+        self.heap.intern(number::format(n).as_bytes())
+    }
+
+    /// A value as a number, converting numeric strings, as arithmetic does.
+    #[inline]
+    pub(crate) fn to_number(&self, value: Value) -> Option<f64> {
+        match value {
+            Value::Number(n) => Some(n),
+            Value::String(s) => number::parse(self.heap.string(s)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn raw_set_checked(
+        &mut self,
+        t: TableId,
+        key: Value,
+        value: Value,
+    ) -> Result<(), LuaError> {
+        match key {
+            Value::Nil => Err(self.error("table index is nil")),
+            Value::Number(n) if n.is_nan() => Err(self.error("table index is NaN")),
+            _ => self.heap.raw_set(t, key, value),
+        }
+    }
+
+    /// What a type error calls a value: its type name.
+    fn type_of(value: Value) -> &'static str {
+        value.type_name()
+    }
+
+    // --- metamethod-aware operations -------------------------------------------------------------------------
+
+    /// `object[key]`, with `__index`.
+    pub(crate) fn index(&mut self, object: Value, key: Value) -> Result<Value, LuaError> {
+        let mut object = object;
+        for _ in 0..100 {
+            let handler = match object {
+                Value::Table(t) => {
+                    let value = self.heap.raw_get(t, key);
+                    if value != Value::Nil {
+                        return Ok(value);
+                    }
+                    match self.heap.table(t).metatable {
+                        Some(mt) => self.heap.raw_get(mt, Value::String(self.names.index)),
+                        None => return Ok(Value::Nil),
+                    }
+                }
+                _ => {
+                    let handler = self.metamethod(object, self.names.index);
+                    if handler == Value::Nil {
+                        return Err(self.error(format!(
+                            "attempt to index a {} value",
+                            Self::type_of(object)
+                        )));
+                    }
+                    handler
+                }
+            };
+            match handler {
+                Value::Nil => return Ok(Value::Nil),
+                Value::Function(_) => return self.call_meta(handler, &[object, key]),
+                _ => object = handler,
+            }
+            self.charge_fuel(1)?;
+        }
+        Err(self.error("loop in gettable"))
+    }
+
+    /// `object[key] = value`, with `__newindex`.
+    pub(crate) fn set_index(
+        &mut self,
+        object: Value,
+        key: Value,
+        value: Value,
+    ) -> Result<(), LuaError> {
+        let mut object = object;
+        for _ in 0..100 {
+            let handler = match object {
+                Value::Table(t) => {
+                    let present = self.heap.raw_get(t, key) != Value::Nil;
+                    let handler = match self.heap.table(t).metatable {
+                        Some(mt) if !present => {
+                            self.heap.raw_get(mt, Value::String(self.names.newindex))
+                        }
+                        _ => Value::Nil,
+                    };
+                    if handler == Value::Nil {
+                        return self.raw_set_checked(t, key, value);
+                    }
+                    handler
+                }
+                _ => {
+                    let handler = self.metamethod(object, self.names.newindex);
+                    if handler == Value::Nil {
+                        return Err(self.error(format!(
+                            "attempt to index a {} value",
+                            Self::type_of(object)
+                        )));
+                    }
+                    handler
+                }
+            };
+            if let Value::Function(_) = handler {
+                self.call_meta(handler, &[object, key, value])?;
+                return Ok(());
+            }
+            object = handler;
+            self.charge_fuel(1)?;
+        }
+        Err(self.error("loop in settable"))
+    }
+
+    fn arith_event(&self, op: ArithOp) -> StrId {
+        match op {
+            ArithOp::Add => self.names.add,
+            ArithOp::Sub => self.names.sub,
+            ArithOp::Mul => self.names.mul,
+            ArithOp::Div => self.names.div,
+            ArithOp::Mod => self.names.modulo,
+            ArithOp::Pow => self.names.pow,
+        }
+    }
+
+    #[inline]
+    fn arith_numbers(op: ArithOp, a: f64, b: f64) -> f64 {
+        match op {
+            ArithOp::Add => number::add(a, b),
+            ArithOp::Sub => number::sub(a, b),
+            ArithOp::Mul => number::mul(a, b),
+            ArithOp::Div => number::div(a, b),
+            ArithOp::Mod => number::modulo(a, b),
+            ArithOp::Pow => number::pow(a, b),
+        }
+    }
+
+    pub(crate) fn arith(&mut self, op: ArithOp, a: Value, b: Value) -> Result<Value, LuaError> {
+        if let (Some(x), Some(y)) = (self.to_number(a), self.to_number(b)) {
+            return Ok(Value::Number(Self::arith_numbers(op, x, y)));
+        }
+        let event = self.arith_event(op);
+        let mut handler = self.metamethod(a, event);
+        if handler == Value::Nil {
+            handler = self.metamethod(b, event);
+        }
+        if handler == Value::Nil {
+            let culprit = if self.to_number(a).is_some() { b } else { a };
+            return Err(self.error(format!(
+                "attempt to perform arithmetic on a {} value",
+                Self::type_of(culprit)
+            )));
+        }
+        self.call_meta(handler, &[a, b])
+    }
+
+    pub(crate) fn negate(&mut self, a: Value) -> Result<Value, LuaError> {
+        if let Some(x) = self.to_number(a) {
+            return Ok(Value::Number(number::neg(x)));
+        }
+        let handler = self.metamethod(a, self.names.unm);
+        if handler == Value::Nil {
+            return Err(self.error(format!(
+                "attempt to perform arithmetic on a {} value",
+                Self::type_of(a)
+            )));
+        }
+        self.call_meta(handler, &[a, a])
+    }
+
+    pub(crate) fn length(&mut self, a: Value) -> Result<Value, LuaError> {
+        match a {
+            Value::String(s) => Ok(Value::Number(self.heap.string(s).len() as f64)),
+            Value::Table(t) => Ok(Value::Number(self.heap.table(t).border() as f64)),
+            _ => {
+                let handler = self.metamethod(a, self.names.len);
+                if handler == Value::Nil {
+                    return Err(self.error(format!(
+                        "attempt to get length of a {} value",
+                        Self::type_of(a)
+                    )));
+                }
+                self.call_meta(handler, &[a, Value::Nil])
+            }
+        }
+    }
+
+    /// Raw equality: numbers by value, everything else by identity (strings are interned).
+    #[inline]
+    pub(crate) fn raw_equal(a: Value, b: Value) -> bool {
+        a == b
+    }
+
+    pub(crate) fn equal(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
+        if a == b {
+            return Ok(true);
+        }
+        match (a, b) {
+            (Value::Table(_), Value::Table(_)) | (Value::Userdata(_), Value::Userdata(_)) => {
+                let first = self.metamethod(a, self.names.eq);
+                if first == Value::Nil || first != self.metamethod(b, self.names.eq) {
+                    return Ok(false);
+                }
+                Ok(self.call_meta(first, &[a, b])?.is_truthy())
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn compare_error(&mut self, a: Value, b: Value) -> LuaError {
+        let (x, y) = (Self::type_of(a), Self::type_of(b));
+        if x == y {
+            self.error(format!("attempt to compare two {x} values"))
+        } else {
+            self.error(format!("attempt to compare {x} with {y}"))
+        }
+    }
+
+    fn order_handler(&self, a: Value, b: Value, event: StrId) -> Value {
+        let first = self.metamethod(a, event);
+        if first != Value::Nil
+            && first == self.metamethod(b, event)
+            && std::mem::discriminant(&a) == std::mem::discriminant(&b)
+        {
+            first
+        } else {
+            Value::Nil
+        }
+    }
+
+    pub(crate) fn less_than(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
+        match (a, b) {
+            (Value::Number(x), Value::Number(y)) => Ok(x < y),
+            (Value::String(x), Value::String(y)) => Ok(self.heap.string(x) < self.heap.string(y)),
+            _ => {
+                let handler = self.order_handler(a, b, self.names.lt);
+                if handler == Value::Nil {
+                    return Err(self.compare_error(a, b));
+                }
+                Ok(self.call_meta(handler, &[a, b])?.is_truthy())
+            }
+        }
+    }
+
+    pub(crate) fn less_equal(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
+        match (a, b) {
+            (Value::Number(x), Value::Number(y)) => Ok(x <= y),
+            (Value::String(x), Value::String(y)) => Ok(self.heap.string(x) <= self.heap.string(y)),
+            _ => {
+                let handler = self.order_handler(a, b, self.names.le);
+                if handler != Value::Nil {
+                    return Ok(self.call_meta(handler, &[a, b])?.is_truthy());
+                }
+                let handler = self.order_handler(b, a, self.names.lt);
+                if handler != Value::Nil {
+                    return Ok(!self.call_meta(handler, &[b, a])?.is_truthy());
+                }
+                Err(self.compare_error(a, b))
+            }
+        }
+    }
+
+    /// `R[first] .. ... .. R[last]`, right to left as Lua 5.1 does, joining runs of strings and numbers at once.
+    fn concat(&mut self, first: usize, last: usize) -> Result<Value, LuaError> {
+        let mut accumulated = self.stack[last];
+        let mut i = last;
+        while i > first {
+            let left = self.stack[i - 1];
+            let stringy = |v: Value| matches!(v, Value::String(_) | Value::Number(_));
+            if stringy(left) && stringy(accumulated) {
+                let mut start = i - 1;
+                while start > first && stringy(self.stack[start - 1]) {
+                    start -= 1;
+                }
+                let mut bytes = Vec::new();
+                for j in start..i {
+                    self.append_stringy(&mut bytes, self.stack[j])?;
+                }
+                self.append_stringy(&mut bytes, accumulated)?;
+                accumulated = self.new_string(&bytes)?;
+                i = start;
+            } else {
+                let mut handler = self.metamethod(left, self.names.concat);
+                if handler == Value::Nil {
+                    handler = self.metamethod(accumulated, self.names.concat);
+                }
+                if handler == Value::Nil {
+                    let culprit = if stringy(left) { accumulated } else { left };
+                    return Err(self.error(format!(
+                        "attempt to concatenate a {} value",
+                        Self::type_of(culprit)
+                    )));
+                }
+                accumulated = self.call_meta(handler, &[left, accumulated])?;
+                i -= 1;
+            }
+        }
+        Ok(accumulated)
+    }
+
+    fn append_stringy(&mut self, bytes: &mut Vec<u8>, value: Value) -> Result<(), LuaError> {
+        match value {
+            Value::String(s) => {
+                let length = self.heap.string(s).len();
+                if bytes.len() + length > self.limits.string_length {
+                    return Err(self.string_overflow());
+                }
+                self.charge_fuel(length as u64 / 16)?;
+                bytes.extend_from_slice(self.heap.string(s));
+            }
+            Value::Number(n) => bytes.extend_from_slice(number::format(n).as_bytes()),
+            _ => unreachable!("only strings and numbers are appended"),
+        }
+        Ok(())
+    }
+
+    // --- calls -----------------------------------------------------------------------------------------------
+
+    /// Calls a metamethod (or any function) from inside an instruction with these arguments; its first result.
+    pub(crate) fn call_meta(&mut self, function: Value, args: &[Value]) -> Result<Value, LuaError> {
+        let slot = self.stack.len();
+        self.push(function)?;
+        for &arg in args {
+            self.push(arg)?;
+        }
+        let count = self.call_value(slot, args.len())?;
+        let result = if count > 0 {
+            self.stack[slot]
+        } else {
+            Value::Nil
+        };
+        self.stack.truncate(slot);
+        Ok(result)
+    }
+
+    /// Calls the function at `slot` with the `count` arguments after it; its results end up from `slot` on, the stack
+    /// ends after them, and their number is returned.
+    pub(crate) fn call_value(&mut self, slot: usize, count: usize) -> Result<usize, LuaError> {
+        self.stack.truncate(slot + 1 + count);
+        let (function, count) = self.callable(slot, count)?;
+        match self.heap.functions.get(function.0) {
+            Function::Native { .. } => self.call_native(function, slot, count, false),
+            Function::Lua { .. } => {
+                self.enter_native()?;
+                let depth = self.frames.len();
+                let result = self
+                    .push_frame(function, slot, count, -1, true)
+                    .and_then(|()| self.execute());
+                self.native_depth -= 1;
+                match result {
+                    Ok(Exec::Returned) => Ok(self.top - slot),
+                    Ok(Exec::Yielded) => unreachable!("a yield across a native call is refused"),
+                    Err(e) => {
+                        self.frames.truncate(depth);
+                        Err(e)
+                    }
+                }
+            }
+        }
+    }
+
+    fn enter_native(&mut self) -> Result<(), LuaError> {
+        self.native_depth += 1;
+        if self.native_depth > MAX_NATIVE_DEPTH {
+            self.native_depth -= 1;
+            return Err(self.error("C stack overflow"));
+        }
+        Ok(())
+    }
+
+    /// The function to call at `slot`, going through `__call` (which shifts the arguments right by one).
+    fn callable(&mut self, slot: usize, count: usize) -> Result<(FuncId, usize), LuaError> {
+        for count in (count..).take(100) {
+            let value = self.stack[slot];
+            if let Value::Function(f) = value {
+                return Ok((f, count));
+            }
+            let handler = self.metamethod(value, self.names.call);
+            if handler == Value::Nil {
+                return Err(self.call_error(value));
+            }
+            self.stack.insert(slot, handler);
+            let len = self.stack.len();
+            self.set_stack(len)?;
+        }
+        Err(self.error("loop in __call"))
+    }
+
+    fn call_error(&mut self, value: Value) -> LuaError {
+        self.error(format!("attempt to call a {} value", Self::type_of(value)))
+    }
+
+    /// Calls a native function at `slot` with `count` arguments; moves its results to `slot`.
+    fn call_native(
+        &mut self,
+        function: FuncId,
+        slot: usize,
+        count: usize,
+        from_lua: bool,
+    ) -> Result<usize, LuaError> {
+        let Function::Native {
+            function: native, ..
+        } = self.heap.functions.get(function.0)
+        else {
+            unreachable!("a native")
+        };
+        let native = native.clone();
+        self.enter_native()?;
+        let caller = std::mem::replace(&mut self.lua_caller, from_lua);
+        self.stack.truncate(slot + 1 + count);
+        let args = Args {
+            base: slot + 1,
+            count,
+        };
+        let result = match &native {
+            NativeFn::Builtin(f) => f(self, args),
+            NativeFn::Host(f) => f(self, args),
+        };
+        self.native_depth -= 1;
+        self.lua_caller = caller;
+        let results = result?;
+        let start = self.stack.len() - results;
+        self.stack.copy_within(start.., slot);
+        self.stack.truncate(slot + results);
+        self.top = slot + results;
+        Ok(results)
+    }
+
+    /// The upvalues (cells) and closure data for the native being called: its own upvalues.
+    pub(crate) fn native_upvalue(&self, args: Args, i: usize) -> Value {
+        let Value::Function(f) = self.stack[args.base - 1] else {
+            return Value::Nil;
+        };
+        match self.heap.functions.get(f.0) {
+            Function::Native { upvalues, .. } => upvalues.get(i).copied().unwrap_or(Value::Nil),
+            Function::Lua { .. } => Value::Nil,
+        }
+    }
+
+    /// Pushes a frame for a Lua function at `slot` called with `count` arguments.
+    pub(crate) fn push_frame(
+        &mut self,
+        function: FuncId,
+        slot: usize,
+        count: usize,
+        want: i32,
+        boundary: bool,
+    ) -> Result<(), LuaError> {
+        if self.frames.len() >= self.limits.call_depth as usize {
+            return Err(self.error("stack overflow"));
+        }
+        let Function::Lua {
+            proto,
+            upvalues,
+            env,
+        } = self.heap.functions.get(function.0)
+        else {
+            unreachable!("a Lua function")
+        };
+        let (proto, upvalues, env) = (proto.clone(), upvalues.clone(), *env);
+        let params = usize::from(proto.params);
+        let given = count.min(params);
+        let first = slot + 1;
+        let (base, varargs) = if proto.vararg {
+            let base = first + count;
+            self.set_stack(base + given)?;
+            for i in 0..given {
+                self.stack[base + i] = self.stack[first + i];
+            }
+            (
+                base,
+                (first + params.min(count), count.saturating_sub(params)),
+            )
+        } else {
+            (first, (0, 0))
+        };
+        self.stack.truncate(base + given);
+        self.set_stack(base + usize::from(proto.registers))?;
+        self.frames.push(Frame {
+            function,
+            proto,
+            upvalues,
+            env,
+            pc: 0,
+            base,
+            slot,
+            want,
+            varargs,
+            boundary,
+            catch: None,
+        });
+        Ok(())
+    }
+
+    /// Puts `count` results from `from` at `slot` as a caller wanting `want` expects them, and returns where the
+    /// caller's stack must end at least.
+    fn place_results(
+        &mut self,
+        from: usize,
+        count: usize,
+        slot: usize,
+        want: i32,
+    ) -> Result<(), LuaError> {
+        // Moving many values is work one instruction must not get for free.
+        self.charge_fuel((count / VALUES_PER_FUEL) as u64)?;
+        if from != slot {
+            self.stack.copy_within(from..from + count, slot);
+        }
+        if want < 0 {
+            self.stack.truncate(slot + count);
+            self.top = slot + count;
+        } else {
+            let want = want as usize;
+            self.stack.truncate(slot + count.min(want));
+            self.set_stack(slot + want)?;
+            self.top = slot + want;
+        }
+        Ok(())
+    }
+
+    /// Runs Lua frames until the boundary frame that started this loop returns or the coroutine yields; an error stops
+    /// at the innermost `pcall` this loop runs.
+    pub(crate) fn execute(&mut self) -> Result<Exec, LuaError> {
+        loop {
+            match self.run() {
+                Err(LuaError::Runtime {
+                    value,
+                    traceback,
+                    located,
+                }) => {
+                    let boundary = self.frames.iter().rposition(|f| f.boundary).unwrap_or(0);
+                    let Some(at) = self.frames[boundary..]
+                        .iter()
+                        .rposition(|f| f.catch.is_some())
+                    else {
+                        return Err(LuaError::Runtime {
+                            value,
+                            traceback,
+                            located,
+                        });
+                    };
+                    let frame = self.frames[boundary + at].clone();
+                    self.frames.truncate(boundary + at);
+                    let catch = frame.catch.expect("a catching frame");
+                    self.stack.truncate(frame.slot);
+                    let value = self.handle(catch.handler, value)?;
+                    self.finish_protected(frame.slot - 1, value, catch.want)?;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// What a failed protected call returns besides `false`: the error, or what the `xpcall` handler made of it.
+    fn handle(&mut self, handler: Value, error: Value) -> Result<Value, LuaError> {
+        if handler == Value::Nil {
+            return Ok(error);
+        }
+        match self.protect(|vm| vm.call_meta(handler, &[error])) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(value)) => Ok(value),
+            Err(limit) => Err(limit),
+        }
+    }
+
+    /// Runs `f`, turning a Lua error into Ok(Err(value)) and restoring the frames and nesting; limits pass through.
+    pub(crate) fn protect<T>(
+        &mut self,
+        f: impl FnOnce(&mut Vm) -> Result<T, LuaError>,
+    ) -> Result<Result<T, Value>, LuaError> {
+        let depth = self.frames.len();
+        let native_depth = self.native_depth;
+        let stack = self.stack.len();
+        match f(self) {
+            Ok(value) => Ok(Ok(value)),
+            Err(LuaError::Runtime { value, .. }) => {
+                self.frames.truncate(depth);
+                self.native_depth = native_depth;
+                self.stack.truncate(stack);
+                Ok(Err(value))
+            }
+            Err(limit) => Err(limit),
+        }
+    }
+
+    /// Puts `false, value` where the protected call sat, as its caller wants, and gives the caller its registers back.
+    fn finish_protected(&mut self, slot: usize, value: Value, want: i32) -> Result<(), LuaError> {
+        self.stack.truncate(slot);
+        self.push(Value::Boolean(false))?;
+        self.push(value)?;
+        self.place_results(slot, 2, slot, want)?;
+        if let Some(caller) = self.frames.last() {
+            let top = caller.base + usize::from(caller.proto.registers);
+            if self.stack.len() < top {
+                self.set_stack(top)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a native is `pcall` (Some(false)) or `xpcall` (Some(true)).
+    fn protected_kind(&self, function: FuncId) -> Option<bool> {
+        match self.heap.functions.get(function.0) {
+            Function::Native {
+                function: NativeFn::Builtin(_),
+                name: "pcall",
+                ..
+            } => Some(false),
+            Function::Native {
+                function: NativeFn::Builtin(_),
+                name: "xpcall",
+                ..
+            } => Some(true),
+            _ => None,
+        }
+    }
+
+    /// `pcall(f, ...)` or `xpcall(f, handler, ...)` called from Lua at `slot`: a Lua `f` runs as a frame that catches
+    /// errors (so a coroutine may yield inside it), returning true; a native `f` runs here, returning false.
+    fn protected(
+        &mut self,
+        slot: usize,
+        count: usize,
+        want: i32,
+        xpcall: bool,
+    ) -> Result<Protected, LuaError> {
+        let name = if xpcall { "xpcall" } else { "pcall" };
+        let needed = if xpcall { 2 } else { 1 };
+        if count < needed {
+            let message = format!("bad argument #{} to '{name}' (value expected)", count + 1);
+            return Err(self.error(message));
+        }
+        let handler = if xpcall {
+            self.stack.remove(slot + 2)
+        } else {
+            Value::Nil
+        };
+        let count = count + 1 - needed;
+        let (function, count) = match self.protect(|vm| vm.callable(slot + 1, count - 1)) {
+            Ok(Ok(called)) => called,
+            Ok(Err(error)) => {
+                let value = self.handle(handler, error)?;
+                self.finish_protected(slot, value, want)?;
+                return Ok(Protected::Done);
+            }
+            Err(limit) => return Err(limit),
+        };
+        let inner_want = if want < 0 { -1 } else { (want - 1).max(0) };
+        if matches!(self.heap.functions.get(function.0), Function::Lua { .. }) {
+            self.push_frame(function, slot + 1, count, inner_want, false)?;
+            self.frames.last_mut().expect("the protected frame").catch =
+                Some(Catch { handler, want });
+            return Ok(Protected::Frame);
+        }
+        match self.protect(|vm| vm.call_native(function, slot + 1, count, false))? {
+            Ok(_) if self.yielding => {
+                self.yielding = false;
+                let thread = self.threads.get_mut(self.current.0);
+                thread.pending = Some(Pending {
+                    values: slot + 1,
+                    slot,
+                    want,
+                    protected: true,
+                });
+                return Ok(Protected::Yielded);
+            }
+            Ok(produced) => {
+                self.stack[slot] = Value::Boolean(true);
+                self.place_results(slot, produced + 1, slot, want)?;
+            }
+            Err(error) => {
+                let value = self.handle(handler, error)?;
+                self.finish_protected(slot, value, want)?;
+            }
+        }
+        Ok(Protected::Done)
+    }
+
+    /// The loop itself.
+    fn run(&mut self) -> Result<Exec, LuaError> {
+        'frame: loop {
+            let frame = self.frames.last().expect("a running frame");
+            let proto = frame.proto.clone();
+            let base = frame.base;
+            let mut pc = frame.pc;
+            let code = &proto.code[..];
+            let frame_top = base + usize::from(proto.registers);
+            loop {
+                if self.fuel == 0 {
+                    self.frames.last_mut().expect("a running frame").pc = pc;
+                    return Err(LuaError::Limit(self.fuel_limit));
+                }
+                self.fuel -= 1;
+                if self.heap.memory >= self.gc_threshold || self.gc_requested {
+                    self.frames.last_mut().expect("a running frame").pc = pc;
+                    self.collect();
+                }
+                let op = code[pc];
+                pc += 1;
+                match op {
+                    Op::Move { a, b } => {
+                        self.stack[base + usize::from(a)] = self.stack[base + usize::from(b)]
+                    }
+                    Op::LoadK { a, k } => {
+                        self.stack[base + usize::from(a)] = proto.constants[k as usize]
+                    }
+                    Op::LoadBool { a, value, skip } => {
+                        self.stack[base + usize::from(a)] = Value::Boolean(value);
+                        if skip {
+                            pc += 1;
+                        }
+                    }
+                    Op::LoadNil { a, count } => {
+                        let a = base + usize::from(a);
+                        self.stack[a..=a + usize::from(count)].fill(Value::Nil);
+                    }
+                    Op::NewCell { a } => {
+                        let value = self.stack[base + usize::from(a)];
+                        let cell = located!(self, self.heap.new_cell(value), pc);
+                        self.stack[base + usize::from(a)] = Value::Cell(cell);
+                    }
+                    Op::GetCell { a, cell } => {
+                        let Value::Cell(cell) = self.stack[base + usize::from(cell)] else {
+                            unreachable!("a cell register")
+                        };
+                        self.stack[base + usize::from(a)] = *self.heap.cells.get(cell.0);
+                    }
+                    Op::SetCell { cell, b } => {
+                        let Value::Cell(cell) = self.stack[base + usize::from(cell)] else {
+                            unreachable!("a cell register")
+                        };
+                        *self.heap.cells.get_mut(cell.0) = self.stack[base + usize::from(b)];
+                    }
+                    Op::GetUpvalue { a, upvalue } => {
+                        let cell = self.frames.last().expect("a running frame").upvalues
+                            [usize::from(upvalue)];
+                        self.stack[base + usize::from(a)] = *self.heap.cells.get(cell.0);
+                    }
+                    Op::SetUpvalue { upvalue, b } => {
+                        let cell = self.frames.last().expect("a running frame").upvalues
+                            [usize::from(upvalue)];
+                        *self.heap.cells.get_mut(cell.0) = self.stack[base + usize::from(b)];
+                    }
+                    Op::GetGlobal { a, k } => {
+                        let env = self.frames.last().expect("a running frame").env;
+                        let key = proto.constants[k as usize];
+                        let value = self.heap.raw_get(env, key);
+                        let value =
+                            if value == Value::Nil && self.heap.table(env).metatable.is_some() {
+                                located!(self, self.index(Value::Table(env), key), pc)
+                            } else {
+                                value
+                            };
+                        self.stack[base + usize::from(a)] = value;
+                    }
+                    Op::SetGlobal { b, k } => {
+                        let env = self.frames.last().expect("a running frame").env;
+                        let key = proto.constants[k as usize];
+                        let value = self.stack[base + usize::from(b)];
+                        if self.heap.table(env).metatable.is_none() {
+                            located!(self, self.heap.raw_set(env, key, value), pc);
+                        } else {
+                            located!(self, self.set_index(Value::Table(env), key, value), pc);
+                        }
+                    }
+                    Op::GetTable { a, table, key } => {
+                        let object = self.stack[base + usize::from(table)];
+                        let key = self.rk(&proto, base, key);
+                        let value = match object {
+                            Value::Table(t) => {
+                                let value = self.heap.raw_get(t, key);
+                                if value == Value::Nil && self.heap.table(t).metatable.is_some() {
+                                    located!(self, self.index(object, key), pc)
+                                } else {
+                                    value
+                                }
+                            }
+                            _ => {
+                                let result = self.index(object, key);
+                                let result =
+                                    result.map_err(|e| self.name_error(e, &proto, pc - 1, table));
+                                located!(self, result, pc)
+                            }
+                        };
+                        self.stack[base + usize::from(a)] = value;
+                    }
+                    Op::SetTable { table, key, value } => {
+                        let object = self.stack[base + usize::from(table)];
+                        let key = self.rk(&proto, base, key);
+                        let value = self.rk(&proto, base, value);
+                        let result = match object {
+                            Value::Table(t) if self.heap.table(t).metatable.is_none() => {
+                                self.raw_set_checked(t, key, value)
+                            }
+                            _ => self
+                                .set_index(object, key, value)
+                                .map_err(|e| self.name_error(e, &proto, pc - 1, table)),
+                        };
+                        located!(self, result, pc);
+                    }
+                    Op::NewTable { a, array, hash } => {
+                        located!(self, self.charge_fuel(ALLOCATION_FUEL), pc);
+                        let t = located!(
+                            self,
+                            self.heap.new_table(usize::from(array), usize::from(hash)),
+                            pc
+                        );
+                        self.stack[base + usize::from(a)] = Value::Table(t);
+                    }
+                    Op::SelfMethod { a, object, key } => {
+                        let receiver = self.stack[base + usize::from(object)];
+                        let key = self.rk(&proto, base, key);
+                        let result = self
+                            .index(receiver, key)
+                            .map_err(|e| self.name_error(e, &proto, pc - 1, object));
+                        let method = located!(self, result, pc);
+                        self.stack[base + usize::from(a) + 1] = receiver;
+                        self.stack[base + usize::from(a)] = method;
+                    }
+                    Op::Arith { op, a, b, c } => {
+                        let x = self.rk(&proto, base, b);
+                        let y = self.rk(&proto, base, c);
+                        let value = match (x, y) {
+                            (Value::Number(x), Value::Number(y)) => {
+                                Value::Number(Self::arith_numbers(op, x, y))
+                            }
+                            _ => {
+                                let result = self.arith(op, x, y);
+                                let culprit = if self.to_number(x).is_some() { c } else { b };
+                                let result = match culprit.0 {
+                                    r if r < Rk::CONSTANT => result
+                                        .map_err(|e| self.name_error(e, &proto, pc - 1, r as u8)),
+                                    _ => result,
+                                };
+                                located!(self, result, pc)
+                            }
+                        };
+                        self.stack[base + usize::from(a)] = value;
+                    }
+                    Op::Neg { a, b } => {
+                        let result = self
+                            .negate(self.stack[base + usize::from(b)])
+                            .map_err(|e| self.name_error(e, &proto, pc - 1, b));
+                        let value = located!(self, result, pc);
+                        self.stack[base + usize::from(a)] = value;
+                    }
+                    Op::Not { a, b } => {
+                        self.stack[base + usize::from(a)] =
+                            Value::Boolean(!self.stack[base + usize::from(b)].is_truthy());
+                    }
+                    Op::Len { a, b } => {
+                        let result = self
+                            .length(self.stack[base + usize::from(b)])
+                            .map_err(|e| self.name_error(e, &proto, pc - 1, b));
+                        let value = located!(self, result, pc);
+                        self.stack[base + usize::from(a)] = value;
+                    }
+                    Op::Concat { a, first, last } => {
+                        let value = located!(
+                            self,
+                            self.concat(base + usize::from(first), base + usize::from(last)),
+                            pc
+                        );
+                        self.stack[base + usize::from(a)] = value;
+                    }
+                    Op::Jump { offset } => pc = (pc as i64 + i64::from(offset)) as usize,
+                    Op::Compare { op, b, c, expect } => {
+                        let x = self.rk(&proto, base, b);
+                        let y = self.rk(&proto, base, c);
+                        let result = match (op, x, y) {
+                            (CompareOp::Lt, Value::Number(x), Value::Number(y)) => x < y,
+                            (CompareOp::Le, Value::Number(x), Value::Number(y)) => x <= y,
+                            (CompareOp::Eq, _, _) => located!(self, self.equal(x, y), pc),
+                            (CompareOp::Lt, _, _) => located!(self, self.less_than(x, y), pc),
+                            (CompareOp::Le, _, _) => located!(self, self.less_equal(x, y), pc),
+                        };
+                        pc = Self::follow_jump(code, pc, result == expect);
+                    }
+                    Op::Test { a, expect } => {
+                        let truthy = self.stack[base + usize::from(a)].is_truthy();
+                        pc = Self::follow_jump(code, pc, truthy == expect);
+                    }
+                    Op::Call {
+                        func,
+                        args,
+                        results,
+                    } => {
+                        let slot = base + usize::from(func);
+                        let count = if args == 0 {
+                            self.top - slot - 1
+                        } else {
+                            usize::from(args) - 1
+                        };
+                        let want = i32::from(results) - 1;
+                        self.frames.last_mut().expect("a running frame").pc = pc;
+                        self.stack.truncate(slot + 1 + count);
+                        let called = self
+                            .callable(slot, count)
+                            .map_err(|e| self.name_error(e, &proto, pc - 1, func));
+                        let (function, count) = located!(self, called, pc);
+                        if matches!(self.heap.functions.get(function.0), Function::Lua { .. }) {
+                            located!(
+                                self,
+                                self.push_frame(function, slot, count, want, false),
+                                pc
+                            );
+                            continue 'frame;
+                        }
+                        if let Some(xpcall) = self.protected_kind(function) {
+                            match located!(self, self.protected(slot, count, want, xpcall), pc) {
+                                Protected::Frame => continue 'frame,
+                                Protected::Yielded => return Ok(Exec::Yielded),
+                                Protected::Done => {}
+                            }
+                            if self.stack.len() < frame_top {
+                                located!(self, self.set_stack(frame_top), pc);
+                            }
+                            continue;
+                        }
+                        let produced =
+                            located!(self, self.call_native(function, slot, count, true), pc);
+                        if self.yielding {
+                            self.yielding = false;
+                            let thread = self.threads.get_mut(self.current.0);
+                            thread.pending = Some(Pending {
+                                values: slot,
+                                slot,
+                                want,
+                                protected: false,
+                            });
+                            return Ok(Exec::Yielded);
+                        }
+                        located!(self, self.place_results(slot, produced, slot, want), pc);
+                        if self.stack.len() < frame_top {
+                            located!(self, self.set_stack(frame_top), pc);
+                        }
+                    }
+                    Op::TailCall { func, args } => {
+                        let slot = base + usize::from(func);
+                        let count = if args == 0 {
+                            self.top - slot - 1
+                        } else {
+                            usize::from(args) - 1
+                        };
+                        self.frames.last_mut().expect("a running frame").pc = pc;
+                        self.stack.truncate(slot + 1 + count);
+                        let called = self
+                            .callable(slot, count)
+                            .map_err(|e| self.name_error(e, &proto, pc - 1, func));
+                        let (function, count) = located!(self, called, pc);
+                        let frame = self.frames.last().expect("a running frame");
+                        let (frame_slot, want, boundary) = (frame.slot, frame.want, frame.boundary);
+                        if matches!(self.heap.functions.get(function.0), Function::Lua { .. }) {
+                            // Reuse this frame's place: the callee and its arguments move down to its slot.
+                            self.stack.copy_within(slot..slot + 1 + count, frame_slot);
+                            self.stack.truncate(frame_slot + 1 + count);
+                            self.frames.pop();
+                            located!(
+                                self,
+                                self.push_frame(function, frame_slot, count, want, boundary),
+                                pc
+                            );
+                            continue 'frame;
+                        }
+                        if let Some(xpcall) = self.protected_kind(function) {
+                            // `return pcall(...)`: a plain call for all results; the `Return` after it returns them.
+                            match located!(self, self.protected(slot, count, -1, xpcall), pc) {
+                                Protected::Frame => continue 'frame,
+                                Protected::Yielded => return Ok(Exec::Yielded),
+                                Protected::Done => continue,
+                            }
+                        }
+                        let produced =
+                            located!(self, self.call_native(function, slot, count, true), pc);
+                        if self.yielding {
+                            self.yielding = false;
+                            let thread = self.threads.get_mut(self.current.0);
+                            thread.pending = Some(Pending {
+                                values: slot,
+                                slot,
+                                want: -1,
+                                protected: false,
+                            });
+                            // The yield's results return from this frame when the coroutine resumes.
+                            self.frames.last_mut().expect("a running frame").pc = pc;
+                            return Ok(Exec::Yielded);
+                        }
+                        match self.return_from_frame(slot, produced) {
+                            Ok(true) => return Ok(Exec::Returned),
+                            Ok(false) => continue 'frame,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Op::Return { first, count } => {
+                        let first = base + usize::from(first);
+                        let count = if count == 0 {
+                            self.top - first
+                        } else {
+                            usize::from(count) - 1
+                        };
+                        match self.return_from_frame(first, count) {
+                            Ok(true) => return Ok(Exec::Returned),
+                            Ok(false) => continue 'frame,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Op::ForPrep { a, offset } => {
+                        let a = base + usize::from(a);
+                        let start = self.to_number(self.stack[a]);
+                        let limit = self.to_number(self.stack[a + 1]);
+                        let step = self.to_number(self.stack[a + 2]);
+                        let (Some(start), Some(limit), Some(step)) = (start, limit, step) else {
+                            let message = if start.is_none() {
+                                "'for' initial value must be a number"
+                            } else if limit.is_none() {
+                                "'for' limit must be a number"
+                            } else {
+                                "'for' step must be a number"
+                            };
+                            let error = self.error(message);
+                            return Err(self.locate(error, Some(pc)));
+                        };
+                        self.stack[a] = Value::Number(number::sub(start, step));
+                        self.stack[a + 1] = Value::Number(limit);
+                        self.stack[a + 2] = Value::Number(step);
+                        pc = (pc as i64 + i64::from(offset)) as usize;
+                    }
+                    Op::ForLoop { a, offset } => {
+                        let a = base + usize::from(a);
+                        let (Value::Number(index), Value::Number(limit), Value::Number(step)) =
+                            (self.stack[a], self.stack[a + 1], self.stack[a + 2])
+                        else {
+                            unreachable!("the loop's prep made numbers")
+                        };
+                        let index = number::add(index, step);
+                        let more = if step > 0.0 {
+                            index <= limit
+                        } else {
+                            limit <= index
+                        };
+                        self.stack[a] = Value::Number(index);
+                        if more {
+                            self.stack[a + 3] = Value::Number(index);
+                            pc = (pc as i64 + i64::from(offset)) as usize;
+                        }
+                    }
+                    Op::ForEachLoop { a, offset } => {
+                        let a = base + usize::from(a);
+                        let control = self.stack[a + 3];
+                        if control != Value::Nil {
+                            self.stack[a + 2] = control;
+                            pc = (pc as i64 + i64::from(offset)) as usize;
+                        }
+                    }
+                    Op::SetList {
+                        table,
+                        count,
+                        start,
+                    } => {
+                        let t = base + usize::from(table);
+                        let count = if count == 0 {
+                            self.top - t - 1
+                        } else {
+                            usize::from(count) - 1
+                        };
+                        let Value::Table(id) = self.stack[t] else {
+                            unreachable!("a table constructor's table")
+                        };
+                        located!(self, self.charge_fuel((count / VALUES_PER_FUEL) as u64), pc);
+                        for i in 0..count {
+                            let key = Value::Number((start as usize + i) as f64);
+                            let value = self.stack[t + 1 + i];
+                            located!(self, self.heap.raw_set(id, key, value), pc);
+                        }
+                        if self.stack.len() < frame_top {
+                            located!(self, self.set_stack(frame_top), pc);
+                        }
+                    }
+                    Op::Closure { a, proto: index } => {
+                        let child = proto.protos[index as usize].clone();
+                        let frame = self.frames.last().expect("a running frame");
+                        let env = frame.env;
+                        let mut upvalues = Vec::with_capacity(child.captures.len());
+                        for capture in &child.captures {
+                            upvalues.push(match *capture {
+                                Capture::Register(r) => match self.stack[base + usize::from(r)] {
+                                    Value::Cell(cell) => cell,
+                                    other => unreachable!(
+                                        "a captured local lives in a cell, found {other:?}"
+                                    ),
+                                },
+                                Capture::Upvalue(u) => frame.upvalues[usize::from(u)],
+                            });
+                        }
+                        located!(self, self.charge_fuel(ALLOCATION_FUEL), pc);
+                        let function = Function::Lua {
+                            proto: child,
+                            upvalues: upvalues.into(),
+                            env,
+                        };
+                        let f = located!(self, self.heap.new_function(function), pc);
+                        self.stack[base + usize::from(a)] = Value::Function(f);
+                    }
+                    Op::VarArg { a, count } => {
+                        let (start, available) =
+                            self.frames.last().expect("a running frame").varargs;
+                        let a = base + usize::from(a);
+                        let wanted = if count == 0 {
+                            available
+                        } else {
+                            usize::from(count) - 1
+                        };
+                        located!(
+                            self,
+                            self.charge_fuel((wanted / VALUES_PER_FUEL) as u64),
+                            pc
+                        );
+                        if a + wanted > self.stack.len() {
+                            located!(self, self.set_stack(a + wanted), pc);
+                        }
+                        for i in 0..wanted {
+                            self.stack[a + i] = if i < available {
+                                self.stack[start + i]
+                            } else {
+                                Value::Nil
+                            };
+                        }
+                        if count == 0 {
+                            self.top = a + wanted;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The operand value of an `Rk`.
+    #[inline]
+    fn rk(&self, proto: &Proto, base: usize, rk: Rk) -> Value {
+        if rk.0 >= Rk::CONSTANT {
+            proto.constants[usize::from(rk.0 - Rk::CONSTANT)]
+        } else {
+            self.stack[base + usize::from(rk.0)]
+        }
+    }
+
+    /// After a compare or test at `pc - 1`: the next instruction is a jump, taken when `jump`.
+    #[inline]
+    fn follow_jump(code: &[Op], pc: usize, jump: bool) -> usize {
+        if jump {
+            let Op::Jump { offset } = code[pc] else {
+                unreachable!("a test is followed by a jump")
+            };
+            (pc as i64 + 1 + i64::from(offset)) as usize
+        } else {
+            pc + 1
+        }
+    }
+
+    /// Names the register an error was about (`local 'a'`, `upvalue 'u'`, `global 'x'`, `field 'y'`, `method 'z'`),
+    /// as Lua's messages do: a local active there, else the instruction that last wrote it in straight-line code.
+    fn name_error(&mut self, error: LuaError, proto: &Proto, pc: usize, register: u8) -> LuaError {
+        let LuaError::Runtime {
+            value: Value::String(message),
+            located: false,
+            ..
+        } = error
+        else {
+            return error;
+        };
+        let local_name = |register: u8| {
+            proto
+                .locals
+                .iter()
+                .rev()
+                .find(|l| l.register == register && l.start <= pc && pc < l.end)
+                .map(|l| l.name.clone())
+        };
+        let mut name: Option<(&str, Vec<u8>)> =
+            local_name(register).map(|n| ("local", n.into_vec()));
+        if name.is_none() {
+            let constant = |k: usize| match proto.constants[k] {
+                Value::String(s) => Some(self.heap.string(s).to_vec()),
+                _ => None,
+            };
+            for op in proto.code[..pc].iter().rev().take(64) {
+                let (written, described) = match *op {
+                    Op::GetGlobal { a, k } => (a, constant(k as usize).map(|n| ("global", n))),
+                    Op::GetTable { a, key, .. } if key.0 >= Rk::CONSTANT => (
+                        a,
+                        constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("field", n)),
+                    ),
+                    Op::SelfMethod { a, key, .. } if key.0 >= Rk::CONSTANT => (
+                        a,
+                        constant(usize::from(key.0 - Rk::CONSTANT)).map(|n| ("method", n)),
+                    ),
+                    Op::GetUpvalue { a, upvalue } => (
+                        a,
+                        proto
+                            .upvalue_names
+                            .get(usize::from(upvalue))
+                            .map(|n| ("upvalue", n.to_vec())),
+                    ),
+                    Op::GetCell { a, cell } => {
+                        (a, local_name(cell).map(|n| ("local", n.into_vec())))
+                    }
+                    Op::Move { a, b } => (a, local_name(b).map(|n| ("local", n.into_vec()))),
+                    Op::LoadK { a, .. }
+                    | Op::LoadBool { a, .. }
+                    | Op::GetTable { a, .. }
+                    | Op::SelfMethod { a, .. }
+                    | Op::NewTable { a, .. }
+                    | Op::Arith { a, .. }
+                    | Op::Concat { a, .. } => (a, None),
+                    Op::Jump { .. }
+                    | Op::Call { .. }
+                    | Op::Closure { .. }
+                    | Op::TailCall { .. }
+                    | Op::VarArg { .. } => break,
+                    _ => continue,
+                };
+                if written == register {
+                    name = described;
+                    break;
+                }
+            }
+        }
+        let Some((kind, n)) = name else { return error };
+        // "attempt to call a nil value" becomes "attempt to call global 'f' (a nil value)".
+        let text = self.heap.string(message);
+        let Some(article) = find(text, b" a ").or_else(|| find(text, b" an ")) else {
+            return error;
+        };
+        let mut rewritten = text[..article].to_vec();
+        rewritten.extend_from_slice(format!(" {kind} '").as_bytes());
+        rewritten.extend_from_slice(&n);
+        rewritten.extend_from_slice(b"' (");
+        rewritten.extend_from_slice(&text[article + 1..]);
+        rewritten.push(b')');
+        match self.heap.intern(&rewritten) {
+            Ok(s) => LuaError::Runtime {
+                value: Value::String(s),
+                traceback: Vec::new(),
+                located: false,
+            },
+            Err(e) => e,
+        }
+    }
+
+    /// Returns `count` values from `first` out of the running frame; true when that frame was a boundary.
+    fn return_from_frame(&mut self, first: usize, count: usize) -> Result<bool, LuaError> {
+        let frame = self.frames.pop().expect("a running frame");
+        self.place_results(first, count, frame.slot, frame.want)?;
+        if frame.catch.is_some() {
+            self.stack[frame.slot - 1] = Value::Boolean(true);
+            if self.top == frame.slot && frame.want < 0 {
+                self.top = frame.slot;
+            }
+        }
+        if frame.boundary {
+            return Ok(true);
+        }
+        let caller = self.frames.last().expect("a caller");
+        let caller_top = caller.base + usize::from(caller.proto.registers);
+        if self.stack.len() < caller_top {
+            self.set_stack(caller_top)?;
+        }
+        Ok(false)
+    }
+
+    // --- the collector ---------------------------------------------------------------------------------------
+
+    /// `collectgarbage("collect")`: a collection at the next instruction, paid for now by the memory it will walk.
+    pub(crate) fn request_collection(&mut self) -> Result<(), LuaError> {
+        self.charge_fuel((self.heap.memory / GC_BYTES_PER_FUEL) as u64)?;
+        self.gc_requested = true;
+        Ok(())
+    }
+
+    /// Marks everything reachable and frees the rest; recounts memory from what survived. The walk is paid in fuel
+    /// by the memory it covered, so no script makes the collector run for free.
+    pub(crate) fn collect(&mut self) {
+        self.gc_requested = false;
+        self.gc_epoch += 1;
+        let epoch = self.gc_epoch;
+        let mut gray: Vec<Value> = Vec::new();
+        let mut live = 0usize;
+        gray.extend_from_slice(&self.stack);
+        gray.extend_from_slice(&self.pinned);
+        gray.push(Value::Table(self.globals));
+        gray.push(Value::Table(self.loaded));
+        if let Some(meta) = self.string_meta {
+            gray.push(Value::Table(meta));
+        }
+        gray.push(Value::Thread(self.main));
+        gray.push(Value::Thread(self.current));
+        let names = &self.names;
+        for name in [
+            names.index,
+            names.newindex,
+            names.call,
+            names.add,
+            names.sub,
+            names.mul,
+            names.div,
+            names.modulo,
+            names.pow,
+            names.unm,
+            names.concat,
+            names.len,
+            names.eq,
+            names.lt,
+            names.le,
+            names.tostring,
+            names.metatable,
+            names.name,
+        ] {
+            gray.push(Value::String(name));
+        }
+        let mut protos: Vec<Rc<Proto>> = Vec::new();
+        for frame in &self.frames {
+            gray.push(Value::Function(frame.function));
+        }
+        live += self.stack.capacity() * SLOT_BYTES + self.frames.capacity() * FRAME_BYTES;
+        while let Some(value) = gray.pop() {
+            match value {
+                Value::String(s) => {
+                    if self.heap.strings.mark(s.0) {
+                        live += crate::heap::STRING_OVERHEAD + self.heap.string(s).len();
+                    }
+                }
+                Value::Table(t) => {
+                    if self.heap.tables.mark(t.0) {
+                        let table = self.heap.table(t);
+                        live += table.bytes();
+                        gray.extend_from_slice(table.array());
+                        for (k, v) in table.pairs() {
+                            gray.push(k);
+                            gray.push(v);
+                        }
+                        if let Some(mt) = table.metatable {
+                            gray.push(Value::Table(mt));
+                        }
+                    }
+                }
+                Value::Function(f) => {
+                    if self.heap.functions.mark(f.0) {
+                        live += crate::heap::FUNCTION_SIZE;
+                        match self.heap.functions.get(f.0) {
+                            Function::Lua {
+                                proto,
+                                upvalues,
+                                env,
+                            } => {
+                                live += upvalues.len() * 8;
+                                gray.extend(upvalues.iter().map(|c| Value::Cell(*c)));
+                                gray.push(Value::Table(*env));
+                                protos.push(proto.clone());
+                            }
+                            Function::Native { upvalues, .. } => {
+                                live += upvalues.len() * 16;
+                                gray.extend_from_slice(upvalues);
+                            }
+                        }
+                    }
+                }
+                Value::Cell(c) => {
+                    if self.heap.cells.mark(c.0) {
+                        live += crate::heap::CELL_SIZE;
+                        gray.push(*self.heap.cells.get(c.0));
+                    }
+                }
+                Value::Userdata(u) => {
+                    if self.heap.userdata.mark(u.0) {
+                        live += crate::heap::USERDATA_SIZE;
+                        if let Some(mt) = self.heap.userdata.get(u.0).metatable {
+                            gray.push(Value::Table(mt));
+                        }
+                    }
+                }
+                Value::Thread(t) => {
+                    if self.threads.mark(t.0) {
+                        let thread = self.threads.get(t.0);
+                        live += THREAD_BYTES
+                            + thread.stack.capacity() * SLOT_BYTES
+                            + thread.frames.capacity() * FRAME_BYTES;
+                        gray.extend_from_slice(&thread.stack);
+                        gray.extend(thread.frames.iter().map(|f| Value::Function(f.function)));
+                    }
+                }
+                Value::Nil | Value::Boolean(_) | Value::Number(_) => {}
+            }
+            while let Some(proto) = protos.pop() {
+                if proto.visited.replace(epoch) == epoch {
+                    continue;
+                }
+                live += proto.bytes();
+                gray.extend_from_slice(&proto.constants);
+                protos.extend(proto.protos.iter().cloned());
+            }
+        }
+        self.heap.strings.sweep(|_, _| {});
+        self.heap.tables.sweep(|_, _| {});
+        self.heap.functions.sweep(|_, _| {});
+        self.heap.cells.sweep(|_, _| {});
+        self.heap.userdata.sweep(|_, _| {});
+        self.threads.sweep(|_, _| {});
+        let size = self.heap.intern_index_size();
+        self.heap.rebuild_intern(size);
+        live += size * 4;
+        self.heap.memory = live;
+        self.stack_charged = self.stack.capacity() * SLOT_BYTES;
+        self.fuel = self.fuel.saturating_sub((live / GC_BYTES_PER_FUEL) as u64);
+        // Collect again when memory doubles, or halfway to the cap, whichever comes first.
+        let halfway = live + (self.heap.cap.saturating_sub(live)) / 2;
+        self.gc_threshold = (live * 2).max(MIN_THRESHOLD).min(halfway.max(live + 1));
+    }
+
+    // --- coroutines ------------------------------------------------------------------------------------------
+
+    pub(crate) fn new_thread(&mut self, function: Value) -> Result<ThreadId, LuaError> {
+        self.heap.charge(THREAD_BYTES)?;
+        let mut thread = ThreadState::new();
+        thread.stack.push(function);
+        Ok(ThreadId(self.threads.insert(thread)))
+    }
+
+    /// Makes `to` the running thread, storing the current one's stack.
+    fn switch(&mut self, to: ThreadId) {
+        let from = self.current;
+        let thread = self.threads.get_mut(from.0);
+        std::mem::swap(&mut thread.stack, &mut self.stack);
+        std::mem::swap(&mut thread.frames, &mut self.frames);
+        thread.top = self.top;
+        let thread = self.threads.get_mut(to.0);
+        std::mem::swap(&mut thread.stack, &mut self.stack);
+        std::mem::swap(&mut thread.frames, &mut self.frames);
+        self.top = thread.top;
+        self.current = to;
+        self.stack_charged = self.stack_charged.max(self.stack.capacity() * SLOT_BYTES);
+    }
+
+    /// Resumes `co` with `args`; Ok(Ok(values)) when it yielded or returned, Ok(Err(error value)) when it failed.
+    pub(crate) fn resume(
+        &mut self,
+        co: ThreadId,
+        args: Vec<Value>,
+    ) -> Result<Result<Vec<Value>, Value>, LuaError> {
+        let status = self.threads.get(co.0).status;
+        if status != ThreadStatus::Fresh && status != ThreadStatus::Suspended {
+            let message = match status {
+                ThreadStatus::Dead => "cannot resume dead coroutine",
+                ThreadStatus::Running => "cannot resume running coroutine",
+                _ => "cannot resume non-suspended coroutine",
+            };
+            return Ok(Err(self.new_string(message.as_bytes())?));
+        }
+        let from = self.current;
+        self.threads.get_mut(from.0).status = ThreadStatus::Normal;
+        self.switch(co);
+        let depth = self.native_depth;
+        {
+            let thread = self.threads.get_mut(co.0);
+            thread.status = ThreadStatus::Running;
+            thread.depth = depth;
+            thread.resumer = Some(from);
+        }
+        let outcome = self.run_coroutine(status, args);
+        let (results, status) = match outcome {
+            Ok(Exec::Yielded) => {
+                let pending = self
+                    .threads
+                    .get(co.0)
+                    .pending
+                    .expect("a yield leaves its values");
+                let values = self.stack[pending.values..].to_vec();
+                self.stack.truncate(pending.values);
+                (Ok(values), ThreadStatus::Suspended)
+            }
+            Ok(Exec::Returned) => {
+                let values = self.stack[..self.top.min(self.stack.len())].to_vec();
+                self.stack.clear();
+                self.frames.clear();
+                (Ok(values), ThreadStatus::Dead)
+            }
+            Err(LuaError::Runtime { value, .. }) => {
+                self.frames.clear();
+                (Err(value), ThreadStatus::Dead)
+            }
+            Err(limit @ LuaError::Limit(_)) => {
+                self.frames.clear();
+                self.threads.get_mut(co.0).status = ThreadStatus::Dead;
+                self.switch(from);
+                self.threads.get_mut(from.0).status = ThreadStatus::Running;
+                return Err(limit);
+            }
+        };
+        self.threads.get_mut(co.0).status = status;
+        self.switch(from);
+        self.threads.get_mut(from.0).status = ThreadStatus::Running;
+        Ok(results)
+    }
+
+    fn run_coroutine(&mut self, status: ThreadStatus, args: Vec<Value>) -> Result<Exec, LuaError> {
+        self.enter_native()?;
+        let result = (|| {
+            if status == ThreadStatus::Fresh {
+                for arg in &args {
+                    self.push(*arg)?;
+                }
+                let count = args.len();
+                let (function, count) = self.callable(0, count)?;
+                if let Function::Native { .. } = self.heap.functions.get(function.0) {
+                    let produced = self.call_native(function, 0, count, false)?;
+                    if self.yielding {
+                        self.yielding = false;
+                        return Err(self.error("attempt to yield across a C-call boundary"));
+                    }
+                    self.top = produced;
+                    return Ok(Exec::Returned);
+                }
+                self.push_frame(function, 0, count, -1, true)?;
+            } else {
+                let pending = self
+                    .threads
+                    .get(self.current.0)
+                    .pending
+                    .expect("a suspended coroutine has a pending yield");
+                self.stack.truncate(pending.slot);
+                if pending.protected {
+                    self.push(Value::Boolean(true))?;
+                }
+                for arg in &args {
+                    self.push(*arg)?;
+                }
+                self.place_results(
+                    pending.slot,
+                    args.len() + usize::from(pending.protected),
+                    pending.slot,
+                    pending.want,
+                )?;
+                let frame = self.frames.last().expect("a suspended frame");
+                let frame_top = frame.base + usize::from(frame.proto.registers);
+                if self.stack.len() < frame_top {
+                    self.set_stack(frame_top)?;
+                }
+            }
+            self.execute()
+        })();
+        self.native_depth -= 1;
+        result.map_err(|e| self.locate(e, None))
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}

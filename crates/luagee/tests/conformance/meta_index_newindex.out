@@ -1,0 +1,19 @@
+1	2	derived	nil	nil
+1	2	derived	nil
+x!	1!	x!	nil	3
+set	3
+a=1,b=nil	2
+nil	5	5
+deep:q	nil
+false	1
+found	nil
+2	0
+9	100	4	nil
+false	idx
+nv	i
+true	2	true	false	true
+true	true
+false
+false
+false	false	nil	nil
+number	string	boolean	function	table

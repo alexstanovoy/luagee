@@ -1,0 +1,15 @@
+-- LuaJIT-only lexer and tonumber extensions: binary literals, digit underscores, \u{} escapes, inf/nan strings.
+print(0b101, 0B11, 0b0)
+print(loadstring("return 0b2") == nil)
+print(1_000, 1_0.5_0)
+print(loadstring("return 1__0") ~= nil)
+print("\u{48}\u{49}", #"\u{20AC}", #"\u{10FFFF}")
+print(tonumber("0b101"), tonumber("1_000"), tonumber("inf"), tonumber("-inf"), tonumber("infinity"), tonumber("nan"))
+print(tonumber("INF"), tonumber("NaN"), tonumber("-nan"), tonumber(" inf "), tonumber("in"))
+print(tonumber(" 0x1p4 "), tonumber("0x1.8"), tonumber("0x.8"), tonumber("1e1"), tonumber(".5"), tonumber("5."))
+print(tonumber("100LL"), tonumber("1i"), tonumber("0x10ULL"))
+print(2^1024, -2^1024, 2^1024 == math.huge)
+local nan = 0/0
+print(nan, -nan, nan ~= nan, tostring(nan), string.format("%f %g %5.1f %d", nan, -nan, nan, 1))
+print(math.huge, -math.huge, string.format("%f %g %e %5.1f", math.huge, -math.huge, math.huge, -math.huge))
+print(string.format("%d", math.huge) == string.format("%d", math.huge))

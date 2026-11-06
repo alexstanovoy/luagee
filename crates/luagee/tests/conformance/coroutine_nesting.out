@@ -1,0 +1,24 @@
+true	bottom
+true	back
+inside pcall	false	done
+1	1
+2	4
+3	9
+false
+false	boom	dead
+false	cannot resume dead coroutine
+false	table	7
+false	wrapped boom
+false	table	9
+inner1	inner done	outer done
+core
+leaf1234567891011121314151617181920
+true	1
+true	2
+true	1	2	3
+1501500
+false	dead
+yielded through pcall
+true	resumed value
+outer saw i1 suspended
+4

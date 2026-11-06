@@ -1,0 +1,35 @@
+1	2	3
+1	10
+10	1	2	3
+1
+4
+2
+1	3
+1	1
+function	function	nil	number	string	table	boolean	thread
+nil
+nil	nil
+0	0	1
+false
+5	5	3	10
+true	8
+xxx	1-2	3
+el	5	hello
+function	3
+1	2
+3628800	2.4329020081766e+18	1.5511210043331e+25
+6765
+true	false	false
+100000
+done
+1000	5000
+3
+called
+end
+1	2	3
+true	true	true	true	false
+1,2,3
+true	true
+true	true
+ab-ab-ab	aXc
+table	true	true	Lua 5.1

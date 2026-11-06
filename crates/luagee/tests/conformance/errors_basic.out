@@ -1,0 +1,42 @@
+false	nil
+false	nil
+false	msg
+2
+false	42
+false	true
+false	true	5
+true	plain
+lvl1
+lvl2
+lvl0
+nil
+table
+false	true
+4	true	1	2	3
+true	false	x
+false
+true	fine	2
+false	handled: bad
+false	table
+false	H
+false	args
+2
+true
+true	true
+1	v	3
+false	assertion failed!
+false	custom message
+table
+42
+2
+false	nil
+assertion failed!
+math is broken
+false
+inner rethrown
+nil	false	true
+false	true
+cleanup ran
+false	work failed
+true	custom error object
+true	true	true

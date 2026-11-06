@@ -1,0 +1,23 @@
+1	-1	0	1.5	-0	1e+15	1e+16
+1e+14	1e+14	1.2345678901235e+17	0.1	0.33333333333333
+3.1415926535898	9.007199254741e+15	9.2233720368548e+18	1e-05	0.0001	1.23e-05
+12345.6789	0.3	33.333333333333	inf
+true	false	nil	str	
+10	10	10	nil	nil	nil	nil
+16	31	-16	nil	nil	10	10	0.1
+1	0.1	nil	-0.5	0.5	5	nil	nil
+nil	nil	nil	3	nil	nil
+5	5.5	nil	nil	nil	nil
+2	3	nil	255	255	nil
+1295	1295	36	7	nil	10
+-2	-255	3	nil	nil	16
+481	1.5	511	5	nil
+2	2	false	false
+9.007199254741e+15	1e+308	inf	-inf	4.9406564584125e-324	0
+12	16	10000000000	1e-07	1.2345678901235e+29
+nil	nil	1	1	nil	nil
+2147483647	4294967295	4294967296
+16	nil	nil	true	true
+true	false	true	true	true
+function:	table:	thread:
+string	true

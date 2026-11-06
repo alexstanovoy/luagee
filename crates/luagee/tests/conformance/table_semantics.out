@@ -1,0 +1,28 @@
+one	string one	1	big	big
+frac	frac	frac
+zero	zero	zero	zero
+bool	nf	bool	nf
+first	second	nil
+fn
+inf	-inf	inf
+1	2	three	four	1	10	4
+7	2	3	3
+3	3	4	4
+abcd
+0	2
+1	true	false	true
+true
+5
+0	nil
+true	1
+100	1	100
+nil
+10
+true	nil	nil
+true	nil
+m1	z	p1	1
+1	2	3	nil	4
+4
+true
+s	n
+nil	4	true

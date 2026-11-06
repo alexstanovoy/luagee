@@ -1,0 +1,42 @@
+-- gsub with string/table/function replacements, %0-%9, limits, anchors, plus tostring/format/concat idioms.
+print(("hello world"):gsub("o", "0"))
+print(("hello world"):gsub("o", "0", 1))
+print(("hello world"):gsub("(%w+) (%w+)", "%2 %1"))
+print(("hello"):gsub("", "-"))
+print(("hello"):gsub(".", {h = "H", l = "L"}))
+print(("hello"):gsub(".", {h = 1, l = false, o = true == nil and "x" or "O"}))
+print(("hello"):gsub("l", function(c) return nil end))
+print(("hello"):gsub("l", function(c) return false end))
+print(("hello"):gsub("(l)(l)", function(a, b) return a:upper() .. b end))
+print(("abc"):gsub("%w", "%0%0"), ("abc"):gsub("(%w)", "<%1>"), ("abc"):gsub("%w", "%%"))
+print(("$name is $age"):gsub("%$(%w+)", {name = "Bob", age = 42}))
+print(("a b c"):gsub(" ", "", 1), ("a b c"):gsub(" ", "", 0), ("a b c"):gsub(" ", "", -1), ("aaa"):gsub("a", "b", 2))
+print(("abc"):gsub("^a", "X"), ("aaa"):gsub("^a", "X"), ("abc"):gsub("c$", "X"), ("abc"):gsub("^", ">"), ("abc"):gsub("$", "<"))
+print(("abc"):gsub("b*", "X"), ("abc"):gsub("x*", "-"), ("a  b"):gsub("%s*", "_"))
+print(("hello world"):gsub("%w+", string.upper), ("hello world"):gsub("%w+", function(w) return w:sub(1, 1):upper() .. w:sub(2) end))
+print(("1,2,3"):gsub("%d", function(d) return d * 2 end), ("x"):gsub("x", 5), ("x"):gsub("x", 1.5))
+print(("abc"):gsub("(a)(b)(c)", "%3%2%1"), ("abc"):gsub("()", "%1"), ("abc"):gsub("(a)", "%1%1"))
+print(pcall(string.gsub, "abc", "(a)", "%2") == false, pcall(string.gsub, "abc", "a", "%") == false, pcall(string.gsub, "abc", "a", "%a") == false)
+print(pcall(string.gsub, "abc", "a", function() return {} end) == false, pcall(string.gsub, "abc", "a") == false, pcall(string.gsub, "abc", "a", true) == false)
+print(("a.b"):gsub(".", "%0%0"), ("a.b"):gsub("%.", "%%"), (("a.b"):gsub("[.]", "")))
+print(string.gsub("abc", "b", "[%0]"), string.gsub("", "", "x"), string.gsub("", "a", "x"), string.gsub("abc", "", ""))
+local count = select(2, ("a,b,c,d"):gsub(",", ","))
+print(count)
+local function split(s, sep)
+  local out = {}
+  for piece in (s .. sep):gmatch("(.-)" .. sep:gsub("%p", "%%%0")) do out[#out + 1] = piece end
+  return out
+end
+print(table.concat(split("a,b,,c", ","), "|"), #split("", ","), table.concat(split("x.y", "."), "|"))
+local function trim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
+print("[" .. trim("  padded \t\n") .. "]", "[" .. trim("") .. "]", "[" .. trim("   ") .. "]")
+local function escape(s) return (s:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0")) end
+print(escape("a.b*c"), ("a.b*c"):find(escape("b*c")))
+print(("%5.1f"):format(3.14159), ("x"):rep(3, "-"), ("abc"):reverse():upper(), #("abc"):rep(1000))
+print(("test123"):match("^(%a+)(%d+)$"))
+print(("A-B_C d"):gsub("[%-_ ]", "."), ("hello"):gsub("l+", "L"), ("hello"):gsub("l-", "L"))
+print(string.format("%-8s|%8s|", "ab", "cd"), ("CSV,line,here"):find(",", 5, true), tostring(nil) .. "|" .. tostring(false))
+print(table.concat({("a b c"):match("(%a) (%a) (%a)")}, "+"))
+print(select("#", ("abc"):gsub("b", "")), type(("abc"):gsub("b", "")), (("abc"):gsub("b", "")))
+print(("日本"):len(), ("日本"):upper() == "日本", ("é"):byte(1, -1))
+print(("x"):gsub("x", "%%1"), ("x"):gsub("x", "%%%0"))

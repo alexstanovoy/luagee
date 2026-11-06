@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/luagee"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Alexander Stanovoy <alexstanovoy@users.noreply.github.com>"]
+readme = "README.md"
+keywords = ["lua", "interpreter", "sandbox", "scripting", "luajit"]
+categories = ["development-tools", "emulators", "parser-implementations"]
+
+[workspace.lints.clippy]
+# Lua's numbers are doubles; floating-point arithmetic is allowed in the `number` module only (its numeric rule).
+float_arithmetic = "deny"
+
+[profile.release]
+codegen-units = 1
+
+# What the tests are built with: release's optimisation (the corpora run millions of instructions) and the checks a
+# debug build has, overflow checks and debug assertions.
+[profile.test-release]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+codegen-units = 16

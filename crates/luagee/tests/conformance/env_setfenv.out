@@ -1,0 +1,27 @@
+true	true	true	true
+global x
+true	env x	true
+global x
+written	nil
+v3	true
+nil
+from outer env
+3
+5	5	nil
+nil
+true
+true
+level1
+nil
+false
+true
+true
+true
+1	2	2	nil
+true
+co
+3
+via _G	via _G	via _G
+true
+undefined:undefined_name
+nil

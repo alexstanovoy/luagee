@@ -1,0 +1,31 @@
+7	4	4	-1	7	6	6
+div	mod	pow	div	mod	pow
+-3	V3|V4	V3|s	s|V3	1|V3	V3|1	xy|V3
+0	3	2
+called	3	1	2	3
+called	called	1	nil
+vec(3)	vec(7)
+true	false	false	false	true
+true	false	true	false
+false
+false
+false	true
+false	false	false	false	true	false	true
+true	false	false
+true	false
+true	false	false	true
+true
+true	true	false
+false	false
+false	false
+false
+false
+sub	sub	add	add	add
+left	right
+meta	meta	meta
+cc	acc	acc	cc	cc
+1	1	true
+true
+true	2
+true
+5	c

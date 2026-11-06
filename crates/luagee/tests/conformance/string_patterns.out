@@ -1,0 +1,53 @@
+hello	123	 	H	ello	a	0	,
+true	true	abc	ab	b	A	_	nil
+a		abc	abc	a				nil	a
+c	nil	abc	nil		a$b	a^b	a$	^a
+	aaa	aaab	xaaay	xy	nil	xay
+123	def	abc	123	def
+key	key	trim|
+ab	c	a-c	a]	a^	abc	123	-	-
+true	]	a	^	a	A	true
+(a(b)c)	[[x]]	nil	nil	((x))	{a{b}}	xx
+THE	quick	world		
+6	1	6	2	1
+ab	abc	nil	x	a	nil
+1	3	2	3	h	e	3
+he	a	a	a	a
+nil	b	a	true
+2	1	1	1
+a#b#c#	aa1bb2cc3	-a-b-c-	%%%	3
+one
+two
+three
+a	1
+b	2
+c	3
+1
+2
+3
+4
+[]
+[]
+[]
+[]
+a	b
+the,quick,brown,fox
+2
+4
+7
+x	x	x
+2024	01	15
+file.txt	path/to	txt	nil
+ Camel Case String	3
+a b  	  a b	a b
+2	2	2	nil	3	3
+2	2	2	2	2	2
+true	true	false	true
+a/b/c	a_b c	a%1c	hello world	0
+yyyxx	3
+N	apctb	50 percent	1
+b	b	b	bcab	a	a><b
+4	2	2
+2	2	b	3
+tag	a	k	v
+x<1>y<2>z<3>	3

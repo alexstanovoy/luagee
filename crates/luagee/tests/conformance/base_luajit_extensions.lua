@@ -1,0 +1,12 @@
+-- Things LuaJIT 2.1 has beyond plain 5.1 that a script may notice: load(string), isyieldable, table.getn, math.pow.
+print(type(load("return 1")), load("return 1")())
+print(type(coroutine.isyieldable), coroutine.isyieldable and coroutine.isyieldable())
+print(type(table.getn), table.getn and table.getn({1, 2, 3}), table.maxn({1, 2, nil, 4}), table.maxn({}))
+print(type(math.pow), math.pow and math.pow(2, 10), type(math.ldexp), type(math.frexp), type(math.cosh), type(math.log10), type(math.mod))
+print(type(string.gfind), type(table.foreach), type(table.foreachi), type(table.setn), type(loadlib), type(gcinfo))
+print(type(table.pack), type(table.unpack), type(math.tointeger), type(utf8), type(bit32), type(rawlen), type(goto))
+print(select("#", string.byte("hello", 1, -1)), ("x"):byte(-1))
+print(string.format("%5.2s|", "abc"), string.format("%q", 1/3), string.format("%q", 10))
+print(math.fmod(-5, 3), math.fmod(5, -3), math.fmod(5.5, 2), math.mod == nil)
+print(tostring(2^53 + 1), 2^53 + 1 == 2^53, 9007199254740993)
+print(coroutine.running())

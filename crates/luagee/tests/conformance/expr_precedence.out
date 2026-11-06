@@ -1,0 +1,25 @@
+7	9	7	3	2	512	64
+-4	4	-0.25	0.5	2	2	true
+123	abc12
+37	64
+false	true	true	false
+true	true	true
+1	nil	nil	false
+2	nil	false	nil	zero is true	empty is true
+1	2	3	nil
+2	3	3	3
+1	3	3	3
+4	-3	3x	-1
+12	18	-9	false	2
+2	1	3	2
+true	false	true
+true	true	true	false
+yes
+6	6	0	-9	0.33333333333333	6
+7	9	-4	123	true
+2	256	256	64	89
+true	true	true	true	false	true	true
+true	true	false	false	false	false
+boolean	false	false	false	false	true	false
+1	1.5	-0	1e+100	9.007199254741e+15	9.007199254741e+15	5
+1	a	nil	true

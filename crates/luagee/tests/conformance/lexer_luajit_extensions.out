@@ -1,0 +1,13 @@
+5	3	0
+true
+1000	10.5
+true
+HI	3	4
+5	nil	inf	-inf	inf	nan
+inf	nan	nan	inf	nil
+16	1.5	0.5	10	0.5	5
+nil	nil	nil
+inf	-inf	true
+nan	nan	true	nan	nan nan   nan 1
+inf	-inf	inf -inf inf  -inf
+true

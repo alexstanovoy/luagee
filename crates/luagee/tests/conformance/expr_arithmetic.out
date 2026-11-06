@@ -1,0 +1,20 @@
+5	3.5	-3.5	0.33333333333333	1024	true	1	1.5	2	-2	-1
+1.5	0.5	-0.5	-1.5	0	0	0	0.25	0.75
+inf	-inf	true	0	-0	nan	nan	nan	nan
+true	true	true
+-0	-0	-0	-inf	-inf	-inf	true	true
+inf	true	true	true	true
+15	16	10	10	10	1020	9	-3	3
+error	error	error
+error	error	error
+9.007199254741e+15	9.007199254741e+15	9.2233720368548e+18	1.844674407371e+19	-9.2233720368548e+18	2147483648	4294967296	4.9406564584125e-324	0	inf
+3	1e+15	1e+16	0.3	false	0.1	110
+inf	-inf	0	0	2
+0.3	1	1	3.3333333333333e+14	1.2193263111264e+17	9.9999999998e+21
+255	255	4	2	0	0	true
+1	2.5	-2.5	1	1	inf	true	4	-8	true
+1	1	1	0
+1
+true	true	true	true	false
+true	true	true	false	false	false	false	false	false	false
+true	true	true	false

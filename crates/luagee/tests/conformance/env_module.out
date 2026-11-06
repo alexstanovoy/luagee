@@ -1,0 +1,10 @@
+mymod		true
+other	table
+table	hello from mymod	1	2	2	hidden
+nil	mymod	true	
+5	true	true	true
+nil	nil
+deep	deep.nested.name	deep.nested.
+1	true	nil
+true
+true	nil

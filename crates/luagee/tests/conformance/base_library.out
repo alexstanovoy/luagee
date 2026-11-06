@@ -1,0 +1,47 @@
+nil	boolean	number	string	table	function	function	thread
+true	function
+nil	1	a	1
+2	nil
+nil	a	1
+1
+1	2	3
+2	3
+2	3
+nil	1
+
+5	0	0
+1	nil	3
+nil	nil	nil
+a	b
+100
+true
+true	function
+2
+2
+function	2
+nil	string	true
+nil	custom:1: unexpected symbol near '<eof>'
+name:1: unexpected symbol near '='
+true	false	chunk:1: boom
+file.lua:1: boom
+(load):3: boom
+[string "plain code name"]:1: boom
+[string "error('boom')"]:1: boom
+1	2	3
+15
+function
+function
+nil
+split
+false	true
+1	1
+nil	0
+function	number	true
+string	Lua 5.1
+true	true	false	true	false
+true
+true	true
+2
+true	table
+true	nil
+table	table	table	table	table	function	function	function	function	function	function	function	function	function	nil	function

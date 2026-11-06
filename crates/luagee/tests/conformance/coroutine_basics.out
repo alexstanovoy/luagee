@@ -1,0 +1,32 @@
+suspended
+start	1	2
+true	3
+suspended
+got	10
+true	20
+got	x	y
+true	finished	99
+dead
+false	cannot resume dead coroutine
+false	cannot resume dead coroutine
+dead
+1	2	3
+true
+true	item1	suspended
+true	item2	suspended
+true	item3	suspended
+true	end	dead
+nil	nil
+thread	nil	running
+true	dead
+running,normal,suspended
+true	2	nil	nil
+true
+true
+true	1	nil	3
+true	true	true
+2
+3	bye	true
+true	false	cannot resume running coroutine
+true
+1	3	6	6

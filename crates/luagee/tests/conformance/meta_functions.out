@@ -1,0 +1,28 @@
+true	nil	nil	nil	nil
+true	nil
+locked	false	cannot change a protected metatable
+false	true
+true	true	true
+true
+1
+I am named	10
+x
+true	42
+true	nil
+nil	true	false	12	-1.5	s	1e+100
+string	table:	function:
+true	true
+table	table
+HEY!
+true
+table	table	1
+table
+true	false	true	true
+2
+from mt	nil	from mt
+a	b	true
+changed
+nil
+3	nil
+3	nil
+abab	abab	cdcd	2

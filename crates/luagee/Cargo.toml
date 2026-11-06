@@ -1,0 +1,26 @@
+[package]
+name = "luagee"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A sandboxed Lua 5.1 interpreter with LuaJIT-compatible extensions, in safe Rust, for running untrusted scripts under hard limits: fuel, memory, string, depth and source bounds, no IO, no dependencies."
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["fs"]
+# `FolderLoader`: modules read from a folder on disk, confined to it.
+fs = []
+
+[lints]
+workspace = true
+
+[[example]]
+name = "lua"
+required-features = ["fs"]
+
+[[test]]
+name = "corpus"
+required-features = ["fs"]

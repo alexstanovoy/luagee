@@ -1,0 +1,26 @@
+c,d,a,b,e	5
+e	c,d,a,b
+c	d,a,b
+a	d,b
+b	d
+nil	nil	1
+0	0
+nil	1,2,3	3	1,2
+false	false	false
+true	true	true
+50	51	100
+75	-25	-1	51
+		1	123	1, 2, 3
+b-c-d	b-c	true	a
+1|2.5|x	ab	ab	a5b
+true	true	true
+a, b, c
+0	3	10	3	0
+8
+9	x
+15	nil
+5,4,3,2,1
+0	nil
+4
+nil	0
+a	1

@@ -1,0 +1,51 @@
+-- math library: every function, printed with %.10g so last-bit libm differences do not matter; random only by range.
+local function g(x) return string.format("%.10g", x) end
+print(math.pi == 3.141592653589793, g(math.pi), g(math.huge), g(-math.huge), math.huge == 1 / 0)
+print(math.floor(3.7), math.floor(-3.7), math.floor(3), math.floor(-0.5), math.floor(0.5), math.floor(-0), math.floor(1e300) == 1e300, math.floor(-2^40 - 0.5))
+print(math.ceil(3.2), math.ceil(-3.2), math.ceil(3), math.ceil(-0.5), math.ceil(0.5), math.ceil(1e300) == 1e300, math.ceil(2^40 + 0.5))
+print(math.floor("3.7"), math.ceil("3.2"), math.abs("-5"), math.sqrt("16"), math.max("3", 2) == 3)
+print(math.abs(-5), math.abs(5), math.abs(-0.5), math.abs(0), math.abs(-math.huge), math.abs(-2^53))
+print(g(math.sqrt(2)), g(math.sqrt(16)), math.sqrt(0), g(math.sqrt(1e-300)), math.sqrt(-1) ~= math.sqrt(-1), math.sqrt(math.huge))
+print(g(math.sin(0)), g(math.sin(1)), g(math.cos(0)), g(math.cos(1)), g(math.tan(1)), g(math.sin(math.pi)), g(math.cos(math.pi)))
+print(g(math.asin(1)), g(math.acos(0)), g(math.atan(1)), g(math.atan2(1, 1)), g(math.atan2(-1, -1)), g(math.atan2(0, -1)), g(math.atan2(1, 0)))
+print(g(math.sinh(1)), g(math.cosh(1)), g(math.tanh(1)), g(math.exp(1)), g(math.exp(0)), g(math.exp(-1)), math.exp(710), math.exp(-1000))
+print(g(math.log(1)), g(math.log(math.exp(2))), g(math.log(10)), g(math.log10(1000)), g(math.log10(2)), math.log(0), math.log(-1) ~= math.log(-1), g(math.log(8) / math.log(2)))
+print(g(math.pow(2, 10)), g(math.pow(2, 0.5)), g(math.pow(10, -2)), math.pow(0, 0), math.pow(2, 1024), g(math.pow(-2, 3)), math.pow(-2, 0.5) ~= math.pow(-2, 0.5))
+print(math.fmod(7, 3), math.fmod(-7, 3), math.fmod(7, -3), math.fmod(-7, -3), g(math.fmod(5.5, 2)), g(math.fmod(-5.5, 2)), math.fmod(1, math.huge), math.fmod(0, 5))
+print(math.fmod(5, 0) ~= math.fmod(5, 0), math.fmod(math.huge, 2) ~= math.fmod(math.huge, 2), math.fmod(-0, 5), math.fmod(3, 3), math.fmod(2^53, 3))
+print(math.modf(3.7))
+print(math.modf(-3.7))
+print(math.modf(5))
+print(math.modf(0))
+print(math.modf(math.huge))
+print(math.modf(-math.huge))
+print(select(2, math.modf(0/0)) ~= select(2, math.modf(0/0)), math.modf(-0.5))
+print(math.frexp(8))
+print(math.frexp(0.3))
+print(math.frexp(0))
+print(math.frexp(-1))
+print(math.ldexp(0.5, 4), math.ldexp(1, -1), math.ldexp(1, 1024), math.ldexp(3, 0), math.ldexp(0, 100))
+print(math.max(1), math.max(1, 2), math.max(2, 1), math.max(1, 5, 3, 9, 2), math.max(-1, -5), math.max(1.5, 1), math.min(1), math.min(3, 1, 2), math.min(-1, -5), math.min(1.5, 2))
+print(math.max(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20), math.min(20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1))
+print(math.max(math.huge, 1), math.min(-math.huge, 1), math.max(0/0, 1) ~= math.max(0/0, 1) or true)
+print(math.deg(math.pi), math.rad(180) == math.pi, g(math.deg(1)), g(math.rad(1)))
+print(pcall(math.max) == false, pcall(math.min) == false, pcall(math.floor, nil) == false, pcall(math.sqrt, {}) == false, pcall(math.abs, "x") == false)
+local ok = true
+for i = 1, 200 do
+  local r = math.random()
+  if r < 0 or r >= 1 then ok = false end
+  local n = math.random(10)
+  if n < 1 or n > 10 or n ~= math.floor(n) then ok = false end
+  local m = math.random(-5, 5)
+  if m < -5 or m > 5 or m ~= math.floor(m) then ok = false end
+  local one = math.random(7, 7)
+  if one ~= 7 then ok = false end
+end
+print(ok)
+math.randomseed(42)
+local first = math.random(1000)
+math.randomseed(42)
+print(first == math.random(1000))
+print(math.random(1) == 1, type(math.random()))
+print(math.floor(2^31 + 0.5), math.floor(-2^31 - 0.5), math.floor(2^53), math.ceil(-2^53), math.floor(1e15 + 0.5))
+print(string.format("%d", math.floor(3.9)), math.floor(3.9) == 3)

@@ -1,0 +1,9 @@
+Node:leaf(10)	Node:ann(100)@L5	ann(100)@L5	leaf(10)
+false	true	false	true	true
+Node:ann+bob(220)@L8	8
+false	true	0
+true	nil	true	nil	true
+b2 c5 a9
+4	3	2
+1	2	3	3	3
+100	3	3
