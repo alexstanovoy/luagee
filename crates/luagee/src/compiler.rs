@@ -752,12 +752,22 @@ impl Compiler<'_> {
         }
         match self.f().blocks.last_mut() {
             Some(parent) => {
+                let mut backward = Vec::new();
                 for (name, list) in gotos {
+                    // A label the parent already has is the one these gotos jump back to: the parent can have no
+                    // other of that name.
+                    if let Some(&pc) = parent.labels.get(&name) {
+                        backward.extend(list.into_iter().map(|goto| (goto.jump, pc)));
+                        continue;
+                    }
                     let moved = list.into_iter().map(|goto| PendingGoto {
                         active: goto.active.min(block.active),
                         ..goto
                     });
                     parent.gotos.entry(name).or_default().extend(moved);
+                }
+                for (jump, pc) in backward {
+                    self.patch(jump, pc);
                 }
                 Ok(())
             }
@@ -897,15 +907,19 @@ impl Compiler<'_> {
         }
     }
 
+    /// A goto jumps to the label of the innermost block that has one of its name, as LuaJIT resolves them: a label of
+    /// its own block seen already, else one later in its block or, when that block ends, in the enclosing ones.
     fn goto(&mut self, name: &Name, line: u32) -> Compile<()> {
         self.f().line = line;
         let jump = self.jump();
         let target = self
             .f()
             .blocks
-            .iter()
-            .rev()
-            .find_map(|b| b.labels.get(name).copied());
+            .last()
+            .expect("a block")
+            .labels
+            .get(name)
+            .copied();
         if let Some(pc) = target {
             self.patch(jump, pc);
             return Ok(());
