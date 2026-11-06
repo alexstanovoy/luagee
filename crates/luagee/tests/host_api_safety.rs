@@ -46,6 +46,7 @@ pub fn contracts() {
     foreign_handles_are_rejected_even_with_identical_keys();
     argument_contexts_cannot_cross_interpreters();
     top_level_vm_setup_uses_a_fresh_budget();
+    top_level_string_setup_recovers_after_fuel_exhaustion_without_refilling_the_tick();
     callback_loop_results_remain_charged_until_return();
     #[cfg(not(target_arch = "wasm32"))]
     callback_panic_does_not_leave_an_active_callback_context();
@@ -753,4 +754,21 @@ fn payload_drop_panic_inside_nested_vm_call_caught_by_the_callback_retires() {
     );
     assert_eq!(effects.get(), 0);
     poke_retired(&mut lua);
+}
+
+#[cfg_attr(test, test)]
+fn top_level_string_setup_recovers_after_fuel_exhaustion_without_refilling_the_tick() {
+    let mut lua = interpreter();
+    let ended = lua.exec("exhaust", b"while true do end");
+    assert!(matches!(ended, Err(Error::Limit(luagee::Limit::FuelPerCall))));
+    let remaining = lua.tick_fuel_left();
+    let value = lua.string(b"host setup").expect("setup after an exhausted call");
+    assert_eq!(lua.bytes(value), Some(b"host setup".as_slice()));
+    assert_eq!(lua.tick_fuel_left(), remaining);
+    let ended = lua.exec("exhaust_tick", b"while true do end");
+    assert!(matches!(ended, Err(Error::Limit(luagee::Limit::FuelPerCall))));
+    let value = lua.string(b"host setup after exhausted tick").expect("setup after an exhausted tick");
+    assert_eq!(lua.bytes(value), Some(b"host setup after exhausted tick".as_slice()));
+    assert_eq!(lua.tick_fuel_left(), 0);
+    assert!(matches!(lua.exec("still_exhausted", b"return 1"), Err(Error::Limit(luagee::Limit::FuelPerTick))));
 }

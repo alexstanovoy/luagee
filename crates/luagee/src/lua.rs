@@ -222,11 +222,15 @@ impl Lua {
         result.map_err(|e| to_error(&mut Some(&mut self.vm), e))
     }
 
-    /// A string value.
+    /// A string value created during trusted host setup, outside script fuel accounting.
+    /// Memory and string-length limits still apply; callbacks use `Vm::new_string` under their active budget.
     pub fn string(&mut self, bytes: &[u8]) -> Result<Value, Error> {
         self.ensure_active()?;
         let vm = &mut self.vm;
-        vm.new_string(bytes).map_err(|e| to_error(&mut Some(vm), e))
+        let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
+        let result = vm.new_string(bytes);
+        vm.fuel = fuel;
+        result.map_err(|e| to_error(&mut Some(vm), e))
     }
 
     /// A string value's bytes.
