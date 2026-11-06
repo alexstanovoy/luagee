@@ -132,9 +132,9 @@ skip luajit-test-cleanup/lib/contents.lua#io -- sandbox: the sandbox has no io
 skip luajit-test-cleanup/lib/contents.lua#io file -- sandbox: the sandbox has no io
 skip luajit-test-cleanup/lib/contents.lua#os -- sandbox: the sandbox has no os
 skip luajit-test-cleanup/lib/contents.lua#debug -- debug: luagee's debug has traceback and getinfo only
-skip luajit-test-cleanup/lib/contents.lua#package -- package: package has loaded only (luagee's require reads modules through the host's loader)
-skip luajit-test-cleanup/lib/contents.lua#pre-5.2 package -- package: package has loaded only (luagee's require reads modules through the host's loader)
-skip luajit-test-cleanup/lib/contents.lua#package.loaders -- package: package has loaded only (luagee's require reads modules through the host's loader)
+skip luajit-test-cleanup/lib/contents.lua#package -- package: package has loaded, preload and seeall only (luagee's require reads modules through the host's loader)
+skip luajit-test-cleanup/lib/contents.lua#pre-5.2 package -- package: package has loaded, preload and seeall only (luagee's require reads modules through the host's loader)
+skip luajit-test-cleanup/lib/contents.lua#package.loaders -- package: package has loaded, preload and seeall only (luagee's require reads modules through the host's loader)
 skip luajit-test-cleanup/lib/contents.lua#package.loaded -- sandbox: the sandbox has no io or os
 omit luajit-test-cleanup/opt/sink/ffi.lua -- ffi: the FFI library
 omit luajit-test-cleanup/opt/sink/ffi_nosink.lua -- ffi: the FFI library
