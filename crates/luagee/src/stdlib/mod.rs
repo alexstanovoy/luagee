@@ -255,15 +255,15 @@ impl Vm {
             Value::Boolean(false) => b"false".to_vec(),
             Value::Number(n) => crate::number::format(n).into_bytes(),
             Value::String(_) => return Ok(value),
-            Value::Table(t) => format!("table: 0x{:08x}", t.0 as u32).into_bytes(),
+            Value::Table(t) => format!("table: 0x{:08x}", t.0.index()).into_bytes(),
             Value::Function(f) => match self.heap.functions.get(f.0) {
                 Function::Native { .. } => {
-                    format!("function: builtin: 0x{:08x}", f.0 as u32).into_bytes()
+                    format!("function: builtin: 0x{:08x}", f.0.index()).into_bytes()
                 }
-                Function::Lua { .. } => format!("function: 0x{:08x}", f.0 as u32).into_bytes(),
+                Function::Lua { .. } => format!("function: 0x{:08x}", f.0.index()).into_bytes(),
             },
-            Value::Userdata(u) => format!("userdata: 0x{:08x}", u.0 as u32).into_bytes(),
-            Value::Thread(t) => format!("thread: 0x{:08x}", t.0 as u32).into_bytes(),
+            Value::Userdata(u) => format!("userdata: 0x{:08x}", u.0.index()).into_bytes(),
+            Value::Thread(t) => format!("thread: 0x{:08x}", t.0.index()).into_bytes(),
             Value::Cell(_) => unreachable!("scripts never hold a cell"),
         };
         self.new_string(&text)

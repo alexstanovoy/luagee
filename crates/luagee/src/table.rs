@@ -8,7 +8,7 @@ use crate::heap::KeyHasher;
 use crate::{Limit, LuaError};
 
 pub(crate) type WriteBudget<'a> = dyn FnMut(u64, usize) -> Result<(), LuaError> + 'a;
-use crate::value::{TableId, Value};
+use crate::value::{TableId, VALUE_BYTES, Value};
 
 #[derive(Clone, Copy, Debug)]
 struct Entry {
@@ -16,6 +16,9 @@ struct Entry {
     value: Value,
     hash: u64,
 }
+
+const ENTRY_BYTES: usize = 56;
+const _: () = assert!(std::mem::size_of::<Entry>() == ENTRY_BYTES);
 
 /// A table.
 #[derive(Debug, Default)]
@@ -49,8 +52,8 @@ impl Table {
     /// The bytes this table holds, as the interpreter counts them.
     pub(crate) fn bytes(&self) -> usize {
         crate::heap::TABLE_SIZE
-            + self.array.capacity() * 16
-            + self.entries.capacity() * 40
+            + self.array.capacity() * VALUE_BYTES
+            + self.entries.capacity() * ENTRY_BYTES
             + self.index.capacity() * 4
     }
 
@@ -164,7 +167,7 @@ impl Table {
         }
         let growth = self.entries.capacity().max(4);
         let bytes = growth
-            .checked_mul(40)
+            .checked_mul(ENTRY_BYTES)
             .ok_or(LuaError::Limit(Limit::Memory))?;
         budget(1 + self.entries.len() as u64 / 8, bytes)?;
         self.entries.reserve_exact(growth);
@@ -189,7 +192,7 @@ impl Table {
             .ok_or(LuaError::Limit(Limit::Memory))?;
         let capacity = doubled.max(rounded).max(4);
         let bytes = (capacity - self.array.capacity())
-            .checked_mul(16)
+            .checked_mul(VALUE_BYTES)
             .ok_or(LuaError::Limit(Limit::Memory))?;
         budget(1 + self.array.len() as u64 / 8, bytes)?;
         self.array.reserve_exact(capacity - self.array.len());
@@ -215,7 +218,7 @@ impl Table {
                 _ => return Ok(count),
             }
         }
-        Err(LuaError::Limit(Limit::Memory))
+        unreachable!("a migration run cannot contain more distinct keys than the hash part")
     }
 
     fn append(

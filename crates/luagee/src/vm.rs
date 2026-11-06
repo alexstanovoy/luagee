@@ -12,7 +12,7 @@ use crate::heap::{Arena, Function, Heap, NativeFn, Phase};
 use crate::number;
 use crate::proto::{ArithOp, Capture, CompareOp, Op, Proto, Rk};
 use crate::table::Table;
-use crate::value::{CellId, FuncId, StrId, TableId, ThreadId, Value};
+use crate::value::{CellId, FuncId, HANDLE_BYTES, StrId, TableId, ThreadId, VALUE_BYTES, Value};
 
 /// How deeply native functions may nest Lua calls ("C stack overflow" past it), as Lua 5.1's C calls do. A level
 /// takes up to 1.8 KiB of native stack on x86-64 (under wasm, 1 KiB of wasmtime's stack and 0.7 KiB of the module's
@@ -22,12 +22,13 @@ pub(crate) const MAX_NATIVE_DEPTH: u32 = 200;
 /// How many frames a traceback keeps.
 const TRACEBACK_FRAMES: usize = 16;
 /// The slots of a coroutine's stack, counted as this many bytes each.
-const SLOT_BYTES: usize = 16;
+const SLOT_BYTES: usize = VALUE_BYTES;
 /// The bytes a frame is counted as.
-const FRAME_BYTES: usize = 64;
+const FRAME_BYTES: usize = 192;
 /// The bytes a coroutine is counted as, beyond its stack.
 const THREAD_BYTES: usize = 256;
 const _: () = assert!(crate::heap::slot_size::<ThreadState>() <= THREAD_BYTES);
+const _: () = assert!(std::mem::size_of::<Frame>() <= FRAME_BYTES);
 
 /// Why a call ended early, inside the interpreter: what host functions return to raise an error.
 #[derive(Clone, Debug)]
@@ -85,6 +86,7 @@ impl Traceback {
 /// A native function's arguments: `count` values on the stack from `base`.
 #[derive(Clone, Copy, Debug)]
 pub struct Args {
+    pub(crate) owner: u64,
     pub(crate) serial: u64,
     pub(crate) base: usize,
     pub(crate) count: usize,
@@ -266,6 +268,8 @@ pub type PrintSink = Box<dyn FnMut(&[u8])>;
 
 /// The interpreter's state; host functions get it to read their arguments and push their results.
 pub struct Vm {
+    pub(crate) owner: u64,
+    pub(crate) retired: bool,
     pub(crate) heap: Heap,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
@@ -314,6 +318,21 @@ pub struct Vm {
     pub(crate) loader: Option<Box<dyn crate::Loader>>,
 }
 
+/// Marks an interpreter unusable if Rust unwinding crosses an execution boundary, even when its caller catches it.
+struct UnwindScope<'a> {
+    vm: &'a mut Vm,
+    completed: bool,
+}
+
+impl Drop for UnwindScope<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.vm.retired = true;
+            self.vm.fuel = 0;
+        }
+    }
+}
+
 /// The fuel an allocation costs beyond its instruction (a string, table or closure: made, counted, collected later).
 pub(crate) const ALLOCATION_FUEL: u64 = 4;
 /// The values copied for one unit of fuel, where one instruction moves many (calls, returns, `...`, constructors).
@@ -326,8 +345,8 @@ const GC_STEP: usize = 256;
 fn function_bytes(function: &Function) -> usize {
     crate::heap::FUNCTION_SIZE
         + match function {
-            Function::Lua { upvalues, .. } => upvalues.len() * 8,
-            Function::Native { upvalues, .. } => upvalues.len() * 16,
+            Function::Lua { upvalues, .. } => upvalues.len() * HANDLE_BYTES,
+            Function::Native { upvalues, .. } => upvalues.len() * VALUE_BYTES,
         }
 }
 
@@ -353,7 +372,8 @@ macro_rules! located {
 
 impl Vm {
     pub(crate) fn new(limits: Limits, keys: crate::Keys) -> Result<Vm, LuaError> {
-        let mut heap = Heap::new(limits.memory, keys.hash);
+        let owner = crate::value::next_owner()?;
+        let mut heap = Heap::new(limits.memory, keys.hash, owner);
         let mut intern = |s: &str| heap.intern(s.as_bytes());
         let names = Names {
             index: intern("__index")?,
@@ -377,10 +397,12 @@ impl Vm {
         };
         let globals = heap.new_table(0, 64)?;
         let loaded = heap.new_table(0, 16)?;
-        let mut threads = Arena::default();
+        let mut threads = Arena::new(owner);
         let main = ThreadId(threads.insert(ThreadState::new()));
         threads.get_mut(main.0).status = ThreadStatus::Running;
         Ok(Vm {
+            owner,
+            retired: false,
             heap,
             stack: Vec::new(),
             frames: Vec::new(),
@@ -438,6 +460,9 @@ impl Vm {
     /// Spends fuel for work a native does (bytes copied, pattern steps).
     #[inline]
     pub fn charge_fuel(&mut self, amount: u64) -> Result<(), LuaError> {
+        if self.retired {
+            return Err(self.error(crate::error::RETIRED_MESSAGE));
+        }
         Self::spend_fuel(&mut self.fuel, self.fuel_limit, amount)
     }
 
@@ -450,6 +475,23 @@ impl Vm {
         Ok(())
     }
 
+    pub(crate) fn unwind_scope<T>(
+        &mut self,
+        run: impl FnOnce(&mut Self) -> Result<T, LuaError>,
+    ) -> Result<T, LuaError> {
+        let mut scope = UnwindScope {
+            vm: self,
+            completed: false,
+        };
+        let result = run(&mut *scope.vm);
+        scope.completed = true;
+        if scope.vm.retired {
+            Err(scope.vm.error(crate::error::RETIRED_MESSAGE))
+        } else {
+            result
+        }
+    }
+
     /// `chunk:line` of a frame's current instruction.
     fn position(proto: &Proto, pc: usize) -> String {
         let line = proto.lines.get(pc).copied().unwrap_or(proto.line);
@@ -458,6 +500,9 @@ impl Vm {
 
     /// Adds the position (of the running frame at `pc`, else its saved pc) and a traceback to an error not located yet.
     pub(crate) fn locate(&mut self, error: LuaError, pc: Option<usize>) -> LuaError {
+        if self.retired {
+            return error;
+        }
         let value = match &error {
             LuaError::Runtime(thrown) if !thrown.located => thrown.value,
             _ => return error,
@@ -485,6 +530,9 @@ impl Vm {
     /// Locates an error a tail-called native raised: at its caller's caller, whose call made the frame now gone; with
     /// no position when a native made that call.
     fn locate_tail(&mut self, error: LuaError) -> LuaError {
+        if self.retired {
+            return error;
+        }
         let frame = self.frames.last().expect("a running frame");
         let lua_caller = (!frame.boundary || frame.metamethod.is_some()) && frame.catch.is_none();
         if !lua_caller || self.frames.len() < 2 {
@@ -513,6 +561,9 @@ impl Vm {
 
     /// Marks an error as located without adding a position (raised by a native that no Lua code called directly).
     pub(crate) fn locate_nowhere(&mut self, error: LuaError) -> LuaError {
+        if self.retired {
+            return error;
+        }
         match error {
             LuaError::Runtime(thrown) => LuaError::runtime(thrown.value, self.traceback(), true),
             other => other,
@@ -866,6 +917,7 @@ impl Vm {
         }
     }
 
+    #[inline(never)]
     pub(crate) fn arith(&mut self, op: ArithOp, a: Value, b: Value) -> Result<Value, LuaError> {
         if let (Some(x), Some(y)) = (self.coerce_number(a), self.coerce_number(b)) {
             return Ok(Value::Number(Self::arith_numbers(op, x, y)));
@@ -1131,11 +1183,15 @@ impl Vm {
         count: usize,
         site: CallSite,
     ) -> Result<usize, LuaError> {
+        if self.retired {
+            return Err(self.error(crate::error::RETIRED_MESSAGE));
+        }
         self.stack.truncate(slot + 1 + count);
         let (function, count) = self.callable(slot, count)?;
         match self.heap.functions.get(function.0) {
             Function::Native { .. } => self.call_native(function, slot, count, site),
             Function::Lua { .. } => {
+                let previous_native_depth = self.native_depth;
                 self.enter_native()?;
                 let depth = self.frames.len();
                 let caller = std::mem::replace(&mut self.call_site, CallSite::None);
@@ -1151,7 +1207,7 @@ impl Vm {
                         self.execute()
                     });
                 self.call_site = caller;
-                self.native_depth -= 1;
+                self.native_depth = previous_native_depth;
                 match result {
                     Ok(Exec::Returned) => {
                         debug_assert_eq!(self.frames.len(), depth, "a returned call left no frame");
@@ -1217,6 +1273,7 @@ impl Vm {
             .checked_add(1)
             .ok_or_else(|| self.error("callback invocation limit exceeded"))?;
         self.next_serial = serial;
+        let previous_native_depth = self.native_depth;
         self.enter_native()?;
         let previous_serial = std::mem::replace(&mut self.active_serial, serial);
         let previous_host_depth = self.host_depth;
@@ -1226,22 +1283,23 @@ impl Vm {
         let caller = std::mem::replace(&mut self.call_site, site);
         self.stack.truncate(slot + 1 + count);
         let args = Args {
+            owner: self.owner,
             serial,
             base: slot + 1,
             count,
         };
         let result_start = self.stack.len();
-        let result = match &native {
-            NativeFn::Builtin(f) => f(self, args),
-            NativeFn::Host(f) => f(self, args),
-        };
+        let result = self.unwind_scope(|vm| match &native {
+            NativeFn::Builtin(f) => f(vm, args),
+            NativeFn::Host(f) => f(vm, args),
+        });
         let result = match result {
             Err(LuaError::Runtime(thrown)) if matches!(native, NativeFn::Host(_)) => self
                 .validate(thrown.value)
                 .and(Err(LuaError::Runtime(thrown))),
             other => other,
         };
-        self.native_depth -= 1;
+        self.native_depth = previous_native_depth;
         self.call_site = caller;
         self.active_serial = previous_serial;
         self.host_depth = previous_host_depth;
@@ -1356,7 +1414,14 @@ impl Vm {
         // of which catches), for the handler of the frame that catches to see; that frame drops them.
         let boundary = self.frames.iter().rposition(|f| f.boundary).unwrap_or(0);
         loop {
-            match self.run() {
+            if self.retired {
+                return Err(self.error(crate::error::RETIRED_MESSAGE));
+            }
+            let result = self.run();
+            if self.retired {
+                return Err(self.error(crate::error::RETIRED_MESSAGE));
+            }
+            match result {
                 Err(LuaError::Runtime(thrown)) => self.catch(boundary, thrown)?,
                 other => return other,
             }
@@ -1386,6 +1451,9 @@ impl Vm {
     /// handler runs where the error happened, the failed call's frames still there (so `debug.traceback` shows them),
     /// as in LuaJIT; an error in the handler is "error in error handling".
     pub(crate) fn handle(&mut self, handler: Value, error: Value) -> Result<Value, LuaError> {
+        if self.retired {
+            return Err(self.error(crate::error::RETIRED_MESSAGE));
+        }
         if handler == Value::Nil {
             return Ok(error);
         }
@@ -1414,7 +1482,14 @@ impl Vm {
         let depth = self.frames.len();
         let native_depth = self.native_depth;
         let stack = self.stack.len();
-        match f(self) {
+        if self.retired {
+            return Err(self.error(crate::error::RETIRED_MESSAGE));
+        }
+        let result = f(self);
+        if self.retired {
+            return Err(self.error(crate::error::RETIRED_MESSAGE));
+        }
+        match result {
             Ok(value) => Ok(Ok(value)),
             Err(LuaError::Runtime(thrown)) => {
                 let value = self.handle(handler, thrown.value);
@@ -1962,27 +2037,7 @@ impl Vm {
                     }
                     Op::Closure { a, proto: index } => {
                         let child = proto.protos[index as usize].clone();
-                        let env = self.running_env();
-                        let frame = self.frames.last().expect("a running frame");
-                        let mut upvalues = Vec::with_capacity(child.captures.len());
-                        for capture in &child.captures {
-                            upvalues.push(match *capture {
-                                Capture::Register(r) => match self.stack[base + usize::from(r)] {
-                                    Value::Cell(cell) => cell,
-                                    other => unreachable!(
-                                        "a captured local lives in a cell, found {other:?}"
-                                    ),
-                                },
-                                Capture::Upvalue(u) => frame.upvalues[usize::from(u)],
-                            });
-                        }
-                        located!(self, self.charge_fuel(ALLOCATION_FUEL), pc);
-                        let function = Function::Lua {
-                            proto: child,
-                            upvalues: upvalues.into(),
-                            env,
-                        };
-                        let f = located!(self, self.heap.new_function(function), pc);
+                        let f = located!(self, self.create_closure(base, child), pc);
                         self.stack[base + usize::from(a)] = Value::Function(f);
                     }
                     Op::VarArg { a, count } => {
@@ -2016,6 +2071,29 @@ impl Vm {
                 }
             }
         }
+    }
+
+    // Closure construction does not reenter execution; keep its temporaries off recursive execution frames.
+    #[inline(never)]
+    fn create_closure(&mut self, base: usize, child: Rc<Proto>) -> Result<FuncId, LuaError> {
+        let env = self.running_env();
+        let frame = self.frames.last().expect("a running frame");
+        let mut upvalues = Vec::with_capacity(child.captures.len());
+        for capture in &child.captures {
+            upvalues.push(match *capture {
+                Capture::Register(r) => match self.stack[base + usize::from(r)] {
+                    Value::Cell(cell) => cell,
+                    other => unreachable!("a captured local lives in a cell, found {other:?}"),
+                },
+                Capture::Upvalue(u) => frame.upvalues[usize::from(u)],
+            });
+        }
+        self.charge_fuel(ALLOCATION_FUEL)?;
+        self.heap.new_function(Function::Lua {
+            proto: child,
+            upvalues: upvalues.into(),
+            env,
+        })
     }
 
     /// The running function's environment, read from the function itself (never a copy that `setfenv` could leave
@@ -2663,6 +2741,17 @@ impl Vm {
             thread.resumer = Some(from);
         }
         let outcome = self.run_coroutine(status, args);
+        self.finish_resume(co, from, outcome)
+    }
+
+    // Completion runs after nested execution, keeping its copy/error temporaries out of each retained driver.
+    #[inline(never)]
+    fn finish_resume(
+        &mut self,
+        co: ThreadId,
+        from: ThreadId,
+        outcome: Result<Exec, LuaError>,
+    ) -> Result<Result<Vec<Value>, Value>, LuaError> {
         let (results, status) = match outcome {
             Ok(Exec::Yielded) => {
                 let pending = self
@@ -2704,51 +2793,64 @@ impl Vm {
         // The coroutine runs its own instructions: no native of this thread is running in it.
         let caller = std::mem::replace(&mut self.call_site, CallSite::None);
         let result = (|| {
-            if status == ThreadStatus::Fresh {
-                for arg in &args {
-                    self.push(*arg)?;
+            if let Some((function, count)) = self.prepare_coroutine(status, args)? {
+                let produced = self.call_native(function, 0, count, CallSite::Native)?;
+                if self.yielding {
+                    self.yielding = false;
+                    return Err(self.error("attempt to yield across a C-call boundary"));
                 }
-                let count = args.len();
-                let (function, count) = self.callable(0, count)?;
-                if let Function::Native { .. } = self.heap.functions.get(function.0) {
-                    let produced = self.call_native(function, 0, count, CallSite::Native)?;
-                    if self.yielding {
-                        self.yielding = false;
-                        return Err(self.error("attempt to yield across a C-call boundary"));
-                    }
-                    self.top = produced;
-                    return Ok(Exec::Returned);
-                }
-                self.push_frame(function, 0, count, -1, true)?;
-            } else {
-                let pending = self
-                    .threads
-                    .get(self.current.0)
-                    .pending
-                    .expect("a suspended coroutine has a pending yield");
-                self.stack.truncate(pending.slot);
-                if pending.protected {
-                    self.push(Value::Boolean(true))?;
-                }
-                for arg in &args {
-                    self.push(*arg)?;
-                }
-                self.place_results(
-                    pending.slot,
-                    args.len() + usize::from(pending.protected),
-                    pending.slot,
-                    pending.want,
-                )?;
-                let frame = self.frames.last().expect("a suspended frame");
-                let frame_top = frame.base + usize::from(frame.proto.registers);
-                if self.stack.len() < frame_top {
-                    self.set_stack(frame_top)?;
-                }
+                self.top = produced;
+                return Ok(Exec::Returned);
             }
             self.execute()
         })();
         self.call_site = caller;
         result.map_err(|e| self.locate(e, None))
+    }
+
+    // Setup owns argument and frame temporaries only until execution begins.
+    #[inline(never)]
+    fn prepare_coroutine(
+        &mut self,
+        status: ThreadStatus,
+        args: Vec<Value>,
+    ) -> Result<Option<(FuncId, usize)>, LuaError> {
+        if status == ThreadStatus::Fresh {
+            for arg in &args {
+                self.push(*arg)?;
+            }
+            let count = args.len();
+            let (function, count) = self.callable(0, count)?;
+            if let Function::Native { .. } = self.heap.functions.get(function.0) {
+                return Ok(Some((function, count)));
+            }
+            self.push_frame(function, 0, count, -1, true)?;
+        } else {
+            let pending = self
+                .threads
+                .get(self.current.0)
+                .pending
+                .expect("a suspended coroutine has a pending yield");
+            self.stack.truncate(pending.slot);
+            if pending.protected {
+                self.push(Value::Boolean(true))?;
+            }
+            for arg in &args {
+                self.push(*arg)?;
+            }
+            self.place_results(
+                pending.slot,
+                args.len() + usize::from(pending.protected),
+                pending.slot,
+                pending.want,
+            )?;
+            let frame = self.frames.last().expect("a suspended frame");
+            let frame_top = frame.base + usize::from(frame.proto.registers);
+            if self.stack.len() < frame_top {
+                self.set_stack(frame_top)?;
+            }
+        }
+        Ok(None)
     }
 }
 

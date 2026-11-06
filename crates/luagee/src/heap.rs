@@ -9,7 +9,9 @@ use std::rc::Rc;
 
 use crate::proto::Proto;
 use crate::table::Table;
-use crate::value::{CellId, FuncId, StrId, TableId, UserdataId, Value};
+use crate::value::{
+    CellId, FuncId, HANDLE_BYTES, Handle, StrId, TableId, UserdataId, VALUE_BYTES, Value,
+};
 use crate::vm::{Args, LuaError, Vm};
 
 #[cfg(test)]
@@ -107,6 +109,7 @@ pub(crate) const fn slot_size<T>() -> usize {
 /// Objects of one kind, addressed by index.
 #[derive(Debug)]
 pub(crate) struct Arena<T> {
+    owner: u64,
     slots: Vec<Slot<T>>,
     free: Vec<u32>,
     /// The objects held.
@@ -119,18 +122,23 @@ pub(crate) struct Arena<T> {
 
 impl<T> Default for Arena<T> {
     fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl<T> Arena<T> {
+    pub(crate) fn new(owner: u64) -> Self {
         Arena {
+            owner,
             slots: Vec::new(),
             free: Vec::new(),
             objects: 0,
             swept: usize::MAX,
         }
     }
-}
 
-impl<T> Arena<T> {
     /// Stores an object.
-    pub(crate) fn insert(&mut self, object: T) -> u64 {
+    pub(crate) fn insert(&mut self, object: T) -> Handle {
         self.objects += 1;
         let i = match self.free.pop() {
             Some(i) => i as usize,
@@ -150,7 +158,10 @@ impl<T> Arena<T> {
             generation,
         };
         let index = u32::try_from(i).expect("an arena holds fewer than 2^32 objects");
-        u64::from(generation) << 32 | u64::from(index)
+        Handle {
+            local: u64::from(generation) << 32 | u64::from(index),
+            owner: self.owner,
+        }
     }
 
     /// The slots the next `insert` adds to the arena's storage (it doubles when full): what to charge before it.
@@ -163,43 +174,56 @@ impl<T> Arena<T> {
     }
 
     /// A live handle at a trusted slot index (the intern index is maintained with the arena).
-    pub(crate) fn id_at(&self, index: u32) -> u64 {
+    pub(crate) fn id_at(&self, index: u32) -> Handle {
         let slot = &self.slots[index as usize];
-        u64::from(slot.generation) << 32 | u64::from(index)
+        Handle {
+            local: u64::from(slot.generation) << 32 | u64::from(index),
+            owner: self.owner,
+        }
     }
 
-    pub(crate) fn try_get(&self, id: u64) -> Option<&T> {
-        let slot = self.slots.get(id as u32 as usize)?;
-        (slot.generation == (id >> 32) as u32).then_some(())?;
+    pub(crate) fn try_get(&self, id: Handle) -> Option<&T> {
+        (id.owner == self.owner).then_some(())?;
+        let slot = self.slots.get(id.index() as usize)?;
+        (slot.generation == id.generation()).then_some(())?;
         slot.object.as_ref()
     }
 
-    pub(crate) fn try_get_mut(&mut self, id: u64) -> Option<&mut T> {
-        let slot = self.slots.get_mut(id as u32 as usize)?;
-        (slot.generation == (id >> 32) as u32).then_some(())?;
+    pub(crate) fn try_get_mut(&mut self, id: Handle) -> Option<&mut T> {
+        (id.owner == self.owner).then_some(())?;
+        let slot = self.slots.get_mut(id.index() as usize)?;
+        (slot.generation == id.generation()).then_some(())?;
         slot.object.as_mut()
     }
 
     #[inline]
-    pub(crate) fn get(&self, id: u64) -> &T {
+    pub(crate) fn get(&self, id: Handle) -> &T {
         self.try_get(id).expect("a live internal handle")
     }
 
     #[inline]
-    pub(crate) fn get_mut(&mut self, id: u64) -> &mut T {
+    pub(crate) fn get_mut(&mut self, id: Handle) -> &mut T {
         self.try_get_mut(id).expect("a live internal handle")
     }
 
     /// Marks an internal live handle; true when it was not marked yet.
-    pub(crate) fn mark(&mut self, id: u64) -> bool {
-        let slot = &mut self.slots[id as u32 as usize];
-        debug_assert_eq!(slot.generation, (id >> 32) as u32);
+    pub(crate) fn mark(&mut self, id: Handle) -> bool {
+        assert_eq!(
+            self.owner, id.owner,
+            "an internal mark belongs to this arena"
+        );
+        let slot = &mut self.slots[id.index() as usize];
+        assert_eq!(
+            slot.generation,
+            id.generation(),
+            "an internal mark has a live generation"
+        );
         !std::mem::replace(&mut slot.marked, true)
     }
 
     /// Revives an interned string without changing its generation.
-    pub(crate) fn keep(&mut self, id: u64) {
-        let index = id as u32 as usize;
+    pub(crate) fn keep(&mut self, id: Handle) {
+        let index = id.index() as usize;
         if index >= self.swept {
             self.slots[index].marked = true;
         }
@@ -354,13 +378,13 @@ pub(crate) const INTERN_ENTRY: usize = 8;
 /// The counted size of a string object beyond its bytes.
 pub(crate) const STRING_OVERHEAD: usize = 32;
 /// The counted size of a function object.
-pub(crate) const FUNCTION_SIZE: usize = 64;
+pub(crate) const FUNCTION_SIZE: usize = 80;
 /// The counted size of a cell.
-pub(crate) const CELL_SIZE: usize = 24;
+pub(crate) const CELL_SIZE: usize = 32;
 /// The counted size of a userdata object (its host data is the host's).
-pub(crate) const USERDATA_SIZE: usize = 48;
+pub(crate) const USERDATA_SIZE: usize = 56;
 /// The counted size of a table object beyond its parts.
-pub(crate) const TABLE_SIZE: usize = 96;
+pub(crate) const TABLE_SIZE: usize = 104;
 
 // An object's counted size covers its arena slot on 64-bit targets, the largest, so an empty slot counts as much as
 // the object it held.
@@ -374,15 +398,15 @@ const _: () = {
 };
 
 impl Heap {
-    pub(crate) fn new(cap: usize, hash_key: [u64; 2]) -> Heap {
+    pub(crate) fn new(cap: usize, hash_key: [u64; 2], owner: u64) -> Heap {
         Heap {
-            strings: Arena::default(),
+            strings: Arena::new(owner),
             intern: vec![0; 1024],
             interned: 0,
-            tables: Arena::default(),
-            functions: Arena::default(),
-            userdata: Arena::default(),
-            cells: Arena::default(),
+            tables: Arena::new(owner),
+            functions: Arena::new(owner),
+            userdata: Arena::new(owner),
+            cells: Arena::new(owner),
             hasher: KeyHasher::new(hash_key),
             memory: 0,
             cap,
@@ -457,7 +481,7 @@ impl Heap {
         while self.intern[slot] != 0 {
             slot = (slot + 1) & mask;
         }
-        self.intern[slot] = (hash & 0xffff_ffff) << 32 | u64::from(id as u32 + 1);
+        self.intern[slot] = (hash & 0xffff_ffff) << 32 | u64::from(id.index() + 1);
         self.interned += 1;
         Ok(StrId(id))
     }
@@ -582,8 +606,8 @@ impl Heap {
     pub(crate) fn new_function(&mut self, function: Function) -> Result<FuncId, LuaError> {
         let size = FUNCTION_SIZE
             + match &function {
-                Function::Lua { upvalues, .. } => upvalues.len() * 8,
-                Function::Native { upvalues, .. } => upvalues.len() * 16,
+                Function::Lua { upvalues, .. } => upvalues.len() * HANDLE_BYTES,
+                Function::Native { upvalues, .. } => upvalues.len() * VALUE_BYTES,
             };
         self.charge(size + self.functions.growth() * FUNCTION_SIZE)?;
         // Born marked during a collection, so what it refers to is grayed here: nothing else would trace it.
@@ -641,10 +665,10 @@ impl Heap {
             Value::String(s) => self.strings.get(s.0).hash,
             Value::Number(n) => self.hasher.number(n),
             Value::Boolean(b) => self.hasher_word(2, u64::from(b)),
-            Value::Table(t) => self.hasher_word(3, u64::from(t.0 as u32)),
-            Value::Function(f) => self.hasher_word(4, u64::from(f.0 as u32)),
-            Value::Userdata(u) => self.hasher_word(5, u64::from(u.0 as u32)),
-            Value::Thread(t) => self.hasher_word(6, u64::from(t.0 as u32)),
+            Value::Table(t) => self.hasher_word(3, u64::from(t.0.index())),
+            Value::Function(f) => self.hasher_word(4, u64::from(f.0.index())),
+            Value::Userdata(u) => self.hasher_word(5, u64::from(u.0.index())),
+            Value::Thread(t) => self.hasher_word(6, u64::from(t.0.index())),
             Value::Nil | Value::Cell(_) => 0,
         }
     }

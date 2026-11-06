@@ -27,6 +27,7 @@ pub fn install(lua: &mut Lua) -> Result<(), Error> {
     lua.vm()
         .unpin(Value::Table(table))
         .map_err(|_| Error::Limit(luagee::Limit::Memory))?;
+    install_foreign_probe(lua, table)?;
     Ok(())
 }
 
@@ -360,4 +361,61 @@ fn counter_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
         ),
         ("bad_count", Rc::new(|_, _| Ok(1))),
     ]
+}
+
+fn install_foreign_probe(lua: &mut Lua, table: luagee::TableId) -> Result<(), Error> {
+    let own = lua.vm().userdata(29f64, None, 0).map_err(setup_error)?;
+    lua.pin(own)?;
+    let mut other = Lua::new(
+        luagee::Limits::DEFAULT,
+        luagee::Keys {
+            hash: [1, 2],
+            random: 3,
+        },
+    )?;
+    let foreign = other.vm().userdata(17f64, None, 0).map_err(setup_error)?;
+    other.pin(foreign)?;
+    let foreign_table = other.vm().new_table().map_err(setup_error)?;
+    other.pin(Value::Table(foreign_table))?;
+    let foreign_string = other.string(b"foreign bytes")?;
+    other.pin(foreign_string)?;
+    let saved = Rc::new(std::cell::Cell::new(None));
+    let capture = saved.clone();
+    let function = other.function(
+        "capture",
+        Rc::new(move |_, args| {
+            capture.set(Some(args));
+            Ok(0)
+        }),
+    )?;
+    other.set_global("capture", function)?;
+    other.exec("capture", b"return capture(17)")?;
+    let probe = lua.function(
+        "foreign_probe",
+        Rc::new(move |vm, _| {
+            let _keep_alive = &other;
+            assert!(vm.userdata_ref::<f64>(foreign).is_none());
+            assert!(vm.userdata_mut::<f64>(foreign).is_none());
+            assert!(vm.bytes(foreign_string).is_none());
+            assert!(vm.pin(foreign).is_err());
+            assert!(vm.raw_get(foreign_table, Value::Number(1.0)).is_err());
+            assert!(
+                vm.check_any(saved.get().expect("captured foreign context"), 0)
+                    .is_err()
+            );
+            vm.results(&[Value::Boolean(true)])
+        }),
+    )?;
+    let key = lua.string(b"foreign_probe")?;
+    lua.vm().raw_set(table, key, probe).map_err(setup_error)
+}
+
+fn setup_error(error: luagee::LuaError) -> Error {
+    match error {
+        luagee::LuaError::Limit(limit) => Error::Limit(limit),
+        other => Error::Runtime {
+            message: format!("fixture setup failed: {other:?}"),
+            traceback: Vec::new(),
+        },
+    }
 }

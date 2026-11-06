@@ -20,6 +20,9 @@ impl Vm {
     /// The bytes of a string value, or None for a collected handle. Values belong to this interpreter.
     #[must_use]
     pub fn bytes(&self, value: Value) -> Option<&[u8]> {
+        if self.retired {
+            return None;
+        }
         match value {
             Value::String(string) => self
                 .heap
@@ -97,6 +100,9 @@ impl Vm {
     /// A table with a copied metatable cannot impersonate an object. Collected handles return None.
     #[must_use]
     pub fn userdata_ref<T: 'static>(&self, value: Value) -> Option<&T> {
+        if self.retired {
+            return None;
+        }
         match value {
             Value::Userdata(id) => self.heap.userdata.try_get(id.0)?.data.downcast_ref(),
             _ => None,
@@ -108,6 +114,9 @@ impl Vm {
     /// declared retained allocation; handles stored in the payload still need independent roots.
     #[must_use]
     pub fn userdata_mut<T: 'static>(&mut self, value: Value) -> Option<&mut T> {
+        if self.retired {
+            return None;
+        }
         match value {
             Value::Userdata(id) => self.heap.userdata.try_get_mut(id.0)?.data.downcast_mut(),
             _ => None,
@@ -124,7 +133,7 @@ impl Vm {
             self.charge_fuel(1 + self.pinned.len() as u64 / 8)?;
             self.heap.charge(
                 growth
-                    .checked_mul(16)
+                    .checked_mul(crate::value::VALUE_BYTES)
                     .ok_or(LuaError::Limit(Limit::Memory))?,
             )?;
             self.pinned.reserve_exact(growth);
@@ -152,11 +161,16 @@ impl Vm {
     /// Propagate `LuaError::Limit` unchanged. Results and runtime error values stay rooted until this callback ends.
     /// Pin any value retained beyond the callback. Expired `Args` cannot read another callback's frame.
     pub fn call(&mut self, function: Value, args: &[Value]) -> Result<Vec<Value>, LuaError> {
+        self.charge_fuel(0)?;
         if self.host_depth == 0 {
             return Err(
                 self.error("Vm::call requires an active host callback; use Lua::call at top level")
             );
         }
+        self.unwind_scope(|vm| vm.call_callback(function, args))
+    }
+
+    fn call_callback(&mut self, function: Value, args: &[Value]) -> Result<Vec<Value>, LuaError> {
         let slot = self.stack.len();
         let depth = self.frames.len();
         let top = self.top;
@@ -188,7 +202,8 @@ impl Vm {
     }
 
     pub(crate) fn args_are_live(&self, args: Args) -> bool {
-        args.serial != 0
+        args.owner == self.owner
+            && args.serial != 0
             && args.serial == self.active_serial
             && args
                 .base

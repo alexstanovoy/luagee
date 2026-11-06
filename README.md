@@ -174,8 +174,10 @@ Ok::<(), luagee::Error>(())
 Heap handles carry slot generations. Collecting and reusing an arena slot never
 makes an old handle refer to the replacement. Host reads of expired strings or
 userdata return `None`; writes, roots, calls and result/error ingress return a Lua
-error before a stale handle can enter the interpreter. Handles remain specific to
-the interpreter that created them; do not exchange them between interpreters.
+error before a stale handle can enter the interpreter. Handles carry an independent
+process-local interpreter tag as well as slot generation. Foreign handles are rejected, including when two interpreters have
+identical keys. The tag is not exposed by script hashing, iteration or tostring.
+Only one monotonic identity counter is shared; script state remains isolated.
 
 ### Callback scope (unreleased fix)
 
@@ -210,6 +212,31 @@ the interpreter cannot bound arbitrary Rust code. The regression runner checks
 combined callback reentry and deep parsing on 1 MiB native stacks and wasmtime's
 reduced engine/module stacks. Embedders with larger callback frames need to verify
 their own stack margin.
+
+### Setup and panic boundaries (unreleased fix)
+
+`Lua::vm()` starts a fresh per-call budget for trusted host setup, independent of
+fuel left by the preceding script. Setup does not spend tick fuel and cannot run
+Lua through `Vm::call`; script execution always uses `Lua::call` and its tick
+accounting. Callbacks receive their active `Vm` directly without any refill.
+
+Call cleanup restores callback depth and invocation context even during host Rust
+unwinding. A Rust panic crossing an interpreter-call boundary retires it, including
+a panic inside a resumed coroutine or explicit collection. Catching a nested panic
+inside an outer callback cannot resume script execution. Discard the retired
+interpreter and create another one. Subsequent execution,
+loading and collection return an error. Normal Lua errors and limit exhaustion
+do not retire the interpreter.
+
+Results of repeated `Vm::call` operations within one callback remain rooted on
+charged stack storage until that callback returns, even if Rust drops its result
+vectors earlier. Long callback loops can therefore hit the memory cap; split
+independent work into separate callbacks when those lifetimes are unnecessary.
+
+Opaque interpreter tags make `Value` 24 bytes and table entries 56 bytes. Slot,
+frame, capture and container accounting use fixed cross-platform bounds with
+compile-time size checks. Interpreter tags use an atomic identity counter and
+need no clock, entropy source, thread or filesystem.
 
 ## License
 

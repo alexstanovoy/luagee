@@ -16,6 +16,8 @@ report() { echo "wasm_audit: $1"; bad=1; }
 while IFS= read -r file; do
     extra=
     [ "$file" = loader/folder.rs ] && extra="|$files_only"
+    # The only process-global state is the opaque interpreter identity counter, never visible to scripts.
+    [ "$file" = value.rs ] && extra="|sync"
     while IFS= read -r hit; do
         report "$file:$hit: std::${hit##*std::} is outside what the library may use"
     done < <(grep -noE '\b(std|core|alloc)::[a-z_0-9]+' "$file" | grep -vE ":(std|core|alloc)::($allowed$extra)$" || true)

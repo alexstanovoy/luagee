@@ -23,10 +23,37 @@ pub struct Keys {
     pub random: u64,
 }
 
-/// A sandboxed interpreter with the standard library open. Interpreters share nothing: a host isolates scripts by
-/// giving each group its own.
+/// A sandboxed interpreter with the standard library open. Interpreters share no script state; an opaque
+/// process-local identity counter distinguishes their host handles, even with identical keys.
 pub struct Lua {
     vm: Vm,
+}
+
+/// Restores top-level call state on both normal return and host Rust unwinding.
+struct CallScope<'a> {
+    vm: &'a mut Vm,
+    slot: usize,
+    budget: u64,
+    completed: bool,
+}
+
+impl Drop for CallScope<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.vm.retired = true;
+        }
+        self.vm.tick_fuel = self
+            .vm
+            .tick_fuel
+            .saturating_sub(self.budget.saturating_sub(self.vm.fuel));
+        self.vm.stack.truncate(self.slot);
+        self.vm.frames.clear();
+        self.vm.native_depth = 0;
+        self.vm.host_depth = 0;
+        self.vm.active_serial = 0;
+        self.vm.call_site = crate::vm::CallSite::None;
+        self.vm.yielding = false;
+    }
 }
 
 /// Compiles source into a function in the thread's globals: Ok(Err(message)) when it does not compile.
@@ -105,6 +132,7 @@ impl Lua {
 
     /// Compiles source into a function (not run yet). The chunk name is what error positions print.
     pub fn load(&mut self, chunk: &str, source: &[u8]) -> Result<Value, Error> {
+        self.ensure_active()?;
         let vm = &mut self.vm;
         // The host's own loading is not a script's work: it spends no script fuel (the source limits still hold).
         let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
@@ -124,6 +152,7 @@ impl Lua {
 
     /// Calls a function with arguments under the call's and the tick's fuel; its results.
     pub fn call(&mut self, function: Value, args: &[Value]) -> Result<Vec<Value>, Error> {
+        self.ensure_active()?;
         let vm = &mut self.vm;
         let budget = vm.limits.fuel_per_call.min(vm.tick_fuel);
         vm.fuel = budget;
@@ -133,6 +162,13 @@ impl Lua {
             Limit::FuelPerTick
         };
         let slot = vm.stack.len();
+        let mut scope = CallScope {
+            vm,
+            slot,
+            budget,
+            completed: false,
+        };
+        let vm = &mut *scope.vm;
         let result = (|| {
             vm.charge_fuel(1 + args.len() as u64 / crate::vm::VALUES_PER_FUEL as u64)?;
             vm.validate(function)?;
@@ -146,15 +182,19 @@ impl Lua {
             let count = vm.call_value(slot, args.len())?;
             Ok(vm.stack[slot..slot + count].to_vec())
         })();
-        vm.tick_fuel -= budget - vm.fuel;
-        vm.stack.truncate(slot);
-        vm.frames.clear();
-        vm.native_depth = 0;
-        vm.yielding = false;
-        result.map_err(|e| {
-            let e = vm.locate(e, None);
-            to_error(&mut Some(vm), e)
-        })
+        let result = if vm.retired {
+            Err(Error::Runtime {
+                message: crate::error::RETIRED_MESSAGE.to_owned(),
+                traceback: Vec::new(),
+            })
+        } else {
+            result.map_err(|error| {
+                let error = vm.locate(error, None);
+                to_error(&mut Some(vm), error)
+            })
+        };
+        scope.completed = true;
+        result
     }
 
     /// Loads and runs a chunk.
@@ -165,6 +205,7 @@ impl Lua {
 
     /// Keeps a value alive across calls until [`unpin`](Self::unpin).
     pub fn pin(&mut self, value: Value) -> Result<(), Error> {
+        self.ensure_active()?;
         // Setup, like `load`, is outside script execution; a result can be rooted after the call spent its fuel.
         let fuel = std::mem::replace(&mut self.vm.fuel, u64::MAX);
         let result = self.vm.pin(value);
@@ -174,6 +215,7 @@ impl Lua {
 
     /// Releases one matching pin; false if it was not pinned. Root storage and scans are bounded.
     pub fn unpin(&mut self, value: Value) -> Result<bool, Error> {
+        self.ensure_active()?;
         let fuel = std::mem::replace(&mut self.vm.fuel, u64::MAX);
         let result = self.vm.unpin(value);
         self.vm.fuel = fuel;
@@ -182,6 +224,7 @@ impl Lua {
 
     /// A string value.
     pub fn string(&mut self, bytes: &[u8]) -> Result<Value, Error> {
+        self.ensure_active()?;
         let vm = &mut self.vm;
         vm.new_string(bytes).map_err(|e| to_error(&mut Some(vm), e))
     }
@@ -200,6 +243,7 @@ impl Lua {
 
     /// `globals[name]`, without metamethods.
     pub fn global(&mut self, name: &str) -> Result<Value, Error> {
+        self.ensure_active()?;
         let vm = &mut self.vm;
         vm.get_field(vm.globals, name)
             .map_err(|e| to_error(&mut Some(vm), e))
@@ -207,6 +251,7 @@ impl Lua {
 
     /// `globals[name] = value`, without metamethods.
     pub fn set_global(&mut self, name: &str, value: Value) -> Result<(), Error> {
+        self.ensure_active()?;
         let vm = &mut self.vm;
         let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
         let result = vm
@@ -218,6 +263,7 @@ impl Lua {
 
     /// A function value calling the host.
     pub fn function(&mut self, name: &'static str, f: HostFunction) -> Result<Value, Error> {
+        self.ensure_active()?;
         let vm = &mut self.vm;
         let function = Function::Native {
             function: NativeFn::Host(f),
@@ -237,6 +283,7 @@ impl Lua {
         data: Box<dyn std::any::Any>,
         metatable: Option<TableId>,
     ) -> Result<Value, Error> {
+        self.ensure_active()?;
         let vm = &mut self.vm;
         if let Some(meta) = metatable {
             vm.validate(Value::Table(meta))
@@ -270,9 +317,10 @@ impl Lua {
 
     /// Runs a whole collection now. It fails only when what is alive is over the memory cap.
     pub fn collect(&mut self) -> Result<(), Error> {
+        self.ensure_active()?;
         let vm = &mut self.vm;
         let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
-        let result = vm.collect();
+        let result = vm.unwind_scope(|vm| vm.collect());
         vm.fuel = fuel;
         result.map_err(|e| to_error(&mut Some(vm), e))
     }
@@ -285,8 +333,27 @@ impl Lua {
         self.vm.gc_threshold = self.vm.next_threshold(self.vm.heap.memory);
     }
 
-    /// The interpreter, for host functions' argument accessors.
+    fn ensure_active(&self) -> Result<(), Error> {
+        if self.vm.retired {
+            Err(Error::Runtime {
+                message: crate::error::RETIRED_MESSAGE.to_owned(),
+                traceback: Vec::new(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// A trusted top-level setup borrow with fresh per-call fuel, independent of the last script call.
+    /// Setup never spends tick fuel and cannot execute Lua through `Vm::call`; use `Lua::call` for execution.
+    /// Callbacks receive their active VM directly and share the executing call's budget.
     pub fn vm(&mut self) -> &mut Vm {
+        self.vm.fuel = if self.vm.retired {
+            0
+        } else {
+            self.vm.limits.fuel_per_call
+        };
+        self.vm.fuel_limit = Limit::FuelPerCall;
         &mut self.vm
     }
 }

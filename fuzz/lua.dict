@@ -177,3 +177,5 @@
 "host.bad_count()"
 "host.save_unrooted(u)"
 "host.read_unrooted()"
+
+"host.foreign_probe(29)"

@@ -37,6 +37,16 @@ pub fn contracts() {
     interrupted_migration_leaves_the_original_table_valid();
     require_retries_after_a_module_exhausts_fuel();
     require_retries_after_fuel_exhaustion_during_cache_commit();
+    foreign_handles_are_rejected_even_with_identical_keys();
+    argument_contexts_cannot_cross_interpreters();
+    top_level_vm_setup_uses_a_fresh_budget();
+    callback_loop_results_remain_charged_until_return();
+    #[cfg(not(target_arch = "wasm32"))]
+    callback_panic_does_not_leave_an_active_callback_context();
+    #[cfg(not(target_arch = "wasm32"))]
+    catching_a_nested_panic_cannot_resume_the_interpreter();
+    #[cfg(not(target_arch = "wasm32"))]
+    a_payload_drop_panic_retires_explicit_collection();
 }
 
 #[cfg_attr(test, test)]
@@ -376,4 +386,250 @@ fn require_retries_after_fuel_exhaustion_during_cache_commit() {
         observed_edge,
         "the test reached a successful loader with an exhausted cache commit"
     );
+}
+
+#[cfg_attr(test, test)]
+fn foreign_handles_are_rejected_even_with_identical_keys() {
+    let mut source = interpreter();
+    let mut target = interpreter();
+    let foreign = source
+        .vm()
+        .userdata(17u64, None, 0)
+        .expect("source payload");
+    let own = target
+        .vm()
+        .userdata(29u64, None, 0)
+        .expect("target payload");
+    source.pin(foreign).expect("source root");
+    target.pin(own).expect("target root");
+    assert_eq!(target.userdata_ref::<u64>(foreign), None);
+    assert!(target.userdata_mut::<u64>(foreign).is_none());
+    assert!(target.pin(foreign).is_err());
+    assert!(target.set_global("foreign", foreign).is_err());
+    let foreign_string = source.string(b"source bytes").expect("source string");
+    let _own_string = target.string(b"target bytes").expect("target string");
+    assert!(target.bytes(foreign_string).is_none());
+    let foreign_table = source.vm().new_table().expect("source table");
+    let own_table = target.vm().new_table().expect("target table");
+    assert!(
+        target
+            .vm()
+            .raw_get(foreign_table, Value::Number(1.0))
+            .is_err()
+    );
+    assert!(
+        target
+            .vm()
+            .raw_set(foreign_table, Value::Number(1.0), own)
+            .is_err()
+    );
+    assert!(
+        target
+            .vm()
+            .raw_set(own_table, Value::Number(1.0), foreign)
+            .is_err()
+    );
+    assert!(
+        target
+            .vm()
+            .set_metatable(own_table, Some(foreign_table))
+            .is_err()
+    );
+    let foreign_function = source
+        .load("foreign", b"return ...")
+        .expect("source function");
+    let own_function = target.load("own", b"return ...").expect("target function");
+    source.pin(foreign_function).expect("source root");
+    target.pin(own_function).expect("target root");
+    assert!(target.call(foreign_function, &[]).is_err());
+    assert!(target.call(own_function, &[foreign]).is_err());
+    assert_eq!(target.userdata_ref::<u64>(own), Some(&29));
+}
+
+#[cfg_attr(test, test)]
+fn argument_contexts_cannot_cross_interpreters() {
+    let mut source = interpreter();
+    let mut target = interpreter();
+    let saved = Rc::new(Cell::new(None));
+    let capture = saved.clone();
+    register(
+        &mut source,
+        "capture",
+        Rc::new(move |_, args| {
+            capture.set(Some(args));
+            Ok(0)
+        }),
+    );
+    register(
+        &mut target,
+        "capture",
+        Rc::new(move |vm, _| {
+            let args = saved.get().expect("source context");
+            let value = vm.check_any(args, 0)?;
+            vm.results(&[value])
+        }),
+    );
+    source
+        .exec("source", b"return capture(17)")
+        .expect("source call");
+    let ended = target.exec("target", b"return capture(29)");
+    assert!(
+        matches!(ended, Err(Error::Runtime { message, .. }) if message.contains("expired callback arguments"))
+    );
+}
+
+#[cfg_attr(test, test)]
+fn top_level_vm_setup_uses_a_fresh_budget() {
+    for operation in 0..3 {
+        let mut lua = interpreter();
+        let table = lua.vm().new_table().expect("table");
+        lua.pin(Value::Table(table)).expect("root");
+        let ended = lua.exec("exhaust", b"while true do end");
+        assert!(matches!(
+            ended,
+            Err(Error::Limit(luagee::Limit::FuelPerCall))
+        ));
+        let fuel = lua.tick_fuel_left();
+        match operation {
+            0 => {
+                lua.vm().new_table().expect("fresh setup allocation");
+            }
+            1 => {
+                lua.vm().pin(Value::Table(table)).expect("fresh setup root");
+            }
+            _ => {
+                lua.vm()
+                    .raw_set(table, Value::Number(1.0), Value::Number(7.0))
+                    .expect("fresh setup write");
+            }
+        }
+        assert_eq!(
+            lua.tick_fuel_left(),
+            fuel,
+            "trusted setup does not execute script fuel"
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(test, test)]
+fn callback_panic_does_not_leave_an_active_callback_context() {
+    for source in [
+        &b"host_panic()"[..],
+        &b"co = coroutine.create(function() host_panic() end) coroutine.resume(co)"[..],
+    ] {
+        let mut lua = interpreter();
+        register(
+            &mut lua,
+            "host_panic",
+            Rc::new(|_, _| panic!("host callback failure")),
+        );
+        let probe = lua
+            .load("probe", b"return coroutine.running()")
+            .expect("probe");
+        lua.pin(probe).expect("root");
+        let ended =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lua.exec("panic", source)));
+        assert!(ended.is_err());
+        assert!(matches!(
+            lua.vm().call(probe, &[]),
+            Err(luagee::LuaError::Runtime(_))
+        ));
+        lua.begin_tick();
+        let ended = lua.call(probe, &[]);
+        assert!(
+            matches!(ended, Err(Error::Runtime { message, .. }) if message.contains("interpreter retired"))
+        );
+        assert!(
+            lua.collect().is_err(),
+            "retired collector state cannot be reused"
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+fn callback_loop_results_remain_charged_until_return() {
+    let mut lua = Lua::new(
+        Limits {
+            memory: 256 << 10,
+            fuel_per_call: 50_000_000,
+            fuel_per_tick: 50_000_000,
+            ..Limits::DEFAULT
+        },
+        Keys {
+            hash: [17, 19],
+            random: 23,
+        },
+    )
+    .expect("interpreter");
+    register(
+        &mut lua,
+        "retain_loop",
+        Rc::new(|vm, args| {
+            let make = vm.check_any(args, 0)?;
+            for _ in 0..20_000 {
+                drop(vm.call(make, &[])?);
+            }
+            Ok(0)
+        }),
+    );
+    lua.set_gc_stress(GcStress::Incremental);
+    let ended = lua.exec("loop_roots", b"retain_loop(function() return {} end)");
+    assert!(
+        matches!(ended, Err(Error::Limit(luagee::Limit::Memory))),
+        "{ended:?}"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(test, test)]
+fn catching_a_nested_panic_cannot_resume_the_interpreter() {
+    for source in [
+        &b"swallow(function() host_panic() end) return 71"[..],
+        &b"swallow(function() local co=coroutine.create(host_panic) coroutine.resume(co) end) return 71"[..],
+        &b"local a,b,c=1,2,3 pcall(swallow,function() host_panic() end) return a+b+c"[..],
+        &b"local a,b,c=1,2,3 pcall(swallow,function() coroutine.resume(coroutine.create(host_panic)) end) return a+b+c"[..],
+        &b"local a,b,c=1,2,3 xpcall(function() swallow(function() host_panic() end) end,handler) return a+b+c"[..],
+        &b"local a,b,c=1,2,3 xpcall(function() swallow(function() coroutine.resume(coroutine.create(host_panic)) end) end,handler) return a+b+c"[..],
+        &b"local a,b,c=1,2,3 xpcall(swallow,handler,function() host_panic() end) return a+b+c"[..],
+        &b"local a,b,c=1,2,3 xpcall(swallow,handler,function() coroutine.resume(coroutine.create(host_panic)) end) return a+b+c"[..],
+    ] {
+        let mut lua = interpreter();
+        register(&mut lua, "host_panic", Rc::new(|_, _| panic!("nested host panic")));
+        register(&mut lua, "swallow", Rc::new(|vm, args| {
+            let function = vm.check_any(args, 0)?;
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.call(function, &[])));
+            assert!(caught.is_err());
+            Ok(0)
+        }));
+        let handled = Rc::new(Cell::new(false));
+        let observed = handled.clone();
+        register(&mut lua, "handler", Rc::new(move |vm, args| {
+            observed.set(true);
+            let value = vm.arg(args, 0);
+            vm.results(&[value])
+        }));
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lua.exec("nested_panic", source)));
+        assert!(matches!(ended, Ok(Err(Error::Runtime { message, .. })) if message.contains("interpreter retired")));
+        assert!(!handled.get(), "retirement bypasses Lua error handlers");
+        assert!(lua.exec("after", b"return 71").is_err());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(test, test)]
+fn a_payload_drop_panic_retires_explicit_collection() {
+    struct PanicOnDrop;
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("payload drop panic");
+        }
+    }
+    let mut lua = interpreter();
+    lua.userdata(Box::new(PanicOnDrop), None)
+        .expect("unrooted payload");
+    let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lua.collect()));
+    assert!(ended.is_err());
+    assert!(lua.collect().is_err());
+    assert!(lua.exec("after", b"return 71").is_err());
 }

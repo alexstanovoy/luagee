@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+pub(crate) const RETIRED_MESSAGE: &str = "interpreter retired after a host callback panic";
+
 /// What ended a call into a script: the host gets this, never a panic, and the interpreter stays usable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[must_use]

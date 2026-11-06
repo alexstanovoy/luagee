@@ -15,7 +15,7 @@ use crate::heap::Heap;
 use crate::lexer::SyntaxError;
 use crate::parser::ParseError;
 use crate::proto::{ArithOp, Capture, CompareOp, LocalInfo, Op, Proto, Rk};
-use crate::value::{StrId, Value};
+use crate::value::{Handle, StrId, Value};
 
 type Compile<T> = Result<T, ParseError>;
 
@@ -330,7 +330,7 @@ struct FunctionState {
     lines: Vec<u32>,
     constants: Vec<Value>,
     numbers: BTreeMap<u64, u32>,
-    strings: BTreeMap<u64, u32>,
+    strings: BTreeMap<Handle, u32>,
     nil: Option<u32>,
     booleans: [Option<u32>; 2],
     protos: Vec<Rc<Proto>>,

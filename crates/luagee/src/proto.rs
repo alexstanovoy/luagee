@@ -236,6 +236,8 @@ pub(crate) struct Proto {
 impl Proto {
     /// The bytes this function's code and constants are counted as.
     pub(crate) fn bytes(&self) -> usize {
-        128 + self.code.len() * 16 + self.constants.len() * 16 + self.captures.len() * 2
+        136 + self.code.len() * 16
+            + self.constants.len() * crate::value::VALUE_BYTES
+            + self.captures.len() * 2
     }
 }

@@ -36,6 +36,7 @@ pub fn contracts() {
     typed_callback_payloads_and_invalid_result_counts_are_checked();
     callback_hash_churn_and_migration_preserve_table_state();
     callback_fuzzer_fixture_retries_modules_on_the_next_tick();
+    foreign_interpreter_probe_rejects_payloads_and_argument_contexts();
 }
 
 #[cfg_attr(test, test)]
@@ -419,5 +420,18 @@ fn callback_fuzzer_fixture_retries_modules_on_the_next_tick() {
         lua.begin_tick();
         lua.exec("retry_attempt", include_bytes!("host_api/retry_module.lua"))
             .expect("module retries after the limit");
+    }
+}
+
+#[cfg_attr(test, test)]
+fn foreign_interpreter_probe_rejects_payloads_and_argument_contexts() {
+    for stress in [GcStress::Full, GcStress::Incremental] {
+        let mut lua = interpreter(Limits::DEFAULT);
+        lua.set_gc_stress(stress);
+        lua.exec(
+            "foreign_handles",
+            include_bytes!("host_api/foreign_handles.lua"),
+        )
+        .expect("foreign data never aliases this interpreter");
     }
 }
