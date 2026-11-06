@@ -1,0 +1,26 @@
+-- Argument errors name the function as the call names it, as LuaJIT's do: a method call does not count self, a
+-- function no Lua call names (a tail call, a call from a native) is '?', and a tail call's error is the caller's.
+local function show(f, ...) print(select(2, pcall(f, ...))) end
+local s = string.sub
+show(function() s("x", {}) end)
+show(function() ("x"):sub({}) end)
+show(function() string.sub("x", {}) end)
+show(string.sub, "x", {})
+show(function() return ("x").sub({}) end)
+show(function() local t = {f = string.rep} t:f({}) end)
+show(function() local t = {f = string.rep} t:f("x", {}) end)
+show(function() local t = {f = string.rep} return t:f({}) end)
+show(function() local x = string.rep() return x end)
+show(function() return string.rep() end)
+show(function() return error("msg") end)
+show(function() return assert(false) end)
+show(function() return assert(false, "why") end)
+show(function() local insert = table.insert insert(1, 2) end)
+show(function() up = string.byte up({}) end)
+show(function() local r = string.rep local u = function() r() end u() end)
+show(function() (string.rep)() end)
+show(function() local t = {string.rep} t[1]() end)
+show(function() return tostring() end)
+show(function() local function f() return string.rep() end f() end)
+show(function() local function f() return string.rep() end local x = f() end)
+show(function() local function f() return error("deep") end local x = f() end)

@@ -1,0 +1,22 @@
+errors_argument_names.lua:5: bad argument #2 to 's' (number expected, got table)
+errors_argument_names.lua:6: bad argument #1 to 'sub' (number expected, got table)
+errors_argument_names.lua:7: bad argument #2 to 'sub' (number expected, got table)
+bad argument #2 to '?' (number expected, got table)
+bad argument #1 to '?' (string expected, got table)
+errors_argument_names.lua:10: calling 'f' on bad self (string expected, got table)
+errors_argument_names.lua:11: calling 'f' on bad self (string expected, got table)
+bad argument #1 to '?' (string expected, got table)
+errors_argument_names.lua:13: bad argument #1 to 'rep' (string expected, got no value)
+bad argument #1 to '?' (string expected, got no value)
+msg
+assertion failed!
+why
+errors_argument_names.lua:18: bad argument #1 to 'insert' (table expected, got number)
+errors_argument_names.lua:19: bad argument #1 to 'up' (string expected, got table)
+errors_argument_names.lua:20: bad argument #1 to 'r' (string expected, got no value)
+errors_argument_names.lua:21: bad argument #1 to 'rep' (string expected, got no value)
+errors_argument_names.lua:22: bad argument #1 to '?' (string expected, got no value)
+bad argument #1 to '?' (value expected)
+errors_argument_names.lua:24: bad argument #1 to 'f' (string expected, got no value)
+errors_argument_names.lua:25: bad argument #1 to 'f' (string expected, got no value)
+errors_argument_names.lua:26: deep

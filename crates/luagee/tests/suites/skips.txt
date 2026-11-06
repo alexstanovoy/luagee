@@ -25,6 +25,7 @@ skip lua-5.1-tests/constructs.lua:189-189 -- debug: debug.getinfo's "n" (luagee 
 skip lua-5.1-tests/db.lua -- debug: hooks, locals, upvalues and the rest of the debug library
 skip lua-5.1-tests/errors.lua:39-41 -- luajit: LuaJIT accepts empty statements (`;`, `a=1;;`), as Lua 5.2 does
 skip lua-5.1-tests/errors.lua:75-76 -- luajit: LuaJIT names the variable of `(aaa or aaa)` in its errors, which PUC Lua does not
+skip lua-5.1-tests/errors.lua:103-105 -- luajit: LuaJIT names a function it tail-called '?' in argument errors, as its frame is gone
 skip lua-5.1-tests/errors.lua:111-111 -- io: io.stdin
 skip lua-5.1-tests/errors.lua:142-167 -- fix: traceback
 skip lua-5.1-tests/errors.lua:171-172 -- fix: error in error handling
@@ -131,7 +132,6 @@ skip luajit-test-cleanup/lib/base/tonumber_tostring.lua#print calls overridden t
 skip luajit-test-cleanup/lib/string/metatable.lua#__index metamethod is string library -- debug: debug.getmetatable
 skip luajit-test-cleanup/lib/string/format/num.lua#easily enumerable cases of %a, %A -- fix: %a
 skip luajit-test-cleanup/lib/string/format/num.lua#assorted %a -- fix: %a
-skip luajit-test-cleanup/lib/string/sub.lua#argcheck -- fix: method arg
 skip luajit-test-cleanup/lib/coroutine/yield.lua#assorted -- known: a coroutine cannot yield inside a metamethod (here __add)
 skip luajit-test-cleanup/lib/contents.lua#base -- sandbox: the sandbox has no io, os, loadfile or arg
 skip luajit-test-cleanup/lib/contents.lua#pre-5.2 base -- newproxy: newproxy (luagee has no newproxy: userdata come from the host)

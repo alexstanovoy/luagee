@@ -57,6 +57,18 @@ impl Traceback {
     }
 }
 
+/// Who called the running native.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Caller {
+    /// Another native, or the host: `error`'s level 1 has no position, and the native has no name.
+    Native,
+    /// A Lua function's call instruction, which names the native.
+    Lua,
+    /// A Lua function's tail call: as in LuaJIT, that function's frame counts as gone, so the native's caller is the
+    /// function that called it, and the native has no name.
+    Tail,
+}
+
 /// A native function's arguments: `count` values on the stack from `base`.
 #[derive(Clone, Copy, Debug)]
 pub struct Args {
@@ -232,8 +244,8 @@ pub struct Vm {
     pub(crate) fuel_limit: Limit,
     pub(crate) tick_fuel: u64,
     pub(crate) native_depth: u32,
-    /// Whether the running native was called straight from Lua code (so `error`'s level 1 has a position).
-    pub(crate) lua_caller: bool,
+    /// Who called the running native: what `error`'s levels and argument errors name.
+    pub(crate) caller: Caller,
     pub(crate) yielding: bool,
     pub(crate) gc_threshold: usize,
     pub(crate) gc_epoch: u64,
@@ -332,7 +344,7 @@ impl Vm {
             fuel_limit: Limit::FuelPerCall,
             tick_fuel: limits.fuel_per_tick,
             native_depth: 0,
-            lua_caller: false,
+            caller: Caller::Native,
             yielding: false,
             gc_threshold: MIN_THRESHOLD,
             gc_epoch: 0,
@@ -899,7 +911,7 @@ impl Vm {
         self.stack.truncate(slot + 1 + count);
         let (function, count) = self.callable(slot, count)?;
         match self.heap.functions.get(function.0) {
-            Function::Native { .. } => self.call_native(function, slot, count, false),
+            Function::Native { .. } => self.call_native(function, slot, count, Caller::Native),
             Function::Lua { .. } => {
                 self.enter_native()?;
                 let depth = self.frames.len();
@@ -956,7 +968,7 @@ impl Vm {
         function: FuncId,
         slot: usize,
         count: usize,
-        from_lua: bool,
+        from: Caller,
     ) -> Result<usize, LuaError> {
         let Function::Native {
             function: native, ..
@@ -966,7 +978,7 @@ impl Vm {
         };
         let native = native.clone();
         self.enter_native()?;
-        let caller = std::mem::replace(&mut self.lua_caller, from_lua);
+        let caller = std::mem::replace(&mut self.caller, from);
         self.stack.truncate(slot + 1 + count);
         let args = Args {
             base: slot + 1,
@@ -977,7 +989,7 @@ impl Vm {
             NativeFn::Host(f) => f(self, args),
         };
         self.native_depth -= 1;
-        self.lua_caller = caller;
+        self.caller = caller;
         let results = result?;
         let start = self.stack.len() - results;
         self.stack.copy_within(start.., slot);
@@ -1109,6 +1121,19 @@ impl Vm {
         }
     }
 
+    /// Locates an error a tail-called native raised as LuaJIT does, where that native's frame replaced its caller's:
+    /// at the call in the function below, or nowhere when a native called the frame.
+    fn locate_tail(&mut self, error: LuaError) -> LuaError {
+        let frame = self.frames.last().expect("the frame that tail-called");
+        if frame.boundary || frame.catch.is_some() {
+            return self.locate_nowhere(error);
+        }
+        let frame = self.frames.pop().expect("the frame that tail-called");
+        let located = self.locate(error, None);
+        self.frames.push(frame);
+        located
+    }
+
     /// What a failed protected call returns besides `false`: the error, or what the `xpcall` handler made of it.
     fn handle(&mut self, handler: Value, error: Value) -> Result<Value, LuaError> {
         if handler == Value::Nil {
@@ -1210,7 +1235,7 @@ impl Vm {
                 Some(Catch { handler, want });
             return Ok(Protected::Frame);
         }
-        match self.protect(|vm| vm.call_native(function, slot + 1, count, false))? {
+        match self.protect(|vm| vm.call_native(function, slot + 1, count, Caller::Native))? {
             Ok(_) if self.yielding => {
                 self.yielding = false;
                 let thread = self.threads.get_mut(self.current.0);
@@ -1482,8 +1507,11 @@ impl Vm {
                             }
                             continue;
                         }
-                        let produced =
-                            located!(self, self.call_native(function, slot, count, true), pc);
+                        let produced = located!(
+                            self,
+                            self.call_native(function, slot, count, Caller::Lua),
+                            pc
+                        );
                         if self.yielding {
                             self.yielding = false;
                             let thread = self.threads.get_mut(self.current.0);
@@ -1535,8 +1563,10 @@ impl Vm {
                                 Protected::Done => continue,
                             }
                         }
-                        let produced =
-                            located!(self, self.call_native(function, slot, count, true), pc);
+                        let produced = match self.call_native(function, slot, count, Caller::Tail) {
+                            Ok(produced) => produced,
+                            Err(error) => return Err(self.locate_tail(error)),
+                        };
                         if self.yielding {
                             self.yielding = false;
                             let thread = self.threads.get_mut(self.current.0);
@@ -1765,6 +1795,34 @@ impl Vm {
             },
             Err(e) => e,
         }
+    }
+
+    /// How the Lua call that called the running native names it (`global 'f'`, `method 'm'`, ...), as LuaJIT's
+    /// `lj_debug_funcname` finds it; none when no Lua call instruction called it. A tail-called native took the
+    /// place of the function that called it, so the call that called that function names it.
+    pub(crate) fn call_site(&mut self, args: Args) -> Option<(&'static str, Vec<u8>)> {
+        let (frame, slot) = match self.caller {
+            Caller::Native => return None,
+            Caller::Lua => (self.frames.last()?, args.base - 1),
+            Caller::Tail => {
+                let [.., parent, replaced] = &self.frames[..] else {
+                    return None;
+                };
+                if replaced.boundary || replaced.catch.is_some() {
+                    return None;
+                }
+                (parent, replaced.slot)
+            }
+        };
+        let call = frame.pc.checked_sub(1)?;
+        let Op::Call { func, .. } = frame.proto.code[call] else {
+            return None;
+        };
+        if frame.base + usize::from(func) != slot {
+            return None;
+        }
+        let proto = frame.proto.clone();
+        self.register_origin(&proto, call, func)
     }
 
     /// What `register` holds at `pc`, as LuaJIT's `lj_debug_slotname` finds it: the local active there, else what the
@@ -2393,7 +2451,7 @@ impl Vm {
                 let count = args.len();
                 let (function, count) = self.callable(0, count)?;
                 if let Function::Native { .. } = self.heap.functions.get(function.0) {
-                    let produced = self.call_native(function, 0, count, false)?;
+                    let produced = self.call_native(function, 0, count, Caller::Native)?;
                     if self.yielding {
                         self.yielding = false;
                         return Err(self.error("attempt to yield across a C-call boundary"));

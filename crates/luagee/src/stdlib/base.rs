@@ -3,7 +3,7 @@
 use crate::heap::Function;
 use crate::table::InvalidKey;
 use crate::value::{TableId, Value};
-use crate::vm::{Args, LuaError, Vm};
+use crate::vm::{Args, Caller, LuaError, Vm};
 use crate::{Limit, ModuleName};
 
 /// The most values a library function returns or unpacks at once (Lua 5.1's C stack limit).
@@ -75,10 +75,9 @@ fn assert(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         }
     };
     let error = vm.error(message);
-    Err(if vm.lua_caller {
-        error
-    } else {
-        vm.locate_nowhere(error)
+    Err(match vm.caller {
+        Caller::Native => vm.locate_nowhere(error),
+        Caller::Lua | Caller::Tail => error,
     })
 }
 
@@ -118,8 +117,13 @@ fn gcinfo(vm: &mut Vm, _args: Args) -> Result<usize, LuaError> {
 fn error(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let value = vm.arg(args, 0);
     let level = vm.opt_integer(args, 1, 1)?;
-    // Level 1 is the function that called `error`; when that was a native (`pcall(error, ...)`), it has no position.
-    let level = if vm.lua_caller { level } else { level - 1 };
+    // Level 1 is the function that called `error`; when that was a native (`pcall(error, ...)`), it has no position,
+    // and a tail call's caller is the function below it.
+    let level = match vm.caller {
+        Caller::Lua => level,
+        Caller::Native => level - 1,
+        Caller::Tail => level.saturating_add(1),
+    };
     let value = match value {
         Value::String(s) if level > 0 => {
             let mut text = vm.where_(level as usize);

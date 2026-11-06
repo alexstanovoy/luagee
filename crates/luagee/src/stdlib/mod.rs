@@ -124,20 +124,19 @@ impl Vm {
         Ok(table)
     }
 
-    /// The name a native error message gives the running function.
-    fn native_name(&self, args: Args) -> &'static str {
-        match self.stack.get(args.base.wrapping_sub(1)) {
-            Some(Value::Function(f)) => match self.heap.functions.get(f.0) {
-                Function::Native { name, .. } => name,
-                Function::Lua { .. } => "?",
-            },
-            _ => "?",
-        }
-    }
-
+    /// An error about the running native's argument `i` (from 0), worded as LuaJIT's: the native is named as its
+    /// caller's call names it (`'?'` when no Lua call does), and a method call does not count `self`.
     pub(crate) fn arg_error(&mut self, args: Args, i: usize, message: &str) -> LuaError {
-        let name = self.native_name(args);
-        self.error(format!("bad argument #{} to '{name}' ({message})", i + 1))
+        let site = self.call_site(args);
+        let name = site
+            .as_ref()
+            .map_or_else(|| "?".to_owned(), |(_, n)| crate::shown(n));
+        let message = match site {
+            Some(("method", _)) if i == 0 => format!("calling '{name}' on bad self ({message})"),
+            Some(("method", _)) => format!("bad argument #{i} to '{name}' ({message})"),
+            _ => format!("bad argument #{} to '{name}' ({message})", i + 1),
+        };
+        self.error(message)
     }
 
     fn type_name_of_arg(&self, args: Args, i: usize) -> &'static str {
