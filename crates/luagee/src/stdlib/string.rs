@@ -30,8 +30,7 @@ pub(super) fn open(vm: &mut Vm) -> Result<(), LuaError> {
         ],
     )?;
     let meta = vm.heap.new_table(0, 1)?;
-    vm.heap
-        .raw_set(meta, Value::String(vm.names.index), Value::Table(string))?;
+    vm.raw_set_checked(meta, Value::String(vm.names.index), Value::Table(string))?;
     vm.string_meta = Some(meta);
     Ok(())
 }

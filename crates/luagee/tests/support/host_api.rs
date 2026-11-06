@@ -38,6 +38,16 @@ fn callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
     methods.extend(argument_scope_callbacks());
     methods.extend(raw_table_callbacks());
     methods.extend(counter_callbacks());
+    let first = std::cell::Cell::new(true);
+    methods.push((
+        "exhaust_once",
+        Rc::new(move |vm, _| {
+            if first.replace(false) {
+                vm.charge_fuel(u64::MAX)?;
+            }
+            vm.results(&[Value::Number(71.0)])
+        }),
+    ));
     methods
 }
 
@@ -232,9 +242,16 @@ fn unrooted_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
             let saved = saved.clone();
             Rc::new(move |vm, _| vm.results(&[saved.get()]))
         }),
-        ("error_unrooted", Rc::new(move |_, _| {
-            Err(luagee::LuaError::runtime(saved.get(), luagee::Traceback::default(), false))
-        })),
+        (
+            "error_unrooted",
+            Rc::new(move |_, _| {
+                Err(luagee::LuaError::runtime(
+                    saved.get(),
+                    luagee::Traceback::default(),
+                    false,
+                ))
+            }),
+        ),
     ]
 }
 
@@ -243,46 +260,66 @@ fn argument_scope_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
     vec![
         ("save_args", {
             let saved = saved.clone();
-            Rc::new(move |_, args| { saved.set(Some(args)); Ok(0) })
+            Rc::new(move |_, args| {
+                saved.set(Some(args));
+                Ok(0)
+            })
         }),
-        ("read_args", Rc::new(move |vm, _| {
-            let args = saved.get().ok_or_else(|| vm.error("no saved callback arguments"))?;
-            let value = vm.check_any(args, 0)?;
-            vm.results(&[value])
-        })),
-        ("retain_results", Rc::new(|vm, args| {
-            let values = vm.call(vm.arg(args, 0), &[])?;
-            vm.call(vm.arg(args, 1), &[])?;
-            vm.results(&values)
-        })),
+        (
+            "read_args",
+            Rc::new(move |vm, _| {
+                let args = saved
+                    .get()
+                    .ok_or_else(|| vm.error("no saved callback arguments"))?;
+                let value = vm.check_any(args, 0)?;
+                vm.results(&[value])
+            }),
+        ),
+        (
+            "retain_results",
+            Rc::new(|vm, args| {
+                let values = vm.call(vm.arg(args, 0), &[])?;
+                vm.call(vm.arg(args, 1), &[])?;
+                vm.results(&values)
+            }),
+        ),
     ]
 }
 
 fn raw_table_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
     vec![
-        ("raw_get", Rc::new(|vm, args| {
-            let table = vm.check_table(args, 0)?;
-            let key = vm.check_any(args, 1)?;
-            let value = vm.raw_get(table, key)?;
-            vm.results(&[value])
-        })),
-        ("raw_set", Rc::new(|vm, args| {
-            let table = vm.check_table(args, 0)?;
-            let key = vm.check_any(args, 1)?;
-            let value = vm.check_any(args, 2)?;
-            vm.raw_set(table, key, value)?;
-            vm.results(&[Value::Table(table)])
-        })),
-        ("set_metatable", Rc::new(|vm, args| {
-            let table = vm.check_table(args, 0)?;
-            let metatable = match vm.arg(args, 1) {
-                Value::Nil => None,
-                Value::Table(table) => Some(table),
-                _ => return Err(vm.arg_error(args, 1, "table or nil expected")),
-            };
-            vm.set_metatable(table, metatable)?;
-            vm.results(&[Value::Table(table)])
-        })),
+        (
+            "raw_get",
+            Rc::new(|vm, args| {
+                let table = vm.check_table(args, 0)?;
+                let key = vm.check_any(args, 1)?;
+                let value = vm.raw_get(table, key)?;
+                vm.results(&[value])
+            }),
+        ),
+        (
+            "raw_set",
+            Rc::new(|vm, args| {
+                let table = vm.check_table(args, 0)?;
+                let key = vm.check_any(args, 1)?;
+                let value = vm.check_any(args, 2)?;
+                vm.raw_set(table, key, value)?;
+                vm.results(&[Value::Table(table)])
+            }),
+        ),
+        (
+            "set_metatable",
+            Rc::new(|vm, args| {
+                let table = vm.check_table(args, 0)?;
+                let metatable = match vm.arg(args, 1) {
+                    Value::Nil => None,
+                    Value::Table(table) => Some(table),
+                    _ => return Err(vm.arg_error(args, 1, "table or nil expected")),
+                };
+                vm.set_metatable(table, metatable)?;
+                vm.results(&[Value::Table(table)])
+            }),
+        ),
     ]
 }
 
@@ -290,28 +327,37 @@ struct Counter(u64);
 
 fn counter_callbacks() -> Vec<(&'static str, luagee::HostFunction)> {
     vec![
-        ("counter", Rc::new(|vm, args| {
-            let number = vm.check_integer(args, 0)?.unsigned_abs();
-            let value = vm.userdata(Counter(number), None, 0)?;
-            vm.results(&[value])
-        })),
-        ("counter_value", Rc::new(|vm, args| {
-            let value = vm.arg(args, 0);
-            let Some(counter) = vm.userdata_ref::<Counter>(value) else {
-                return Err(vm.arg_error(args, 0, "counter expected"));
-            };
-            let number = counter.0;
-            vm.results(&[Value::Number(number as f64)])
-        })),
-        ("increment", Rc::new(|vm, args| {
-            let value = vm.arg(args, 0);
-            let Some(counter) = vm.userdata_mut::<Counter>(value) else {
-                return Err(vm.arg_error(args, 0, "counter expected"));
-            };
-            counter.0 = counter.0.saturating_add(1);
-            let number = counter.0;
-            vm.results(&[Value::Number(number as f64)])
-        })),
+        (
+            "counter",
+            Rc::new(|vm, args| {
+                let number = vm.check_integer(args, 0)?.unsigned_abs();
+                let value = vm.userdata(Counter(number), None, 0)?;
+                vm.results(&[value])
+            }),
+        ),
+        (
+            "counter_value",
+            Rc::new(|vm, args| {
+                let value = vm.arg(args, 0);
+                let Some(counter) = vm.userdata_ref::<Counter>(value) else {
+                    return Err(vm.arg_error(args, 0, "counter expected"));
+                };
+                let number = counter.0;
+                vm.results(&[Value::Number(number as f64)])
+            }),
+        ),
+        (
+            "increment",
+            Rc::new(|vm, args| {
+                let value = vm.arg(args, 0);
+                let Some(counter) = vm.userdata_mut::<Counter>(value) else {
+                    return Err(vm.arg_error(args, 0, "counter expected"));
+                };
+                counter.0 = counter.0.saturating_add(1);
+                let number = counter.0;
+                vm.results(&[Value::Number(number as f64)])
+            }),
+        ),
         ("bad_count", Rc::new(|_, _| Ok(1))),
     ]
 }

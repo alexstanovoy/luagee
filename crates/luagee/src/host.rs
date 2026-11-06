@@ -21,7 +21,11 @@ impl Vm {
     #[must_use]
     pub fn bytes(&self, value: Value) -> Option<&[u8]> {
         match value {
-            Value::String(string) => self.heap.strings.try_get(string.0).map(|string| string.bytes.as_ref()),
+            Value::String(string) => self
+                .heap
+                .strings
+                .try_get(string.0)
+                .map(|string| string.bytes.as_ref()),
             _ => None,
         }
     }
@@ -41,16 +45,12 @@ impl Vm {
     }
 
     /// A table write without metamethods, behind the collector's barrier. Nil and NaN keys raise Lua errors.
-    /// Pays a constant lookup cost and for storage actually added, so sequential list writes stay linear.
+    /// Pays for lookup, copying, migration and rebuilding, including compaction without capacity growth.
     pub fn raw_set(&mut self, table: TableId, key: Value, value: Value) -> Result<(), LuaError> {
         self.validate(Value::Table(table))?;
         self.validate(key)?;
         self.validate(value)?;
-        self.charge_fuel(1)?;
-        let before = self.heap.table(table).bytes();
-        self.raw_set_checked(table, key, value)?;
-        let growth = self.heap.table(table).bytes().saturating_sub(before);
-        self.charge_fuel(growth as u64 / 16)
+        self.raw_set_checked(table, key, value)
     }
 
     /// Sets a table's metatable behind the collector's barrier. The host can replace a protected metatable.
@@ -62,7 +62,9 @@ impl Vm {
     ) -> Result<(), LuaError> {
         self.charge_fuel(1)?;
         self.validate(Value::Table(table))?;
-        if let Some(meta) = metatable { self.validate(Value::Table(meta))?; }
+        if let Some(meta) = metatable {
+            self.validate(Value::Table(meta))?;
+        }
         self.heap.set_metatable(table, metatable);
         Ok(())
     }
@@ -78,7 +80,9 @@ impl Vm {
         retained_bytes: usize,
     ) -> Result<Value, LuaError> {
         self.charge_fuel(crate::vm::ALLOCATION_FUEL)?;
-        if let Some(meta) = metatable { self.validate(Value::Table(meta))?; }
+        if let Some(meta) = metatable {
+            self.validate(Value::Table(meta))?;
+        }
         let bytes = std::mem::size_of::<T>()
             .checked_add(retained_bytes)
             .ok_or(LuaError::Limit(Limit::Memory))?;
@@ -148,14 +152,20 @@ impl Vm {
     /// Propagate `LuaError::Limit` unchanged. Results and runtime error values stay rooted until this callback ends.
     /// Pin any value retained beyond the callback. Expired `Args` cannot read another callback's frame.
     pub fn call(&mut self, function: Value, args: &[Value]) -> Result<Vec<Value>, LuaError> {
-        if self.host_depth == 0 { return Err(self.error("Vm::call requires an active host callback; use Lua::call at top level")); }
+        if self.host_depth == 0 {
+            return Err(
+                self.error("Vm::call requires an active host callback; use Lua::call at top level")
+            );
+        }
         let slot = self.stack.len();
         let depth = self.frames.len();
         let top = self.top;
         let result = (|| {
             self.charge_fuel(1 + args.len() as u64 / crate::vm::VALUES_PER_FUEL as u64)?;
             self.validate(function)?;
-            for &value in args { self.validate(value)?; }
+            for &value in args {
+                self.validate(value)?;
+            }
             self.push(function)?;
             for &value in args {
                 self.push(value)?;
@@ -167,7 +177,9 @@ impl Vm {
         let result = result.map_err(|error| self.locate(error, None));
         self.frames.truncate(depth);
         self.top = top;
-        if result.is_err() { self.stack.truncate(slot); }
+        if result.is_err() {
+            self.stack.truncate(slot);
+        }
         if let Err(LuaError::Runtime(thrown)) = &result {
             self.push(thrown.value)?;
         }
@@ -176,12 +188,20 @@ impl Vm {
     }
 
     pub(crate) fn args_are_live(&self, args: Args) -> bool {
-        args.serial != 0 && args.serial == self.active_serial
-            && args.base.checked_add(args.count).is_some_and(|end| end <= self.stack.len())
+        args.serial != 0
+            && args.serial == self.active_serial
+            && args
+                .base
+                .checked_add(args.count)
+                .is_some_and(|end| end <= self.stack.len())
     }
 
     pub(crate) fn check_args(&mut self, args: Args) -> Result<(), LuaError> {
-        if self.args_are_live(args) { Ok(()) } else { Err(self.error("expired callback arguments")) }
+        if self.args_are_live(args) {
+            Ok(())
+        } else {
+            Err(self.error("expired callback arguments"))
+        }
     }
 
     /// Rejects collected or reused handles before they enter a script's stack or heap.
@@ -195,6 +215,10 @@ impl Vm {
             Value::Thread(id) => self.threads.try_get(id.0).is_some(),
             Value::Cell(id) => self.heap.cells.try_get(id.0).is_some(),
         };
-        if live { Ok(()) } else { Err(self.error("stale interpreter handle")) }
+        if live {
+            Ok(())
+        } else {
+            Err(self.error("stale interpreter handle"))
+        }
     }
 }

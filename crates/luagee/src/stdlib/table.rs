@@ -51,7 +51,7 @@ fn extension(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     ) else {
         unreachable!("an extension loader is made with the table library")
     };
-    vm.heap.raw_set(library, field, function)?;
+    vm.raw_set_checked(library, field, function)?;
     vm.results(&[function])
 }
 
@@ -80,7 +80,7 @@ fn get(vm: &Vm, t: TableId, i: i64) -> Value {
 }
 
 fn set(vm: &mut Vm, t: TableId, i: i64, value: Value) -> Result<(), LuaError> {
-    vm.heap.raw_set(t, Value::Number(i as f64), value)
+    vm.raw_set_checked(t, Value::Number(i as f64), value)
 }
 
 fn length(vm: &Vm, t: TableId) -> i64 {

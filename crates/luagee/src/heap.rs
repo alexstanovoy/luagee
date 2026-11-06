@@ -232,7 +232,9 @@ impl<T> Arena<T> {
             } else if let Some(object) = slot.object.take() {
                 self.objects -= 1;
                 // Retire exhausted generations; a stale handle must never become valid again.
-                if slot.generation < u32::MAX { self.free.push(i as u32); }
+                if slot.generation < u32::MAX {
+                    self.free.push(i as u32);
+                }
                 freed(i as u32, object);
             }
         }
@@ -667,16 +669,37 @@ impl Heap {
         }
     }
 
-    /// `t[key] = value` without metamethods; `key` is not nil or NaN (the caller checks).
-    pub(crate) fn raw_set(&mut self, t: TableId, key: Value, value: Value) -> Result<(), LuaError> {
+    /// Clears only an existing entry for failed-operation cleanup, with no allocation or structural changes.
+    pub(crate) fn clear_existing(&mut self, table: TableId, key: Value) {
+        let hash = self.key_hash(key);
+        self.tables.get_mut(table.0).clear_existing(key, hash);
+    }
+
+    /// Writes through one budgeted mutation path: all storage is charged before reserving it.
+    pub(crate) fn raw_set_budgeted(
+        &mut self,
+        t: TableId,
+        key: Value,
+        value: Value,
+        fuel: &mut dyn FnMut(u64) -> Result<(), LuaError>,
+    ) -> Result<(), LuaError> {
         let hash = self.key_hash(key);
         let hasher = self.hasher;
         self.barrier(key);
         self.barrier(value);
-        let grown = self.tables.get_mut(t.0).set(key, hash, value, &hasher);
-        if grown > 0 {
-            self.charge(grown)?;
-        }
-        Ok(())
+        let ceiling = self.ceiling();
+        let memory = &mut self.memory;
+        let mut budget = |work, bytes| {
+            fuel(work)?;
+            let total = memory.saturating_add(bytes);
+            if total > ceiling {
+                return Err(LuaError::Limit(crate::Limit::Memory));
+            }
+            *memory = total;
+            Ok(())
+        };
+        self.tables
+            .get_mut(t.0)
+            .set(key, hash, value, &hasher, &mut budget)
     }
 }

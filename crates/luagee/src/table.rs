@@ -5,6 +5,9 @@
 //! the entries are compacted when the hash part grows.
 
 use crate::heap::KeyHasher;
+use crate::{Limit, LuaError};
+
+pub(crate) type WriteBudget<'a> = dyn FnMut(u64, usize) -> Result<(), LuaError> + 'a;
 use crate::value::{TableId, Value};
 
 #[derive(Clone, Copy, Debug)]
@@ -101,37 +104,39 @@ impl Table {
             .map_or(Value::Nil, |e| self.entries[e].value)
     }
 
-    /// Sets `key` (not nil, not NaN; whose hash is `hash`) to `value`, without metamethods. Returns the bytes the
-    /// table grew by.
-    pub(crate) fn set(&mut self, key: Value, hash: u64, value: Value, hasher: &KeyHasher) -> usize {
-        let before = self.bytes();
+    /// Writes a value, funding copying, migration, rehashing and allocation before structural changes.
+    pub(crate) fn set(
+        &mut self,
+        key: Value,
+        hash: u64,
+        value: Value,
+        hasher: &KeyHasher,
+        budget: &mut WriteBudget<'_>,
+    ) -> Result<(), LuaError> {
         if let Some(i) = self.array_slot(key) {
             if i < self.array.len() {
                 self.array[i] = value;
-                return 0;
+                return Ok(());
             }
             if value == Value::Nil {
                 if let Some(e) = self.find(key, hash) {
                     self.entries[e].value = Value::Nil;
                 }
-                return 0;
+                return Ok(());
             }
-            // Appending: the hash part never holds the key after the array part, so this key is new.
-            self.array.push(value);
-            self.migrate(hasher);
-            return self.bytes().saturating_sub(before);
+            return self.append(value, hasher, budget);
         }
         if let Some(e) = self.find(key, hash) {
             self.entries[e].value = value;
-            return 0;
+            return Ok(());
         }
         if value == Value::Nil {
-            return 0;
+            return Ok(());
         }
-        if (self.entries.len() + 1) * 2 > self.index.len() {
-            self.rehash();
+        if self.entries.len().saturating_add(1).saturating_mul(2) > self.index.len() {
+            self.rehash(budget)?;
         }
-        // -0 and 0 are one key; it is stored as 0.
+        self.reserve_entry(budget)?;
         let key = if key == Value::Number(0.0) {
             Value::Number(0.0)
         } else {
@@ -139,32 +144,140 @@ impl Table {
         };
         self.entries.push(Entry { key, value, hash });
         self.place(self.entries.len() - 1);
-        self.bytes().saturating_sub(before)
+        Ok(())
     }
 
-    /// Moves the keys that now follow the array part from the hash part into it.
-    fn migrate(&mut self, hasher: &KeyHasher) {
-        loop {
-            let next = (self.array.len() + 1) as f64;
-            let key = Value::Number(next);
-            match self.find(key, hasher.number(next)) {
-                Some(e) if self.entries[e].value != Value::Nil => {
-                    self.array.push(self.entries[e].value);
-                    self.entries[e].value = Value::Nil;
-                }
-                _ => return,
-            }
+    /// Rollback of an existing entry cannot allocate, migrate or rebuild, and must work with exhausted fuel.
+    pub(crate) fn clear_existing(&mut self, key: Value, hash: u64) {
+        if let Some(index) = self.array_slot(key)
+            && index < self.array.len()
+        {
+            self.array[index] = Value::Nil;
+        } else if let Some(index) = self.find(key, hash) {
+            self.entries[index].value = Value::Nil;
         }
     }
 
-    fn rehash(&mut self) {
+    fn reserve_entry(&mut self, budget: &mut WriteBudget<'_>) -> Result<(), LuaError> {
+        if self.entries.len() < self.entries.capacity() {
+            return Ok(());
+        }
+        let growth = self.entries.capacity().max(4);
+        let bytes = growth
+            .checked_mul(40)
+            .ok_or(LuaError::Limit(Limit::Memory))?;
+        budget(1 + self.entries.len() as u64 / 8, bytes)?;
+        self.entries.reserve_exact(growth);
+        Ok(())
+    }
+
+    fn reserve_array(
+        &mut self,
+        required: usize,
+        budget: &mut WriteBudget<'_>,
+    ) -> Result<(), LuaError> {
+        if required <= self.array.capacity() {
+            return Ok(());
+        }
+        let doubled = self
+            .array
+            .capacity()
+            .checked_mul(2)
+            .ok_or(LuaError::Limit(Limit::Memory))?;
+        let rounded = required
+            .checked_next_power_of_two()
+            .ok_or(LuaError::Limit(Limit::Memory))?;
+        let capacity = doubled.max(rounded).max(4);
+        let bytes = (capacity - self.array.capacity())
+            .checked_mul(16)
+            .ok_or(LuaError::Limit(Limit::Memory))?;
+        budget(1 + self.array.len() as u64 / 8, bytes)?;
+        self.array.reserve_exact(capacity - self.array.len());
+        Ok(())
+    }
+
+    /// Plans all migration before mutation: fuel exhaustion cannot leave a partial contiguous array prefix.
+    fn migration_count(
+        &self,
+        hasher: &KeyHasher,
+        budget: &mut WriteBudget<'_>,
+    ) -> Result<usize, LuaError> {
+        for count in 0..=self.entries.len() {
+            budget(1, 0)?;
+            let next = self
+                .array
+                .len()
+                .checked_add(2)
+                .and_then(|n| n.checked_add(count))
+                .ok_or(LuaError::Limit(Limit::Memory))?;
+            match self.find(Value::Number(next as f64), hasher.number(next as f64)) {
+                Some(e) if self.entries[e].value != Value::Nil => {}
+                _ => return Ok(count),
+            }
+        }
+        Err(LuaError::Limit(Limit::Memory))
+    }
+
+    fn append(
+        &mut self,
+        value: Value,
+        hasher: &KeyHasher,
+        budget: &mut WriteBudget<'_>,
+    ) -> Result<(), LuaError> {
+        let count = self.migration_count(hasher, budget)?;
+        let required = self
+            .array
+            .len()
+            .checked_add(1)
+            .and_then(|n| n.checked_add(count))
+            .ok_or(LuaError::Limit(Limit::Memory))?;
+        self.reserve_array(required, budget)?;
+        self.array.push(value);
+        for _ in 0..count {
+            let next = (self.array.len() + 1) as f64;
+            let entry = self
+                .find(Value::Number(next), hasher.number(next))
+                .expect("a planned live migration");
+            self.array.push(self.entries[entry].value);
+            self.entries[entry].value = Value::Nil;
+        }
+        Ok(())
+    }
+
+    fn rehash(&mut self, budget: &mut WriteBudget<'_>) -> Result<(), LuaError> {
+        budget(1 + self.entries.len() as u64 / 8, 0)?;
+        let live = self
+            .entries
+            .iter()
+            .filter(|e| e.value != Value::Nil)
+            .count();
+        let size = live
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(2))
+            .and_then(usize::checked_next_power_of_two)
+            .ok_or(LuaError::Limit(Limit::Memory))?
+            .max(4);
+        let growth = size.saturating_sub(self.index.capacity());
+        let bytes = growth
+            .checked_mul(4)
+            .ok_or(LuaError::Limit(Limit::Memory))?;
+        let work = self
+            .entries
+            .len()
+            .saturating_add(size)
+            .saturating_add(self.index.len())
+            .saturating_add(live);
+        budget(1 + work as u64 / 8, bytes)?;
+        if growth > 0 {
+            self.index.reserve_exact(size - self.index.len());
+        }
         self.entries.retain(|e| e.value != Value::Nil);
-        let size = ((self.entries.len() + 1) * 2).next_power_of_two().max(4);
         self.index.clear();
         self.index.resize(size, 0);
         for e in 0..self.entries.len() {
             self.place(e);
         }
+        Ok(())
     }
 
     fn place(&mut self, entry: usize) {

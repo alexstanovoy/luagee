@@ -189,10 +189,12 @@ that point. `LuaError` and argument-error constructors must be used or propagate
 
 ### Raw-write fuel (unreleased fix)
 
-Raw table writes charge one lookup plus storage growth, rather than the whole
-existing table on every write. Building a sequential list has linear fuel cost;
-replacing an existing element has constant cost. The interpreter still enforces
-memory accounting and collector barriers on every write.
+Table writes pay for lookup, copying, migration and rebuilding work, rather than
+the whole existing table on every write. Compaction pays even when capacity stays
+the same. Sequential list construction and hash-to-array migration have linear
+fuel cost; replacing an existing element has constant cost. The interpreter uses
+one mutation path and charges storage before reservation. Rebuild and migration
+budgets are checked before structural changes, so exhaustion leaves valid tables.
 
 ### Typed mutation and host stack use (unreleased fix)
 

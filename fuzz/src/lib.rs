@@ -162,7 +162,7 @@ pub const KEYS: Keys = Keys {
 /// script left under way may take a call's fuel or two first).
 pub fn check_run(source: &[u8]) {
     let (lua, _) = interpreter(KEYS);
-    check_interpreter(lua, source);
+    check_interpreter(lua, source, 1);
 }
 
 /// Exercises the external callback surface under both collection schedules, selected by input bytes.
@@ -174,10 +174,10 @@ pub fn check_host(source: &[u8]) {
         Some(2) => luagee::GcStress::Incremental,
         _ => luagee::GcStress::Off,
     });
-    check_interpreter(lua, source);
+    check_interpreter(lua, source, 2);
 }
 
-fn check_interpreter(mut lua: Lua, source: &[u8]) {
+fn check_interpreter(mut lua: Lua, source: &[u8], repetitions: usize) {
     // Loaded first: the input may use up the source limits, which last the interpreter's life.
     let after = lua
         .load(
@@ -186,7 +186,14 @@ fn check_interpreter(mut lua: Lua, source: &[u8]) {
         )
         .expect("compiles");
     lua.pin(after).expect("root fits");
-    let (_ended, peak) = peak_while(|| lua.exec("fuzz", source));
+    let (_, peak) = peak_while(|| {
+        for attempt in 0..repetitions {
+            if attempt > 0 {
+                lua.begin_tick();
+            }
+            let _ = lua.exec("fuzz", source);
+        }
+    });
     let ceiling = LIMITS.memory + LIMITS.memory / 4;
     assert!(
         lua.memory() <= ceiling,

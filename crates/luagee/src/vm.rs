@@ -438,11 +438,15 @@ impl Vm {
     /// Spends fuel for work a native does (bytes copied, pattern steps).
     #[inline]
     pub fn charge_fuel(&mut self, amount: u64) -> Result<(), LuaError> {
-        if self.fuel < amount {
-            self.fuel = 0;
-            return Err(LuaError::Limit(self.fuel_limit));
+        Self::spend_fuel(&mut self.fuel, self.fuel_limit, amount)
+    }
+
+    fn spend_fuel(fuel: &mut u64, limit: Limit, amount: u64) -> Result<(), LuaError> {
+        if *fuel < amount {
+            *fuel = 0;
+            return Err(LuaError::Limit(limit));
         }
-        self.fuel -= amount;
+        *fuel -= amount;
         Ok(())
     }
 
@@ -728,7 +732,14 @@ impl Vm {
         match key {
             Value::Nil => Err(self.error("table index is nil")),
             Value::Number(n) if n.is_nan() => Err(self.error("table index is NaN")),
-            _ => self.heap.raw_set(t, key, value),
+            _ => {
+                self.charge_fuel(1)?;
+                let limit = self.fuel_limit;
+                let fuel = &mut self.fuel;
+                self.heap.raw_set_budgeted(t, key, value, &mut |work| {
+                    Self::spend_fuel(fuel, limit, work)
+                })
+            }
         }
     }
 
@@ -1201,13 +1212,17 @@ impl Vm {
             unreachable!("a native")
         };
         let native = native.clone();
-        let serial = self.next_serial.checked_add(1)
+        let serial = self
+            .next_serial
+            .checked_add(1)
             .ok_or_else(|| self.error("callback invocation limit exceeded"))?;
         self.next_serial = serial;
         self.enter_native()?;
         let previous_serial = std::mem::replace(&mut self.active_serial, serial);
         let previous_host_depth = self.host_depth;
-        if matches!(native, NativeFn::Host(_)) { self.host_depth += 1; }
+        if matches!(native, NativeFn::Host(_)) {
+            self.host_depth += 1;
+        }
         let caller = std::mem::replace(&mut self.call_site, site);
         self.stack.truncate(slot + 1 + count);
         let args = Args {
@@ -1221,9 +1236,9 @@ impl Vm {
             NativeFn::Host(f) => f(self, args),
         };
         let result = match result {
-            Err(LuaError::Runtime(thrown)) if matches!(native, NativeFn::Host(_)) => {
-                self.validate(thrown.value).and(Err(LuaError::Runtime(thrown)))
-            }
+            Err(LuaError::Runtime(thrown)) if matches!(native, NativeFn::Host(_)) => self
+                .validate(thrown.value)
+                .and(Err(LuaError::Runtime(thrown))),
             other => other,
         };
         self.native_depth -= 1;
@@ -1589,7 +1604,7 @@ impl Vm {
                         let key = proto.constants[k as usize];
                         let value = self.stack[base + usize::from(b)];
                         if self.heap.table(env).metatable.is_none() {
-                            located!(self, self.heap.raw_set(env, key, value), pc);
+                            located!(self, self.raw_set_checked(env, key, value), pc);
                         } else {
                             save_pc!(self, pc);
                             located!(self, self.set_index(Value::Table(env), key, value), pc);
@@ -1939,7 +1954,7 @@ impl Vm {
                         for i in 0..count {
                             let key = Value::Number((start as usize + i) as f64);
                             let value = self.stack[t + 1 + i];
-                            located!(self, self.heap.raw_set(id, key, value), pc);
+                            located!(self, self.raw_set_checked(id, key, value), pc);
                         }
                         if self.stack.len() < frame_top {
                             located!(self, self.set_stack(frame_top), pc);

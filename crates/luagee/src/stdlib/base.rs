@@ -708,8 +708,7 @@ fn require(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     }
     let preloaded = preloader(vm, args, name)?;
     // While a module runs, its entry is a sentinel (the loaded table itself), so a cycle is an error.
-    vm.heap
-        .raw_set(vm.loaded, Value::String(name), Value::Table(vm.loaded))?;
+    vm.raw_set_checked(vm.loaded, Value::String(name), Value::Table(vm.loaded))?;
     let result = match preloaded {
         Some(loader) => vm.call_meta(loader, &[Value::String(name)]),
         None => {
@@ -734,8 +733,7 @@ fn require(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let result = match result {
         Ok(result) => result,
         Err(e) => {
-            vm.heap
-                .raw_set(vm.loaded, Value::String(name), Value::Nil)?;
+            vm.heap.clear_existing(vm.loaded, Value::String(name));
             return Err(e);
         }
     };
@@ -747,7 +745,10 @@ fn require(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     } else {
         Value::Boolean(true)
     };
-    vm.heap.raw_set(vm.loaded, Value::String(name), value)?;
+    if let Err(error) = vm.raw_set_checked(vm.loaded, Value::String(name), value) {
+        vm.heap.clear_existing(vm.loaded, Value::String(name));
+        return Err(error);
+    }
     vm.results(&[value])
 }
 
@@ -768,7 +769,7 @@ fn module(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                     Value::Table(t) => t,
                     Value::Nil => {
                         let t = vm.heap.new_table(0, 4)?;
-                        vm.heap.raw_set(table, key, Value::Table(t))?;
+                        vm.raw_set_checked(table, key, Value::Table(t))?;
                         t
                     }
                     _ => {
@@ -779,8 +780,7 @@ fn module(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                     }
                 };
             }
-            vm.heap
-                .raw_set(vm.loaded, Value::String(name), Value::Table(table))?;
+            vm.raw_set_checked(vm.loaded, Value::String(name), Value::Table(table))?;
             table
         }
     };
@@ -816,7 +816,6 @@ fn seeall(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         }
     };
     let globals = vm.globals;
-    vm.heap
-        .raw_set(meta, Value::String(vm.names.index), Value::Table(globals))?;
+    vm.raw_set_checked(meta, Value::String(vm.names.index), Value::Table(globals))?;
     Ok(0)
 }

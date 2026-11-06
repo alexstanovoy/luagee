@@ -34,6 +34,8 @@ pub fn contracts() {
     stale_handles_are_rejected_after_collection_and_slot_reuse();
     script_owned_tables_support_raw_operations_with_script_keys();
     typed_callback_payloads_and_invalid_result_counts_are_checked();
+    callback_hash_churn_and_migration_preserve_table_state();
+    callback_fuzzer_fixture_retries_modules_on_the_next_tick();
 }
 
 #[cfg_attr(test, test)]
@@ -335,27 +337,48 @@ fn stale_handles_are_rejected_after_collection_and_slot_reuse() {
         assert_eq!(lua.vm().bytes(stale_string), None);
         assert_eq!(lua.bytes(stale_string), None);
         assert!(lua.pin(stale_object).is_err());
-        assert!(lua.vm().raw_get(stale_table, luagee::Value::Number(1.0)).is_err());
-        assert!(lua.vm().raw_set(stale_table, luagee::Value::Number(1.0), replacement).is_err());
+        assert!(
+            lua.vm()
+                .raw_get(stale_table, luagee::Value::Number(1.0))
+                .is_err()
+        );
+        assert!(
+            lua.vm()
+                .raw_set(stale_table, luagee::Value::Number(1.0), replacement)
+                .is_err()
+        );
         assert!(lua.vm().set_metatable(stale_table, None).is_err());
         assert!(lua.set_global("stale", stale_object).is_err());
         let live = lua.vm().new_table().expect("live table");
         assert!(lua.vm().raw_get(live, stale_string).is_err());
-        assert!(lua.vm().raw_set(live, luagee::Value::Number(1.0), stale_object).is_err());
+        assert!(
+            lua.vm()
+                .raw_set(live, luagee::Value::Number(1.0), stale_object)
+                .is_err()
+        );
         assert!(lua.vm().set_metatable(live, Some(stale_table)).is_err());
         assert!(lua.call(stale_function, &[]).is_err());
         assert_eq!(lua.vm().userdata_ref::<u64>(replacement), Some(&29));
         lua.begin_tick();
-        lua.exec("stale_callback", include_bytes!("host_api/stale_handles.lua")).expect("stale callback handles rejected");
+        lua.exec(
+            "stale_callback",
+            include_bytes!("host_api/stale_handles.lua"),
+        )
+        .expect("stale callback handles rejected");
     }
 }
 
 #[cfg_attr(test, test)]
 fn script_owned_tables_support_raw_operations_with_script_keys() {
     for stress in [GcStress::Off, GcStress::Incremental] {
-        let mut lua = interpreter(Limits { fuel_per_call: 5_000_000, fuel_per_tick: 5_000_000, ..Limits::DEFAULT });
+        let mut lua = interpreter(Limits {
+            fuel_per_call: 5_000_000,
+            fuel_per_tick: 5_000_000,
+            ..Limits::DEFAULT
+        });
         lua.set_gc_stress(stress);
-        lua.exec("raw_tables", include_bytes!("host_api/raw_tables.lua")).expect("raw API accepts script-owned tables and validates keys");
+        lua.exec("raw_tables", include_bytes!("host_api/raw_tables.lua"))
+            .expect("raw API accepts script-owned tables and validates keys");
     }
 }
 
@@ -364,6 +387,37 @@ fn typed_callback_payloads_and_invalid_result_counts_are_checked() {
     for stress in [GcStress::Full, GcStress::Incremental] {
         let mut lua = interpreter(Limits::DEFAULT);
         lua.set_gc_stress(stress);
-        lua.exec("typed_objects", include_bytes!("host_api/typed_objects.lua")).expect("payload types and result counts checked");
+        lua.exec(
+            "typed_objects",
+            include_bytes!("host_api/typed_objects.lua"),
+        )
+        .expect("payload types and result counts checked");
+    }
+}
+
+#[cfg_attr(test, test)]
+fn callback_hash_churn_and_migration_preserve_table_state() {
+    let mut lua = interpreter(Limits {
+        fuel_per_call: 5_000_000,
+        fuel_per_tick: 5_000_000,
+        ..Limits::DEFAULT
+    });
+    lua.exec("hash_churn", include_bytes!("host_api/hash_churn.lua"))
+        .expect("budgeted compaction and migration");
+}
+
+#[cfg_attr(test, test)]
+fn callback_fuzzer_fixture_retries_modules_on_the_next_tick() {
+    for stress in [GcStress::Full, GcStress::Incremental] {
+        let mut lua = interpreter(Limits::DEFAULT);
+        lua.set_gc_stress(stress);
+        let ended = lua.exec("first_attempt", include_bytes!("host_api/retry_module.lua"));
+        assert!(
+            matches!(ended, Err(Error::Limit(Limit::FuelPerCall))),
+            "{ended:?}"
+        );
+        lua.begin_tick();
+        lua.exec("retry_attempt", include_bytes!("host_api/retry_module.lua"))
+            .expect("module retries after the limit");
     }
 }

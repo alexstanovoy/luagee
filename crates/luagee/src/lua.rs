@@ -70,7 +70,9 @@ impl Lua {
     /// An interpreter with these limits and keys.
     pub fn new(limits: Limits, keys: Keys) -> Result<Lua, Error> {
         let mut vm = Vm::new(limits, keys).map_err(|e| to_error(&mut None, e))?;
+        let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
         crate::stdlib::open(&mut vm).map_err(|e| to_error(&mut None, e))?;
+        vm.fuel = fuel;
         Ok(Lua { vm })
     }
 
@@ -134,7 +136,9 @@ impl Lua {
         let result = (|| {
             vm.charge_fuel(1 + args.len() as u64 / crate::vm::VALUES_PER_FUEL as u64)?;
             vm.validate(function)?;
-            for &value in args { vm.validate(value)?; }
+            for &value in args {
+                vm.validate(value)?;
+            }
             vm.push(function)?;
             for &arg in args {
                 vm.push(arg)?;
@@ -204,8 +208,12 @@ impl Lua {
     /// `globals[name] = value`, without metamethods.
     pub fn set_global(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let vm = &mut self.vm;
-        vm.validate(value).and_then(|()| vm.set_field(vm.globals, name, value))
-            .map_err(|e| to_error(&mut Some(vm), e))
+        let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
+        let result = vm
+            .validate(value)
+            .and_then(|()| vm.set_field(vm.globals, name, value));
+        vm.fuel = fuel;
+        result.map_err(|e| to_error(&mut Some(vm), e))
     }
 
     /// A function value calling the host.
@@ -230,7 +238,10 @@ impl Lua {
         metatable: Option<TableId>,
     ) -> Result<Value, Error> {
         let vm = &mut self.vm;
-        if let Some(meta) = metatable { vm.validate(Value::Table(meta)).map_err(|e| to_error(&mut Some(vm), e))?; }
+        if let Some(meta) = metatable {
+            vm.validate(Value::Table(meta))
+                .map_err(|e| to_error(&mut Some(vm), e))?;
+        }
         let id = vm
             .heap
             .new_userdata(data, metatable)

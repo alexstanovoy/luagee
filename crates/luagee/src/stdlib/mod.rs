@@ -101,7 +101,7 @@ impl Vm {
         value: Value,
     ) -> Result<(), LuaError> {
         let key = Value::String(self.heap.intern(name.as_bytes())?);
-        self.heap.raw_set(table, key, value)
+        self.raw_set_checked(table, key, value)
     }
 
     pub(crate) fn get_field(&mut self, table: TableId, name: &str) -> Result<Value, LuaError> {
@@ -129,7 +129,9 @@ impl Vm {
     /// object is argument 0: a bad one is "calling 'name' on bad self".
     #[must_use = "return or propagate the argument error"]
     pub fn arg_error(&mut self, args: Args, i: usize, message: &str) -> LuaError {
-        if !self.args_are_live(args) { return self.error("expired callback arguments"); }
+        if !self.args_are_live(args) {
+            return self.error("expired callback arguments");
+        }
         let (kind, name) = match self.callee() {
             Some((kind, name)) => (kind, crate::shown(&name)),
             None => ("", "?".to_owned()),
@@ -226,7 +228,9 @@ impl Vm {
     /// Pushes results and returns their count.
     pub fn results(&mut self, values: &[Value]) -> Result<usize, LuaError> {
         self.charge_fuel((values.len() / crate::vm::VALUES_PER_FUEL) as u64)?;
-        for &value in values { self.validate(value)?; }
+        for &value in values {
+            self.validate(value)?;
+        }
         for &value in values {
             self.push(value)?;
         }
@@ -253,7 +257,9 @@ impl Vm {
             Value::String(_) => return Ok(value),
             Value::Table(t) => format!("table: 0x{:08x}", t.0 as u32).into_bytes(),
             Value::Function(f) => match self.heap.functions.get(f.0) {
-                Function::Native { .. } => format!("function: builtin: 0x{:08x}", f.0 as u32).into_bytes(),
+                Function::Native { .. } => {
+                    format!("function: builtin: 0x{:08x}", f.0 as u32).into_bytes()
+                }
                 Function::Lua { .. } => format!("function: 0x{:08x}", f.0 as u32).into_bytes(),
             },
             Value::Userdata(u) => format!("userdata: 0x{:08x}", u.0 as u32).into_bytes(),

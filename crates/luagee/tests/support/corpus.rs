@@ -88,14 +88,14 @@ impl Kind {
         let fail = |what: String| Err(format!("{}: {what}", script.display()));
         let mut lua = interpreter(self.limits(), stress, loader);
         if self == Kind::Fuzz {
-            if script
+            let host = script
                 .parent()
                 .and_then(Path::file_name)
-                .is_some_and(|n| n == "host_api")
-            {
+                .is_some_and(|n| n == "host_api");
+            if host {
                 host_api::install(&mut lua.lua).map_err(|e| e.to_string())?;
             }
-            return match survives(&mut lua.lua, &source) {
+            return match survives(&mut lua.lua, &source, if host { 2 } else { 1 }) {
                 Ok(()) => Ok(()),
                 Err(what) => fail(what),
             };
@@ -187,7 +187,7 @@ fn interpreter(limits: Limits, stress: GcStress, loader: impl Loader + 'static) 
 /// outcome of the input is fine; the interpreter's count of its memory stays near the cap; and the interpreter still
 /// runs a function after it (a collection the script left may take a few ticks' fuel, and what the script left alive
 /// may fill the cap, which is the cap working), and still collects.
-pub fn survives(lua: &mut Lua, input: &[u8]) -> Result<(), String> {
+pub fn survives(lua: &mut Lua, input: &[u8], repetitions: usize) -> Result<(), String> {
     // Loaded first: the input may use up the source limits, which last the interpreter's life.
     let after = lua
         .load(
@@ -196,7 +196,12 @@ pub fn survives(lua: &mut Lua, input: &[u8]) -> Result<(), String> {
         )
         .map_err(|e| format!("the probe does not compile: {e}"))?;
     lua.pin(after).expect("root fits");
-    let _ = lua.exec("fuzz", input);
+    for attempt in 0..repetitions {
+        if attempt > 0 {
+            lua.begin_tick();
+        }
+        let _ = lua.exec("fuzz", input);
+    }
     let ceiling = FUZZ_LIMITS.memory + FUZZ_LIMITS.memory / 4;
     if lua.memory() > ceiling {
         return Err(format!(
