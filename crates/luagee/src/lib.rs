@@ -31,7 +31,7 @@
 //! LuaJIT 2.1's, checked against LuaJIT on a conformance corpus (`tests/conformance`) and by random
 //! programs (`tools/lua_diff`): its numbers (literals and `tonumber` with `0x` floats, `0b`, `inf`, `nan`; `%.14g`
 //! printing), its library extensions (`goto`, `bit`, `string.rep`'s separator, 64-bit `%d`/`%x`, `table.getn`,
-//! `foreach`, `maxn`, `coroutine.isyieldable`), its error messages, and a coroutine yielding through `pcall`. Where
+//! `foreach`, `maxn`, `table.new`, `table.clear`, `coroutine.isyieldable`), its error messages, and a coroutine yielding through `pcall`. Where
 //! it differs: a coroutine cannot yield inside a metamethod or a library callback (a `table.sort` comparator, a
 //! `gsub` function), as in Lua 5.1; `__mode` and `__gc` have no effect (weak tables hold their entries); and the
 //! syntax that only recent LuaJIT builds accept (`//`, `&`, `<<`, `!=`, `+=`) does not parse.

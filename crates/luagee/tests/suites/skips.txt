@@ -107,9 +107,6 @@ omit luajit-test-cleanup/lib/contents.lua#5.2 math -- lua52: Lua 5.2 only
 omit luajit-test-cleanup/lib/contents.lua#5.2 string -- lua52: Lua 5.2 only
 omit luajit-test-cleanup/lib/contents.lua#5.2 table -- lua52: Lua 5.2 only
 omit luajit-test-cleanup/lib/contents.lua#5.2 package -- lua52: Lua 5.2 only
-omit luajit-test-cleanup/lib/table/new.lua -- missing: table.new, the extension module LuaJIT 2.1 adds (require "table.new")
-omit luajit-test-cleanup/lib/table/remove.lua#TSETR hash part -- missing: table.new, the extension module LuaJIT 2.1 adds (require "table.new")
-omit luajit-test-cleanup/lib/table/remove.lua#TSETR write barrier -- missing: table.new, the extension module LuaJIT 2.1 adds (require "table.new")
 omit luajit-test-cleanup/lib/string/dump.lua -- dump: string.dump
 skip luajit-test-cleanup/lang/meta/call.lua#userdata -- newproxy: newproxy (luagee has no newproxy: userdata come from the host)
 skip luajit-test-cleanup/lang/meta/call.lua#number -- debug: debug.setmetatable on numbers

@@ -5,7 +5,7 @@ use crate::value::{TableId, Value};
 use crate::vm::{Args, LuaError, Vm};
 
 pub(super) fn open(vm: &mut Vm) -> Result<(), LuaError> {
-    vm.library(
+    let library = vm.library(
         "table",
         &[
             ("concat", concat),
@@ -18,7 +18,61 @@ pub(super) fn open(vm: &mut Vm) -> Result<(), LuaError> {
             ("sort", sort),
         ],
     )?;
+    // LuaJIT 2.1's extension modules: `require "table.new"` and `require "table.clear"` give the function and put it
+    // in `table`, through package.preload as in LuaJIT.
+    let Value::Table(package) = vm.get_field(vm.loaded, "package")? else {
+        unreachable!("the base library opens package first")
+    };
+    let Value::Table(preload) = vm.get_field(package, "preload")? else {
+        unreachable!("package has its preload table")
+    };
+    for (module, name, f) in [
+        ("table.new", "new", new as super::Native),
+        ("table.clear", "clear", clear),
+    ] {
+        let function = vm.native(name, f, Vec::new())?;
+        let field = vm.new_string(name.as_bytes())?;
+        let loader = vm.native(
+            module,
+            extension,
+            vec![Value::Table(library), field, function],
+        )?;
+        vm.set_field(preload, module, loader)?;
+    }
     Ok(())
+}
+
+/// The loader of an extension module: puts its function in `table` and returns it.
+fn extension(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
+    let (Value::Table(library), field, function) = (
+        vm.native_upvalue(args, 0),
+        vm.native_upvalue(args, 1),
+        vm.native_upvalue(args, 2),
+    ) else {
+        unreachable!("an extension loader is made with the table library")
+    };
+    vm.heap.raw_set(library, field, function)?;
+    vm.results(&[function])
+}
+
+/// The most array items or other keys `table.new` reserves room for: its sizes are hints, and a script must not make
+/// the interpreter reserve storage it never fills.
+const NEW_HINT: i64 = 1 << 12;
+
+/// `table.new(narray, nhash)`: an empty table, with room reserved as the hints ask (up to a bound).
+fn new(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
+    let array = vm.check_integer(args, 0)?.clamp(0, NEW_HINT) as usize;
+    let hash = vm.check_integer(args, 1)?.clamp(0, NEW_HINT) as usize;
+    let table = vm.heap.new_table(array, hash)?;
+    vm.results(&[Value::Table(table)])
+}
+
+/// `table.clear(t)`: removes every key, keeping the table's storage.
+fn clear(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
+    let t = vm.check_table(args, 0)?;
+    vm.charge_fuel(vm.heap.table(t).slots() as u64 / crate::vm::VALUES_PER_FUEL as u64)?;
+    vm.heap.tables.get_mut(t.0).clear();
+    Ok(0)
 }
 
 fn get(vm: &Vm, t: TableId, i: i64) -> Value {

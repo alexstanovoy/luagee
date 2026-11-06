@@ -531,13 +531,13 @@ fn the_luau_conformance_scripts_in_lua_5_1_pass() {
 const LUAJIT: &str = "luajit-test-cleanup";
 
 /// What LuaJIT's `test.lua` finds out about the interpreter, as luagee answers: Lua 5.1 with LuaJIT 2.1's `bit`,
-/// `goto` and hexadecimal floats. `jit` and the optimisation flags stand for the trees a JIT build runs: they check
+/// `table.new`, `goto` and hexadecimal floats. `jit` and the optimisation flags stand for the trees a JIT build runs: they check
 /// results only, which an interpreter gives as well (LuaJIT with `-joff` passes them).
 fn tag(name: &str) -> Option<f64> {
     match name {
         "lua" => Some(5.1),
         "luajit" => Some(2.1),
-        "bit" | "goto" | "hexfloat" => Some(1.0),
+        "bit" | "table.new" | "goto" | "hexfloat" => Some(1.0),
         "jit" | "dse" | "fold" | "fwd" | "fuse" | "loop" | "sink" => Some(1.0),
         _ => None,
     }

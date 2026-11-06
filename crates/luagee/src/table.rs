@@ -225,6 +225,20 @@ impl Table {
         }
     }
 
+    /// Removes every key, keeping the storage (`table.clear`): as assigning nil to each, so a `next` loop over the
+    /// table goes on.
+    pub(crate) fn clear(&mut self) {
+        self.array.fill(Value::Nil);
+        for entry in &mut self.entries {
+            entry.value = Value::Nil;
+        }
+    }
+
+    /// How many slots the table holds, set or not: the work of clearing it.
+    pub(crate) fn slots(&self) -> usize {
+        self.array.len() + self.entries.len()
+    }
+
     /// The array part's values, for `unpack`, `concat` and the collector.
     pub(crate) fn array(&self) -> &[Value] {
         &self.array

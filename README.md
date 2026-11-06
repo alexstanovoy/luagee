@@ -21,8 +21,8 @@ Lua 5.1 with the extensions LuaJIT 2.1 adds to it, as a long-lived LuaJIT 2.1 bu
 - 5.1's function environments: `setfenv`, `getfenv`, `module` with `package.seeall`;
 - LuaJIT's library behaviour where it differs from PUC Lua 5.1: `tostring` and `%g` print `nan` for every NaN, `%d`
   and `%x` format 64-bit integers, `string.rep` takes a separator, `tonumber` reads `inf`/`nan`/`0b...`,
-  `table.getn`, `foreach`, `foreachi`, `maxn`, `coroutine.isyieldable`, and a coroutine may yield through `pcall`
-  and `xpcall`;
+  `table.getn`, `foreach`, `foreachi`, `maxn`, `table.new` and `table.clear` (from `require`), `coroutine.isyieldable`,
+  and a coroutine may yield through `pcall` and `xpcall`;
 - LuaJIT's wording of error messages, including the names of the variables involved (`attempt to call global 'f'
   (a nil value)`).
 
