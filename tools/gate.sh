@@ -5,7 +5,8 @@
 #
 # Steps: ignored-audit (every #[ignore]d test has a step that runs it), fuzz-check (the fuzz targets compile), clippy
 # (all targets and features, -D warnings), test (profile test-release: unit tests, the conformance and hostile corpora,
-# the borrowed suites, the sandbox's bounds), wasm (the crate builds for wasm32-unknown-unknown without features),
+# the borrowed suites, the sandbox's bounds), wasm (the crate builds for wasm32-unknown-unknown without features,
+# warning-free),
 # fuzz-smoke (every fuzz target at once, GATE_FUZZ_SECONDS each, seeded from the corpora; the differential target
 # against the reference LuaJIT that tools/ref/build.sh builds from pinned sources), deny, then fmt (last: it changes
 # no code).
@@ -41,7 +42,8 @@ step ignored-audit tools/ignored_audit.sh
 step fuzz-check fuzz/fuzz.sh check
 step clippy cargo clippy --all-targets --all-features -- -D warnings
 step test cargo test --profile test-release --all-features
-step wasm cargo check -p luagee --no-default-features --target wasm32-unknown-unknown
+# A build, not a check: some lints (a shift past 32 bits) fire only in code generation.
+step wasm env RUSTFLAGS="-D warnings" cargo build --release -p luagee --no-default-features --target wasm32-unknown-unknown
 step fuzz-smoke fuzz/fuzz.sh smoke "${GATE_FUZZ_SECONDS:-20}"
 step deny cargo deny check
 step fmt cargo fmt --check

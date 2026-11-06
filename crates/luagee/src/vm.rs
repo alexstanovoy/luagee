@@ -25,7 +25,6 @@ const SLOT_BYTES: usize = 16;
 const FRAME_BYTES: usize = 64;
 /// The bytes a coroutine is counted as, beyond its stack.
 const THREAD_BYTES: usize = 256;
-#[cfg(target_pointer_width = "64")]
 const _: () = assert!(crate::heap::slot_size::<ThreadState>() <= THREAD_BYTES);
 
 /// Why a call ended early, inside the interpreter: what host functions return to raise an error.

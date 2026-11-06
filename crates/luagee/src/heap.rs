@@ -445,7 +445,7 @@ impl Heap {
             "the string index stays at most half full"
         );
         assert!(
-            size <= 1 << 32,
+            size as u64 <= 1 << 32,
             "the string index is addressed by 32 bits of hash"
         );
         let old = std::mem::replace(&mut self.intern, vec![0; size]);
