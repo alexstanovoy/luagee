@@ -1544,15 +1544,17 @@ impl Vm {
                         let frame = self.frames.last().expect("a running frame");
                         let (frame_slot, want, boundary) = (frame.slot, frame.want, frame.boundary);
                         if matches!(self.heap.functions.get(function.0), Function::Lua { .. }) {
-                            // Reuse this frame's place: the callee and its arguments move down to its slot.
+                            // Reuse this frame's place: the callee and its arguments move down to its slot, and it
+                            // catches errors when this frame did (a pcall's function tail-calling).
                             self.stack.copy_within(slot..slot + 1 + count, frame_slot);
                             self.stack.truncate(frame_slot + 1 + count);
-                            self.frames.pop();
+                            let catch = self.frames.pop().expect("a running frame").catch;
                             located!(
                                 self,
                                 self.push_frame(function, frame_slot, count, want, boundary),
                                 pc
                             );
+                            self.frames.last_mut().expect("the frame just pushed").catch = catch;
                             continue 'frame;
                         }
                         if let Some(xpcall) = self.protected_kind(function) {

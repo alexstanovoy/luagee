@@ -1,0 +1,7 @@
+false	errors_tail_call_in_pcall.lua:2: boom
+false	handled: errors_tail_call_in_pcall.lua:2: boom
+false	errors_tail_call_in_pcall.lua:2: boom
+false	errors_tail_call_in_pcall.lua:7: bottom
+false	errors_tail_call_in_pcall.lua:7: bottom
+4
+true	b

@@ -29,7 +29,6 @@ skip lua-5.1-tests/errors.lua:103-105 -- luajit: LuaJIT names a function it tail
 skip lua-5.1-tests/errors.lua:111-111 -- io: io.stdin
 skip lua-5.1-tests/errors.lua:142-167 -- fix: traceback
 skip lua-5.1-tests/errors.lua:171-172 -- fix: error in error handling
-skip lua-5.1-tests/errors.lua:174-182 -- fix: error in error handling 2
 skip lua-5.1-tests/errors.lua:196-196 -- luajit: LuaJIT reads bytes from 0x80 up as letters of names, so "\255a = 1" compiles
 skip lua-5.1-tests/errors.lua:229-238 -- known: luagee checks a function's limits once the whole chunk has parsed, so this chunk, which has no `end`s either, fails on those first
 skip lua-5.1-tests/events.lua:301-320 -- newproxy: newproxy (luagee has no newproxy: userdata come from the host)
