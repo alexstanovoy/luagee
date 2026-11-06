@@ -5,8 +5,8 @@
 
 luagee is `target/release/examples/lua` (build it with `cargo build --release --example lua`); the references come
 from $PUC_LUA and $LUAJIT when set (LuaJIT also runs with -joff, its interpreter alone). `--wasm COMMAND` adds luagee
-built for wasm, run by COMMAND (`tools/wasm.sh bench` passes its wasmtime). Prints seconds and the ratio to the first
-reference. Python 3 standard library only.
+built for wasm, run by COMMAND, in which {} stands for the kernel's name (`tools/wasm.sh bench` passes its wasmtime).
+Prints seconds and the ratio to the first reference. Python 3 standard library only.
 """
 import os
 import statistics
@@ -38,8 +38,12 @@ def main(runs, wasm):
     for _ in range(runs):
         for kernel in KERNELS:
             for name, command in vms.items():
+                if any("{}" in part for part in command):
+                    run = [part.replace("{}", kernel) for part in command]
+                else:
+                    run = [*command, str(HERE / f"{kernel}.lua")]
                 started = time.perf_counter()
-                subprocess.run([*command, str(HERE / f"{kernel}.lua")], check=True, capture_output=True)
+                subprocess.run(run, check=True, capture_output=True)
                 times.setdefault((name, kernel), []).append(time.perf_counter() - started)
     names = list(vms)
     print("kernel  " + "".join(f"{n:>14}" for n in names))
