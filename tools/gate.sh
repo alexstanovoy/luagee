@@ -3,7 +3,8 @@
 #
 #   tools/gate.sh
 #
-# Steps: ignored-audit (every #[ignore]d test has a step that runs it), fuzz-check (the fuzz targets compile), clippy
+# Steps: ignored-audit (every #[ignore]d test has a step that runs it), wasm-audit (the library uses no host clock,
+# environment, threads, randomness or files outside the `fs` loader), fuzz-check (the fuzz targets compile), clippy
 # (all targets and features, -D warnings), test (profile test-release: unit tests, the conformance and hostile corpora,
 # the borrowed suites, the sandbox's bounds), wasm (the crate builds for wasm32-unknown-unknown without features,
 # warning-free),
@@ -39,6 +40,7 @@ step() { # name command...
 }
 
 step ignored-audit tools/ignored_audit.sh
+step wasm-audit tools/wasm_audit.sh
 step fuzz-check fuzz/fuzz.sh check
 step clippy cargo clippy --all-targets --all-features -- -D warnings
 step test cargo test --profile test-release --all-features
