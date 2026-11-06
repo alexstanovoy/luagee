@@ -1,0 +1,14 @@
+LuaJIT-test-cleanup (https://github.com/LuaJIT/LuaJIT-test-cleanup) has no license file. Its README (vendored here as
+`README`) states the terms:
+
+  I've removed all tests of undeterminable origin or that weren't explicitly contributed with the intention of
+  being part of a public test suite.
+
+  I hereby put all Lua/LuaJIT tests and benchmarks that I wrote under the public domain. I've removed any copyright
+  headers.
+
+  -- Mike Pall
+
+The other tests were contributed to the repository for LuaJIT's public test suite. LuaJIT itself is under the MIT
+license, Copyright (C) 2005-2026 Mike Pall. The benchmarks, which the README says may bear other copyrights, are
+not vendored.

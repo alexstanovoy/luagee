@@ -24,3 +24,7 @@ required-features = ["fs"]
 [[test]]
 name = "corpus"
 required-features = ["fs"]
+
+[[test]]
+name = "suites"
+required-features = ["fs"]

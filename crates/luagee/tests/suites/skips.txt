@@ -1,0 +1,156 @@
+# The tests of crates/luagee/tests/suites that do not run as written, one per line (see tests/suites.rs):
+#   skip TARGET -- CLASS: why    runs without TARGET; TARGET itself must still fail
+#   omit TARGET -- CLASS: why    never runs
+# TARGET is SUITE/FILE, SUITE/FILE:FROM-TO (lines blanked) or SUITE/FILE#CASE.
+
+# lua-5.1-tests: PUC-Rio's own test suite for Lua 5.1. Each file runs on a fresh interpreter, as all.lua runs it.
+omit lua-5.1-tests/all.lua -- driver: the runner does what it does (each file, and the results it checks)
+omit lua-5.1-tests/api.lua -- testc: needs the testC library of a debug build of PUC Lua; returns at once without it
+omit lua-5.1-tests/checktable.lua -- testc: a helper module the others require; its checks need testC
+omit lua-5.1-tests/code.lua -- testc: needs the testC library of a debug build of PUC Lua; returns at once without it
+omit lua-5.1-tests/main.lua -- os: runs the standalone interpreter through os.execute and files
+skip lua-5.1-tests/attrib.lua:3-140 -- package: require searching package.path through files written with io (luagee's require reads modules through the host's loader)
+skip lua-5.1-tests/attrib.lua:176-210 -- package: C libraries through package.loadlib
+skip lua-5.1-tests/attrib.lua:214-228 -- fix: package.preload
+skip lua-5.1-tests/big.lua:3-12 -- bound: a 32 MiB string is past the sandbox's string length bound (4 MiB), which overflows before the concatenation the test overflows
+skip lua-5.1-tests/calls.lua:241-241 -- fix: getinfo source
+skip lua-5.1-tests/calls.lua:243-243 -- dump: string.dump
+skip lua-5.1-tests/calls.lua:245-246 -- dump: loads the dump of line 243
+skip lua-5.1-tests/calls.lua:248-250 -- known: load calls its reader until the end of the source before it compiles, so a syntax error does not stop the reading early
+skip lua-5.1-tests/calls.lua:252-253 -- fix: load catches reader errors
+skip lua-5.1-tests/calls.lua:270-285 -- dump: string.dump, and debug.setupvalue
+omit lua-5.1-tests/closure.lua:26-29 -- gc: waits for a weak table to lose its entry, which in luagee it never does (weak tables hold their entries)
+skip lua-5.1-tests/closure.lua:332-332 -- gc: a weak table losing its entry
+skip lua-5.1-tests/closure.lua:409-419 -- debug: debug.setfenv and debug.getfenv
+skip lua-5.1-tests/constructs.lua:189-189 -- debug: debug.getinfo's "n" (luagee reports a function's source and lines only)
+skip lua-5.1-tests/db.lua -- debug: hooks, locals, upvalues and the rest of the debug library
+skip lua-5.1-tests/errors.lua:38-38 -- fix: break is the last statement
+skip lua-5.1-tests/errors.lua:39-41 -- luajit: LuaJIT accepts empty statements (`;`, `a=1;;`), as Lua 5.2 does
+skip lua-5.1-tests/errors.lua:76-76 -- luajit: LuaJIT names the variable of `(aaa or aaa)()` in its error
+skip lua-5.1-tests/errors.lua:78-87 -- fix: names through jumps
+skip lua-5.1-tests/errors.lua:111-111 -- io: io.stdin
+skip lua-5.1-tests/errors.lua:126-126 -- fix: for-in line
+skip lua-5.1-tests/errors.lua:142-167 -- fix: traceback
+skip lua-5.1-tests/errors.lua:171-172 -- fix: error in error handling
+skip lua-5.1-tests/errors.lua:174-182 -- fix: error in error handling 2
+skip lua-5.1-tests/errors.lua:190-193 -- fix: syntax error token text
+skip lua-5.1-tests/errors.lua:196-196 -- luajit: LuaJIT reads bytes from 0x80 up as letters of names, so "\255a = 1" compiles
+skip lua-5.1-tests/errors.lua:229-238 -- fix: upvalue limit
+skip lua-5.1-tests/events.lua:301-320 -- newproxy: newproxy (luagee has no newproxy: userdata come from the host)
+skip lua-5.1-tests/events.lua:328-355 -- debug: debug.setmetatable on numbers, booleans and nil
+skip lua-5.1-tests/files.lua -- io: the io library and files
+skip lua-5.1-tests/literals.lua:160-173 -- os: os.setlocale
+skip lua-5.1-tests/math.lua:124-142 -- io: io.tmpfile
+skip lua-5.1-tests/pm.lua:226-226 -- luajit: LuaJIT has no string.gfind, the 5.0 name of string.gmatch (LUA_COMPAT_GFIND)
+skip lua-5.1-tests/strings.lua:105-105 -- luajit: LuaJIT's %q writes "\0" as \0, not \000
+skip lua-5.1-tests/strings.lua:147-172 -- os: os.setlocale
+skip lua-5.1-tests/vararg.lua:24-26 -- luajit: LuaJIT has no implicit `arg` table in vararg functions (LUA_COMPAT_VARARG)
+skip lua-5.1-tests/vararg.lua:36-40 -- luajit: LuaJIT has no implicit `arg` table in vararg functions (LUA_COMPAT_VARARG)
+skip lua-5.1-tests/vararg.lua:44-46 -- luajit: LuaJIT has no implicit `arg` table in vararg functions (LUA_COMPAT_VARARG)
+skip lua-5.1-tests/verybig.lua -- io: writes the program it compiles to a file through io and os.tmpname
+skip lua-5.1-tests/gc.lua:97-115 -- gc: how many collectgarbage("step") calls a cycle takes (LuaJIT's steps differ from these too)
+skip lua-5.1-tests/gc.lua:150-200 -- gc: weak tables losing their entries
+skip lua-5.1-tests/gc.lua:203-256 -- newproxy: userdata from newproxy, finalized by __gc
+skip lua-5.1-tests/gc.lua:287-310 -- newproxy: userdata from newproxy, finalized by __gc
+omit lua-5.1-tests/gc.lua:118-129 -- gc: waits for gcinfo() to fall under 1 MB after collectgarbage("stop") and "restart"; luagee's collector cannot be stopped, and its count includes the storage it keeps for reuse, so the wait would never end
+
+# luau-conformance: the scripts of Luau's conformance suite that are Lua 5.1; each must return "OK", as Luau's
+# harness (tests/Conformance.test.cpp) checks. Luau is a dialect of Lua 5.1: what is Luau's own is skipped as such.
+omit luau-conformance/apicalls.luau -- luau-api: the harness calls its functions through Luau's C API (and it uses +=)
+omit luau-conformance/clear.luau -- luau: table.clear and table.create
+omit luau-conformance/coroutinehost.luau -- luau-api: the harness resumes its coroutines through Luau's C API
+omit luau-conformance/coverage.luau -- luau-api: getcoverage, Luau's coverage API
+omit luau-conformance/datetime.luau -- os: os.date and os.time
+omit luau-conformance/debug.luau -- luau: debug.info and Luau's debug library
+omit luau-conformance/exceptions.luau -- luau-api: the harness calls it to test C++ exceptions
+omit luau-conformance/iter.luau -- luau: generalized iteration and compound assignment (+=) throughout
+omit luau-conformance/move.luau -- luau: table.move
+omit luau-conformance/ndebug_upvalues.luau -- luau-api: yields from the main chunk for the harness to read upvalues
+omit luau-conformance/sort.luau -- luau: table.clone, table.freeze and += throughout
+omit luau-conformance/tpack.luau -- luau: string.pack and string.unpack
+omit luau-conformance/types.luau -- luau-api: checks the globals against Luau's type information (RTTI) from the harness
+skip luau-conformance/assert.luau:23-23 -- luau: Luau's message for assert() is "missing argument #1"
+skip luau-conformance/calls.luau:247-255 -- fix: error in error handling (Luau)
+skip luau-conformance/calls.luau:257-263 -- luau: table.create
+omit luau-conformance/closure.luau:30-33 -- gc: waits for a weak table to lose its entry, which in luagee it never does (weak tables hold their entries)
+skip luau-conformance/constructs.luau:240-253 -- luau: continue
+skip luau-conformance/iter_fenv.luau -- luau: Luau's message for iterating over a string ("attempt to iterate over a string value")
+skip luau-conformance/pm.luau:40-40 -- luau: %g, Lua 5.2's class of printable characters
+skip luau-conformance/pm.luau:271-271 -- fix: gsub trailing percent
+skip luau-conformance/pm.luau:347-348 -- luau: Lua 5.2's message for %b without its arguments; LuaJIT's is "unbalanced pattern"
+skip luau-conformance/strconv.luau:18-18 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
+skip luau-conformance/strconv.luau:24-24 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
+skip luau-conformance/strconv.luau:33-34 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
+skip luau-conformance/strconv.luau:36-37 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
+skip luau-conformance/strconv.luau:39-41 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
+skip luau-conformance/strconv.luau:46-46 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
+skip luau-conformance/strconv.luau:50-52 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
+skip luau-conformance/strconv.luau:55-55 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
+skip luau-conformance/strings.luau:120-121 -- luau: Luau's %q writes "\0" as \000 and "\r" as \r; LuaJIT's writes \0 and \13
+skip luau-conformance/strings.luau:159-188 -- luau: Luau's %* format, table.create
+skip luau-conformance/strings.luau:211-253 -- luau: string.split
+skip luau-conformance/tmerror.luau:40-40 -- luau: Luau's message names no field here; LuaJIT's says "attempt to call field 'missingmethod'"
+skip luau-conformance/tmerror.luau:57-57 -- luau: Luau's message names no field here; LuaJIT's says "attempt to call field 'missingmethod'"
+skip luau-conformance/tmerror.luau:76-76 -- luau: Luau's message names no field here; LuaJIT's says "attempt to call field 'missingmethod'"
+skip luau-conformance/gc.luau:76-103 -- gc: how many collectgarbage("step") calls a cycle takes
+omit luau-conformance/gc.luau:105-121 -- gc: waits for gcinfo() to fall under 1 MB after collectgarbage("stop") and "restart"; luagee's collector cannot be stopped, and its count includes the storage it keeps for reuse, so the wait would never end
+skip luau-conformance/gc.luau:141-244 -- gc: weak tables losing their entries, and Luau's shrinking weak tables ('s' mode), table.clear, table.create
+skip luau-conformance/gc.luau:246-290 -- newproxy: userdata from newproxy, finalized by __gc
+skip luau-conformance/gc.luau:326-349 -- newproxy: userdata from newproxy, finalized by __gc
+
+# luajit-test-cleanup: LuaJIT's test tree, each case (`do --- name`) run as its test.lua runs it. Metadata that leaves a
+# case out under LuaJIT 2.1 without LUAJIT_ENABLE_LUA52COMPAT leaves it out here too, but only as listed below.
+omit luajit-test-cleanup/lib/ffi -- ffi: the FFI library
+omit luajit-test-cleanup/lib/contents.lua#ffi -- ffi: the FFI library
+omit luajit-test-cleanup/lib/contents.lua#ffi 2.1 -- ffi: the FFI library
+omit luajit-test-cleanup/bc/constov.lua -- slow: upstream runs it only when asked to (+slow)
+omit luajit-test-cleanup/lang/goto.lua#Goto is a keyword. -- compat52: LuaJIT built with LUAJIT_ENABLE_LUA52COMPAT
+omit luajit-test-cleanup/lang/goto.lua#Trailing labels and empty statements are considered to be out of scope. -- compat52: LuaJIT built with LUAJIT_ENABLE_LUA52COMPAT
+omit luajit-test-cleanup/lib/base/pairs.lua#metamethods -- compat52: LuaJIT built with LUAJIT_ENABLE_LUA52COMPAT (__pairs)
+omit luajit-test-cleanup/lib/base/xpcall_jit.lua -- compat52: LuaJIT built with LUAJIT_ENABLE_LUA52COMPAT (xpcall's extra arguments)
+omit luajit-test-cleanup/lib/table/pack.lua -- compat52: LuaJIT built with LUAJIT_ENABLE_LUA52COMPAT (table.pack)
+omit luajit-test-cleanup/lib/contents.lua#5.2 base rawlen -- compat52: LuaJIT built with LUAJIT_ENABLE_LUA52COMPAT
+omit luajit-test-cleanup/lib/contents.lua#5.2 table.pack -- compat52: LuaJIT built with LUAJIT_ENABLE_LUA52COMPAT
+omit luajit-test-cleanup/lib/contents.lua#5.2 base -- lua52: Lua 5.2 only
+omit luajit-test-cleanup/lib/contents.lua#5.2 math -- lua52: Lua 5.2 only
+omit luajit-test-cleanup/lib/contents.lua#5.2 string -- lua52: Lua 5.2 only
+omit luajit-test-cleanup/lib/contents.lua#5.2 table -- lua52: Lua 5.2 only
+omit luajit-test-cleanup/lib/contents.lua#5.2 package -- lua52: Lua 5.2 only
+omit luajit-test-cleanup/lib/table/new.lua -- missing: table.new, the extension module LuaJIT 2.1 adds (require "table.new")
+omit luajit-test-cleanup/lib/table/remove.lua#TSETR hash part -- missing: table.new, the extension module LuaJIT 2.1 adds (require "table.new")
+omit luajit-test-cleanup/lib/table/remove.lua#TSETR write barrier -- missing: table.new, the extension module LuaJIT 2.1 adds (require "table.new")
+omit luajit-test-cleanup/lib/string/dump.lua -- dump: string.dump
+skip luajit-test-cleanup/lang/goto.lua#Basic goto and label semantics. -- fix: goto inner label
+skip luajit-test-cleanup/lang/meta/call.lua#userdata -- newproxy: newproxy (luagee has no newproxy: userdata come from the host)
+skip luajit-test-cleanup/lang/meta/call.lua#number -- debug: debug.setmetatable on numbers
+skip luajit-test-cleanup/lang/meta/call.lua#jit number -- debug: debug.setmetatable on numbers
+skip luajit-test-cleanup/lang/meta/index.lua#userdata -- newproxy: newproxy (luagee has no newproxy: userdata come from the host)
+skip luajit-test-cleanup/lang/meta/index.lua#string -- debug: debug.getmetatable
+skip luajit-test-cleanup/lang/meta/len.lua#userdata -- newproxy: newproxy (luagee has no newproxy: userdata come from the host)
+skip luajit-test-cleanup/lang/meta/len.lua#number -- debug: debug.setmetatable on numbers
+skip luajit-test-cleanup/lang/meta/debuginfo.lua#table metamethods -- debug: debug.getinfo's names
+skip luajit-test-cleanup/lang/meta/debuginfo.lua#userdata metamethods -- newproxy: newproxy (luagee has no newproxy: userdata come from the host)
+skip luajit-test-cleanup/lib/base/error.lua#default level in xpcall -- debug: debug.getlocal
+skip luajit-test-cleanup/lib/base/error.lua#level 2 in xpcall -- debug: debug.getlocal
+skip luajit-test-cleanup/lib/base/getfenv.lua#untitled -- debug: debug.setfenv
+skip luajit-test-cleanup/lib/base/tonumber_tostring.lua#print calls overridden tostring -- debug: debug.setfenv
+skip luajit-test-cleanup/lib/string/metatable.lua#__index metamethod is string library -- debug: debug.getmetatable
+skip luajit-test-cleanup/lib/string/format/num.lua#easily enumerable cases of %a, %A -- fix: %a
+skip luajit-test-cleanup/lib/string/format/num.lua#assorted %a -- fix: %a
+skip luajit-test-cleanup/lib/string/sub.lua#argcheck -- fix: method arg
+skip luajit-test-cleanup/lib/coroutine/yield.lua#assorted -- known: a coroutine cannot yield inside a metamethod (here __add)
+skip luajit-test-cleanup/lib/contents.lua#base -- sandbox: the sandbox has no io, os, loadfile or arg
+skip luajit-test-cleanup/lib/contents.lua#pre-5.2 base -- newproxy: newproxy (luagee has no newproxy: userdata come from the host)
+skip luajit-test-cleanup/lib/contents.lua#pre-5.2 math -- luajit: LuaJIT 2.1 has neither math.mod nor math.log10 (this case fails on LuaJIT too)
+skip luajit-test-cleanup/lib/contents.lua#string -- dump: string.dump
+skip luajit-test-cleanup/lib/contents.lua#pre-5.2 string -- luajit: LuaJIT 2.1 has no string.gfind (this case fails on LuaJIT too)
+skip luajit-test-cleanup/lib/contents.lua#io -- sandbox: the sandbox has no io
+skip luajit-test-cleanup/lib/contents.lua#io file -- sandbox: the sandbox has no io
+skip luajit-test-cleanup/lib/contents.lua#os -- sandbox: the sandbox has no os
+skip luajit-test-cleanup/lib/contents.lua#debug -- debug: luagee's debug has traceback and getinfo only
+skip luajit-test-cleanup/lib/contents.lua#package -- package: package has loaded only (luagee's require reads modules through the host's loader)
+skip luajit-test-cleanup/lib/contents.lua#pre-5.2 package -- package: package has loaded only (luagee's require reads modules through the host's loader)
+skip luajit-test-cleanup/lib/contents.lua#package.loaders -- package: package has loaded only (luagee's require reads modules through the host's loader)
+skip luajit-test-cleanup/lib/contents.lua#package.loaded -- sandbox: the sandbox has no io or os
+omit luajit-test-cleanup/opt/sink/ffi.lua -- ffi: the FFI library
+omit luajit-test-cleanup/opt/sink/ffi_nosink.lua -- ffi: the FFI library
