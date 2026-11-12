@@ -1,64 +1,193 @@
 #!/usr/bin/env python3
-"""Times luagee against reference Lua interpreters on the kernels in this folder, interleaved, median of N runs.
+"""Compare release interpreters on checked workloads, interleaved, with raw JSON evidence.
 
-    python3 -I tools/bench/bench.py [--wasm COMMAND] [N]
+python3 tools/bench/bench.py --output temp/samples.json --candidate before=PATH --source before=REPO \
+    --candidate after=PATH --source after=REPO
 
-luagee is `target/release/examples/lua` (build it with `cargo build --release --example lua`); the references come
-from $PUC_LUA and $LUAJIT when set (LuaJIT also runs with -joff, its interpreter alone). `--wasm COMMAND` adds luagee
-built for wasm, run by COMMAND, in which {} stands for the kernel's name (`tools/wasm.sh bench` passes its wasmtime).
-Prints seconds and the ratio to the first reference. Python 3 standard library only.
+Without candidates, use target/release/examples/lua and optional PUC_LUA/LUAJIT references.
+The positional run count and --wasm COMMAND remain available to tools/wasm.sh.
 """
+import argparse
+import hashlib
+import json
 import os
+from pathlib import Path
+import platform
+import shlex
+import selectors
 import statistics
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-KERNELS = sorted(p.stem for p in HERE.glob("*.lua"))
+OUTPUT_LIMIT = 1 << 20
 
 
-def interpreters(wasm):
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def source_provenance(root):
+    def git(*arguments):
+        return subprocess.check_output(["git", "-C", str(root), *arguments], timeout=10)
+    return {"revision": git("rev-parse", "HEAD").decode().strip(),
+            "status": git("status", "--porcelain", "--untracked-files=all").decode(),
+            "diff_sha256": sha256(git("diff", "--binary", "HEAD"))}
+
+
+def assignments(values):
     found = {}
-    if os.environ.get("PUC_LUA"):
-        found["puc"] = [os.environ["PUC_LUA"]]
-    if os.environ.get("LUAJIT"):
-        found["luajit-joff"] = [os.environ["LUAJIT"], "-joff"]
-    found["luagee"] = [str(ROOT / "target/release/examples/lua")]
-    if wasm:
-        found["luagee-wasm"] = wasm.split()
+    for value in values:
+        name, separator, path = value.partition("=")
+        if not separator or not name or name in found:
+            raise ValueError(f"expected a unique NAME=PATH, got {value!r}")
+        found[name] = Path(path).resolve()
     return found
 
 
-def main(runs, wasm):
-    vms = interpreters(wasm)
-    times = {}
-    for _ in range(runs):
-        for kernel in KERNELS:
-            for name, command in vms.items():
-                if any("{}" in part for part in command):
-                    run = [part.replace("{}", kernel) for part in command]
-                else:
-                    run = [*command, str(HERE / f"{kernel}.lua")]
-                started = time.perf_counter()
-                subprocess.run(run, check=True, capture_output=True)
-                times.setdefault((name, kernel), []).append(time.perf_counter() - started)
-    names = list(vms)
-    print("kernel  " + "".join(f"{n:>14}" for n in names))
-    for kernel in KERNELS:
-        base = statistics.median(times[(names[0], kernel)])
-        cells = []
-        for n in names:
-            t = statistics.median(times[(n, kernel)])
-            cells.append(f"{t:9.3f} x{t / base:4.2f}")
-        print(f"{kernel:7} " + "".join(f"{c:>14}" for c in cells))
+def interpreters(args):
+    sources = assignments(args.source)
+    candidates = assignments(args.candidate)
+    if candidates:
+        if sources.keys() != candidates.keys():
+            raise ValueError("each candidate needs one --source NAME=REPO")
+        commands = {name: [str(path)] for name, path in candidates.items()}
+    else:
+        commands = {}
+        if os.environ.get("PUC_LUA"):
+            commands["puc"] = [os.environ["PUC_LUA"]]
+        if os.environ.get("LUAJIT"):
+            commands["luajit_joff"] = [os.environ["LUAJIT"], "-joff"]
+        commands["luagee"] = [str(ROOT / "target/release/examples/lua")]
+        sources["luagee"] = ROOT
+    if args.wasm:
+        commands["luagee_wasm"] = shlex.split(args.wasm)
+        sources["luagee_wasm"] = ROOT
+    provenance = {}
+    for name, command in commands.items():
+        executable = Path(command[0])
+        if not executable.is_file():
+            import shutil
+            resolved = shutil.which(command[0])
+            if not resolved:
+                raise ValueError(f"executable not found: {command[0]}")
+            executable = Path(resolved)
+        provenance[name] = {"command": command, "binary_sha256": sha256(executable.read_bytes()),
+                            "source": source_provenance(sources[name]) if name in sources else None}
+    return commands, provenance
+
+
+def run(command, script, expected, timeout):
+    command = [part.replace("{}", script.stem) for part in command] if any("{}" in p for p in command) else [*command, str(script)]
+    environment = dict(os.environ, LUA_FUEL=str(1 << 40), LUA_MEMORY=str(512 << 20))
+    started = time.perf_counter()
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          env=environment, stdin=subprocess.DEVNULL) as process:
+        try:
+            actual, diagnostic = read_output(process, started + timeout)
+            status = process.wait(timeout=max(0.001, started + timeout - time.perf_counter()))
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+    elapsed = time.perf_counter() - started
+    if status != 0 or diagnostic:
+        raise ValueError(f"process failed ({status}): {diagnostic[:400]!r}")
+    if actual != expected:
+        raise ValueError(f"output mismatch: expected {expected[:160]!r}, got {actual[:160]!r}")
+    return elapsed
+
+
+def read_output(process, deadline):
+    buffers = [bytearray(), bytearray()]
+    with selectors.DefaultSelector() as selector:
+        selector.register(process.stdout, selectors.EVENT_READ, 0)
+        selector.register(process.stderr, selectors.EVENT_READ, 1)
+        while selector.get_map():
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                raise ValueError("process deadline exceeded")
+            for key, _ in selector.select(remaining):
+                data = os.read(key.fd, 65536)
+                if not data:
+                    selector.unregister(key.fileobj)
+                    continue
+                buffer = buffers[key.data]
+                if len(buffer) + len(data) > OUTPUT_LIMIT:
+                    raise ValueError("output exceeds limit")
+                buffer.extend(data)
+    return tuple(bytes(buffer) for buffer in buffers)
+
+
+def summarize(samples, kernels, names):
+    summaries = {}
+    for kernel in kernels:
+        summaries[kernel] = {}
+        for name in names:
+            values = [s["seconds"] for s in samples if s["kernel"] == kernel and s["interpreter"] == name and not s["warmup"]]
+            summaries[kernel][name] = {"runs": len(values), "median_seconds": statistics.median(values),
+                                       "min_seconds": min(values), "max_seconds": max(values)}
+    return summaries
+
+
+def measure(args):
+    commands, provenance = interpreters(args)
+    scripts = sorted(args.kernels.resolve().rglob("*.lua"))
+    if not scripts:
+        raise ValueError("no kernels found")
+    kernels, expected = {}, {}
+    for script in scripts:
+        name = script.relative_to(args.kernels.resolve()).as_posix()
+        expected[name] = script.with_suffix(".out").read_bytes()
+        kernels[name] = {"sha256": sha256(script.read_bytes()), "stdout_sha256": sha256(expected[name])}
+    samples = []
+    names = list(commands)
+    for round_number in range(args.warmups + args.runs):
+        order = names if round_number % 2 == 0 else names[::-1]
+        for script, kernel in zip(scripts, kernels):
+            for name in order:
+                try:
+                    elapsed = run(commands[name], script, expected[kernel], args.timeout)
+                except (ValueError, subprocess.TimeoutExpired) as error:
+                    raise ValueError(f"{kernel}: {name}: {error}") from error
+                samples.append({"round": round_number, "warmup": round_number < args.warmups,
+                                "kernel": kernel, "interpreter": name, "seconds": elapsed,
+                                "output_checked": True})
+    return {"compiler": subprocess.check_output(["rustc", "-vV"], text=True, timeout=10),
+            "machine": {"system": platform.system(), "release": platform.release(), "architecture": platform.machine(),
+                        "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None},
+            "settings": {"fuel": 1 << 40, "memory_bytes": 512 << 20, "runs": args.runs, "warmups": args.warmups},
+            "interpreters": provenance, "kernels": kernels, "samples": samples,
+            "summaries": summarize(samples, kernels, names)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("count", nargs="?", type=int)
+    parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--warmups", type=int, default=1)
+    parser.add_argument("--timeout", type=float, default=60)
+    parser.add_argument("--kernels", type=Path, default=HERE)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--candidate", action="append", default=[])
+    parser.add_argument("--source", action="append", default=[])
+    parser.add_argument("--wasm")
+    args = parser.parse_args()
+    args.runs = args.count if args.count is not None else args.runs
+    if not 1 <= args.runs <= 100 or not 0 <= args.warmups <= 20 or not 0 < args.timeout <= 300:
+        parser.error("runs must be 1..100, warmups 0..20, timeout (0, 300]")
+    try:
+        report = measure(args)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        parser.exit(1, f"bench: {error}\n")
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(report, indent=2) + "\n")
+    for kernel, candidates in report["summaries"].items():
+        print(kernel, " | ".join(f"{name}: {s['median_seconds']:.6f} [{s['min_seconds']:.6f}, {s['max_seconds']:.6f}]" for name, s in candidates.items()))
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    wasm = None
-    if args[:1] == ["--wasm"]:
-        wasm, args = args[1], args[2:]
-    main(int(args[0]) if args else 5, wasm)
+    main()
