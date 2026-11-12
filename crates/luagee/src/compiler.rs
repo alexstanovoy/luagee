@@ -1034,7 +1034,7 @@ impl Compiler<'_> {
         self.f().line = line;
         let back = self.emit(Op::ForLoop { a: base, offset: 0 });
         self.patch(back, body_start);
-        self.patch(prep, back);
+        self.patch(prep, back + 1);
         self.end_block()?;
         self.set_free(u32::from(base));
         Ok(())

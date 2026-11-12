@@ -161,6 +161,7 @@ pub(crate) enum Op {
         first: u8,
         count: u8,
     },
+    /// Coerces the controls and exposes the initial index, or jumps past the loop when it is outside the bounds.
     ForPrep {
         a: u8,
         offset: i32,

@@ -200,29 +200,66 @@ fn the_same_seed_and_calls_print_the_same() {
 
 #[test]
 fn table_move_refuses_unaffordable_work_before_mutating_the_destination() {
-    let mut lua = lua(Limits { fuel_per_call: 10_000, fuel_per_tick: 10_000, ..Limits::DEFAULT });
-    let ended = lua.exec("move", b"destination = {99}; table.move({1}, 1, 100000, 1, destination)");
-    assert!(matches!(ended, Err(Error::Limit(Limit::FuelPerCall))), "{ended:?}");
+    let mut lua = lua(Limits {
+        fuel_per_call: 10_000,
+        fuel_per_tick: 10_000,
+        ..Limits::DEFAULT
+    });
+    let ended = lua.exec(
+        "move",
+        b"destination = {99}; table.move({1}, 1, 100000, 1, destination)",
+    );
+    assert!(
+        matches!(ended, Err(Error::Limit(Limit::FuelPerCall))),
+        "{ended:?}"
+    );
     lua.begin_tick();
-    assert_eq!(lua.exec("read", b"return destination[1]").expect("still usable"), vec![Value::Number(99.0)]);
+    assert_eq!(
+        lua.exec("read", b"return destination[1]")
+            .expect("still usable"),
+        vec![Value::Number(99.0)]
+    );
 }
 
 #[test]
 fn table_move_nonprogressing_ranges_exhaust_fuel_without_hanging() {
-    for range in ["1e300,1e300,0", "math.huge,math.huge,0", "-math.huge,0,0", "2^53-1,2^53,0"] {
+    for range in [
+        "1e300,1e300,0",
+        "math.huge,math.huge,0",
+        "-math.huge,0,0",
+        "2^53-1,2^53,0",
+    ] {
         let mut lua = lua(Limits::DEFAULT);
         let source = format!("table.move({{}}, {range})");
         let ended = lua.exec("move", source.as_bytes());
-        assert!(matches!(ended, Err(Error::Limit(Limit::FuelPerCall))), "{range}: {ended:?}");
+        assert!(
+            matches!(ended, Err(Error::Limit(Limit::FuelPerCall))),
+            "{range}: {ended:?}"
+        );
     }
 }
 
 #[test]
 fn table_move_destination_growth_is_accounted_under_the_memory_limit() {
-    let mut lua = lua(Limits { memory: 256 << 10, fuel_per_call: 1_000_000, fuel_per_tick: 1_000_000, ..Limits::DEFAULT });
-    lua.exec("setup", b"source = {}; for i=1,1024 do source[i]=i end; destination={}").expect("source fits");
-    let ended = lua.exec("move", b"for i=1,8 do table.move(source,1,1024,-100000*i,destination) end");
-    assert!(matches!(ended, Err(Error::Limit(Limit::Memory))), "{ended:?}");
+    let mut lua = lua(Limits {
+        memory: 256 << 10,
+        fuel_per_call: 1_000_000,
+        fuel_per_tick: 1_000_000,
+        ..Limits::DEFAULT
+    });
+    lua.exec(
+        "setup",
+        b"source = {}; for i=1,1024 do source[i]=i end; destination={}",
+    )
+    .expect("source fits");
+    let ended = lua.exec(
+        "move",
+        b"for i=1,8 do table.move(source,1,1024,-100000*i,destination) end",
+    );
+    assert!(
+        matches!(ended, Err(Error::Limit(Limit::Memory))),
+        "{ended:?}"
+    );
 }
 
 #[test]
@@ -232,11 +269,18 @@ fn format_pointer_identity_is_reproducible_and_survives_collection() {
         let output = Rc::new(RefCell::new(Vec::new()));
         let sink = output.clone();
         let mut lua = lua(Limits::DEFAULT);
-        lua.set_print(Box::new(move |bytes| sink.borrow_mut().extend_from_slice(bytes)));
-        lua.exec("identity", source).expect("identity relations hold");
+        lua.set_print(Box::new(move |bytes| {
+            sink.borrow_mut().extend_from_slice(bytes)
+        }));
+        lua.exec("identity", source)
+            .expect("identity relations hold");
         output.take()
     };
-    assert_eq!(run(), run(), "identities depend only on local handles, including generations and object kinds");
+    assert_eq!(
+        run(),
+        run(),
+        "identities depend only on local handles, including generations and object kinds"
+    );
 }
 
 #[test]
@@ -247,34 +291,94 @@ fn format_pointer_distinguishes_userdata_without_stringifying_it() {
     let second = lua.vm().userdata(2u8, None, 0).expect("second userdata");
     lua.pin(second).expect("root");
     let check = lua.load("userdata_identity", b"local a,b=...; assert(string.format('%p',a)==string.format('%p',a)); assert(string.format('%p',a)~=string.format('%p',b))").expect("compiles");
-    lua.call(check, &[first, second]).expect("distinct stable identities");
+    lua.call(check, &[first, second])
+        .expect("distinct stable identities");
 }
 
 #[test]
 fn format_quote_charges_for_escape_expansion_before_copying() {
-    let mut lua = lua(Limits { fuel_per_call: 5_000, fuel_per_tick: 5_000, string_length: 1 << 20, ..Limits::DEFAULT });
-    lua.exec("setup", b"source=string.rep(string.char(1),12000); template=string.rep('%q',8)").expect("inputs fit");
+    let mut lua = lua(Limits {
+        fuel_per_call: 5_000,
+        fuel_per_tick: 5_000,
+        string_length: 1 << 20,
+        ..Limits::DEFAULT
+    });
+    lua.exec(
+        "setup",
+        b"source=string.rep(string.char(1),12000); template=string.rep('%q',8)",
+    )
+    .expect("inputs fit");
     lua.begin_tick();
-    let ended = lua.exec("quote", b"return string.format(template,source,source,source,source,source,source,source,source)");
-    assert!(matches!(ended, Err(Error::Limit(Limit::FuelPerCall))), "{ended:?}");
+    let ended = lua.exec(
+        "quote",
+        b"return string.format(template,source,source,source,source,source,source,source,source)",
+    );
+    assert!(
+        matches!(ended, Err(Error::Limit(Limit::FuelPerCall))),
+        "{ended:?}"
+    );
 }
 
 #[test]
 fn format_quote_checks_expanded_string_and_heap_bounds() {
-    let mut lua = lua(Limits { string_length: 100, ..Limits::DEFAULT });
-    let ended = lua.exec("quote", b"return string.format('%q', string.rep(string.char(1),50))");
-    assert!(matches!(ended, Err(Error::Runtime { ref message, .. }) if message.contains("string length overflow")), "{ended:?}");
-    let mut lua = self::lua(Limits { memory: 256 << 10, fuel_per_call: 1_000_000, fuel_per_tick: 1_000_000, ..Limits::DEFAULT });
-    lua.exec("setup", b"source=string.rep(string.char(1),40000)").expect("source fits");
-    let ended = lua.exec("quote", b"return string.format('%q%q%q',source,source,source)");
-    assert!(matches!(ended, Err(Error::Limit(Limit::Memory))), "{ended:?}");
+    let mut lua = lua(Limits {
+        string_length: 100,
+        ..Limits::DEFAULT
+    });
+    let ended = lua.exec(
+        "quote",
+        b"return string.format('%q', string.rep(string.char(1),50))",
+    );
+    assert!(
+        matches!(ended, Err(Error::Runtime { ref message, .. }) if message.contains("string length overflow")),
+        "{ended:?}"
+    );
+    let mut lua = self::lua(Limits {
+        memory: 256 << 10,
+        fuel_per_call: 1_000_000,
+        fuel_per_tick: 1_000_000,
+        ..Limits::DEFAULT
+    });
+    lua.exec("setup", b"source=string.rep(string.char(1),40000)")
+        .expect("source fits");
+    let ended = lua.exec(
+        "quote",
+        b"return string.format('%q%q%q',source,source,source)",
+    );
+    assert!(
+        matches!(ended, Err(Error::Limit(Limit::Memory))),
+        "{ended:?}"
+    );
 }
 
 #[test]
 fn format_repeated_flags_spend_fuel_in_proportion_to_template_length() {
-    let mut lua = lua(Limits { fuel_per_call: 5_000, fuel_per_tick: 5_000, ..Limits::DEFAULT });
-    lua.exec("setup", b"template='%'..string.rep('-',8000)..'d'").expect("template fits");
+    let mut lua = lua(Limits {
+        fuel_per_call: 5_000,
+        fuel_per_tick: 5_000,
+        ..Limits::DEFAULT
+    });
+    lua.exec("setup", b"template='%'..string.rep('-',8000)..'d'")
+        .expect("template fits");
     lua.begin_tick();
     let ended = lua.exec("format", b"for i=1,10 do string.format(template,1) end");
-    assert!(matches!(ended, Err(Error::Limit(Limit::FuelPerCall))), "{ended:?}");
+    assert!(
+        matches!(ended, Err(Error::Limit(Limit::FuelPerCall))),
+        "{ended:?}"
+    );
+}
+
+#[test]
+fn numeric_for_signed_zero_steps_remain_cancellable_by_fuel() {
+    for (name, source) in [
+        ("positive", "for i=1,2,0.0 do end"),
+        ("negative", "for i=2,1,-0.0 do end"),
+    ] {
+        let mut lua = lua(Limits::DEFAULT);
+        let ended = lua.exec(name, source.as_bytes());
+        assert!(
+            matches!(ended, Err(Error::Limit(Limit::FuelPerCall))),
+            "{name}: {ended:?}"
+        );
+    }
 }

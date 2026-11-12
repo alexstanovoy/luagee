@@ -129,6 +129,16 @@ pub fn to_integer(number: f64) -> Option<i64> {
     }
 }
 
+/// LuaJIT uses the sign bit for numeric-for direction, so +0 and -0 choose opposite bounds.
+#[must_use]
+pub fn for_in_range(index: f64, limit: f64, step: f64) -> bool {
+    if step.is_sign_positive() {
+        index <= limit
+    } else {
+        limit <= index
+    }
+}
+
 /// A double truncated toward zero and saturated to `i64`, as C's casts in the libraries' integer arguments do on the
 /// usual platforms (`string.sub(s, 2.7)` is `string.sub(s, 2)`); NaN is 0.
 #[must_use]

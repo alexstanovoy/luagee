@@ -1979,10 +1979,14 @@ impl Vm {
                             let error = self.error(message);
                             return Err(self.locate(error, Some(pc)));
                         };
-                        self.stack[a] = Value::Number(number::sub(start, step));
+                        self.stack[a] = Value::Number(start);
                         self.stack[a + 1] = Value::Number(limit);
                         self.stack[a + 2] = Value::Number(step);
-                        pc = (pc as i64 + i64::from(offset)) as usize;
+                        if number::for_in_range(start, limit, step) {
+                            self.stack[a + 3] = Value::Number(start);
+                        } else {
+                            pc = (pc as i64 + i64::from(offset)) as usize;
+                        }
                     }
                     Op::ForLoop { a, offset } => {
                         let a = base + usize::from(a);
@@ -1992,11 +1996,7 @@ impl Vm {
                             unreachable!("the loop's prep made numbers")
                         };
                         let index = number::add(index, step);
-                        let more = if step > 0.0 {
-                            index <= limit
-                        } else {
-                            limit <= index
-                        };
+                        let more = number::for_in_range(index, limit, step);
                         self.stack[a] = Value::Number(index);
                         if more {
                             self.stack[a + 3] = Value::Number(index);
