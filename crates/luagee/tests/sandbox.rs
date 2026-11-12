@@ -197,3 +197,30 @@ fn the_same_seed_and_calls_print_the_same() {
     };
     assert_eq!(run(), run());
 }
+
+#[test]
+fn table_move_refuses_unaffordable_work_before_mutating_the_destination() {
+    let mut lua = lua(Limits { fuel_per_call: 10_000, fuel_per_tick: 10_000, ..Limits::DEFAULT });
+    let ended = lua.exec("move", b"destination = {99}; table.move({1}, 1, 100000, 1, destination)");
+    assert!(matches!(ended, Err(Error::Limit(Limit::FuelPerCall))), "{ended:?}");
+    lua.begin_tick();
+    assert_eq!(lua.exec("read", b"return destination[1]").expect("still usable"), vec![Value::Number(99.0)]);
+}
+
+#[test]
+fn table_move_nonprogressing_ranges_exhaust_fuel_without_hanging() {
+    for range in ["1e300,1e300,0", "math.huge,math.huge,0", "-math.huge,0,0", "2^53-1,2^53,0"] {
+        let mut lua = lua(Limits::DEFAULT);
+        let source = format!("table.move({{}}, {range})");
+        let ended = lua.exec("move", source.as_bytes());
+        assert!(matches!(ended, Err(Error::Limit(Limit::FuelPerCall))), "{range}: {ended:?}");
+    }
+}
+
+#[test]
+fn table_move_destination_growth_is_accounted_under_the_memory_limit() {
+    let mut lua = lua(Limits { memory: 256 << 10, fuel_per_call: 1_000_000, fuel_per_tick: 1_000_000, ..Limits::DEFAULT });
+    lua.exec("setup", b"source = {}; for i=1,1024 do source[i]=i end; destination={}").expect("source fits");
+    let ended = lua.exec("move", b"for i=1,8 do table.move(source,1,1024,-100000*i,destination) end");
+    assert!(matches!(ended, Err(Error::Limit(Limit::Memory))), "{ended:?}");
+}

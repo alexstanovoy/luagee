@@ -14,6 +14,7 @@ pub(super) fn open(vm: &mut Vm) -> Result<(), LuaError> {
             ("getn", getn),
             ("insert", insert),
             ("maxn", maxn),
+            ("move", move_range),
             ("remove", remove),
             ("sort", sort),
         ],
@@ -155,6 +156,71 @@ fn remove(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         set(vm, t, n, Value::Nil)?;
     }
     vm.results(&[removed])
+}
+
+/// LuaJIT's extension uses raw signed-32-bit keys, even when the loop controls are doubles.
+fn move_range(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
+    if args.count == 0 {
+        return Err(vm.arg_error(args, 0, "table expected, got nil"));
+    }
+    let source = vm.check_table(args, 0)?;
+    let first = move_control(vm, args, 1)?;
+    let last = move_control(vm, args, 2)?;
+    let target = move_control(vm, args, 3)?;
+    let destination = if vm.arg(args, 4) == Value::Nil {
+        source
+    } else {
+        vm.check_table(args, 4)?
+    };
+    if last >= first {
+        let backward = target > first
+            && target <= last
+            && vm.equal(Value::Table(destination), Value::Table(source))?;
+        let step = if backward { -1.0 } else { 1.0 };
+        // One extra step covers rounding when a fractional control crosses an integer binade.
+        let count = crate::number::add(crate::number::sub(last, first).floor(), 2.0);
+        // A control that cannot advance would loop forever in the reference. Exhaust fuel before writing.
+        let work = if !count.is_finite()
+            || crate::number::add(first, step) == first
+            || crate::number::add(last, step) == last
+        {
+            u64::MAX
+        } else {
+            count as u64
+        };
+        vm.charge_fuel(work)?;
+        let difference = crate::number::sub(target, first);
+        let mut index = if backward { last } else { first };
+        for _ in 0..work {
+            if (backward && index < first) || (!backward && index > last) {
+                break;
+            }
+            let value = get(vm, source, move_key(index));
+            set(
+                vm,
+                destination,
+                move_key(crate::number::add(index, difference)),
+                value,
+            )?;
+            index = crate::number::add(index, step);
+        }
+    }
+    vm.results(&[Value::Table(destination)])
+}
+
+fn move_control(vm: &mut Vm, args: Args, argument: usize) -> Result<f64, LuaError> {
+    if argument >= args.count {
+        return Err(vm.arg_error(args, argument, "number expected, got nil"));
+    }
+    vm.check_number(args, argument)
+}
+
+fn move_key(index: f64) -> i64 {
+    if (-2_147_483_648.0..2_147_483_648.0).contains(&index) {
+        i64::from(index as i32)
+    } else {
+        i64::from(i32::MIN)
+    }
 }
 
 fn concat(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {

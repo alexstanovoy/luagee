@@ -56,7 +56,7 @@ omit luau-conformance/datetime.luau -- os: os.date and os.time
 omit luau-conformance/debug.luau -- luau: debug.info and Luau's debug library
 omit luau-conformance/exceptions.luau -- luau-api: the harness calls it to test C++ exceptions
 omit luau-conformance/iter.luau -- luau: generalized iteration and compound assignment (+=) throughout
-omit luau-conformance/move.luau -- luau: table.move
+omit luau-conformance/move.luau -- sandbox: huge sparse moves exceed fuel; Luau also checks integer overflow differently
 omit luau-conformance/ndebug_upvalues.luau -- luau-api: yields from the main chunk for the harness to read upvalues
 omit luau-conformance/sort.luau -- luau: table.clone, table.freeze and += throughout
 omit luau-conformance/tpack.luau -- luau: string.pack and string.unpack
@@ -137,3 +137,4 @@ skip luajit-test-cleanup/lib/contents.lua#package.loaders -- package: package ha
 skip luajit-test-cleanup/lib/contents.lua#package.loaded -- sandbox: the sandbox has no io or os
 omit luajit-test-cleanup/opt/sink/ffi.lua -- ffi: the FFI library
 omit luajit-test-cleanup/opt/sink/ffi_nosink.lua -- ffi: the FFI library
+skip luajit-test-cleanup/lib/contents.lua#pre-5.2 table -- luajit-version: this historical catalogue excludes table.move, which current LuaJIT provides

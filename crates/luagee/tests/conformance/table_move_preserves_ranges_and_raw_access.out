@@ -1,0 +1,27 @@
+true	7	8	9	10	10	20	30	nil
+true	7	8	9	20	30	40	40	nil
+true	7	8	9	10	20	30	40	nil
+true	7	8	9	10	20	30	40	nil
+true	7	7	8	9	10	30	40	nil
+true	x	nil	z
+1.9	11
+-1.9	22
+-0	33
+2147483648	44
+4294967296	44
+nan	nil
+9
+7
+false	bad argument #1 to '?' (table expected, got nil)
+false	bad argument #1 to '?' (table expected, got boolean)
+false	bad argument #2 to '?' (number expected, got boolean)
+false	bad argument #3 to '?' (number expected, got boolean)
+false	bad argument #4 to '?' (number expected, got boolean)
+false	bad argument #5 to '?' (table expected, got boolean)
+nil	nil	10	11	12	nil
+nil	nil	10	10	11	nil
+nil	nil	10	12	13	nil
+nil	nil	nil	11	12	nil
+nil	nil	14	nil	nil	nil
+equality called
+11	22	33
