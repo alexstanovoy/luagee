@@ -776,7 +776,15 @@ fn format_unsigned(n: u64, conversion: u8, spec: &Spec) -> String {
 fn format_float(n: f64, conversion: u8, spec: &Spec) -> String {
     let upper = conversion.is_ascii_uppercase();
     let negative = n.is_sign_negative() && !n.is_nan();
-    let sign = sign_of(negative, spec);
+    let sign = if n.is_nan() {
+        if spec.space {
+            " ".into()
+        } else {
+            String::new()
+        }
+    } else {
+        sign_of(negative, spec)
+    };
     let magnitude = n.abs();
     if !n.is_finite() {
         let text = if n.is_nan() { "nan" } else { "inf" };
