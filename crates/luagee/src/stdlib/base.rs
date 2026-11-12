@@ -378,11 +378,17 @@ fn rawset(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 fn select(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let rest = args.count.saturating_sub(1) as i64;
     if let Value::String(s) = vm.arg(args, 0)
-        && vm.heap.string(s) == b"#"
+        && vm.heap.string(s).first() == Some(&b'#')
     {
         return vm.results(&[Value::Number(rest as f64)]);
     }
-    let n = vm.check_integer(args, 0)?;
+    let n = vm.check_number(args, 0)?;
+    // LuaJIT's selector is a signed 32-bit integer; nonfinite and out-of-range values become integer indefinite.
+    let n = if (-2_147_483_648.0..2_147_483_648.0).contains(&n) {
+        i64::from(n as i32)
+    } else {
+        i64::from(i32::MIN)
+    };
     let first = if n < 0 { rest + n } else { n - 1 };
     if n == 0 || first < 0 {
         return Err(vm.arg_error(args, 0, "index out of range"));
