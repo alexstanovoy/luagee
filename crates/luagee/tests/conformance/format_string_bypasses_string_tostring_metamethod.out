@@ -1,0 +1,12 @@
+42
+false
+true
+text
+false	handler failure
+string	false
+string	true
+string	42
+string	true
+nil
+false	bad argument #2 to '?' (value expected)
+strings bypass their handler

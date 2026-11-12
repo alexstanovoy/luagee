@@ -249,6 +249,11 @@ impl Vm {
         if handler != Value::Nil {
             return self.call_meta(handler, &[value]);
         }
+        self.display_raw_value(value)
+    }
+
+    /// Default rendering without invoking a handler again when `__tostring` returns a non-string.
+    pub(crate) fn display_raw_value(&mut self, value: Value) -> Result<Value, LuaError> {
         let text = match value {
             Value::Nil => b"nil".to_vec(),
             Value::Boolean(true) => b"true".to_vec(),

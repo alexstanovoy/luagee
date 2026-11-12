@@ -639,7 +639,7 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
             }
             b's' => {
                 let value = vm.check_any(args, argument)?;
-                let shown = vm.display_value(value)?;
+                let shown = format_value(vm, value)?;
                 let mut text = match shown {
                     Value::String(s) => {
                         let piece = vm.heap.string_rc(s);
@@ -671,6 +671,15 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         append_bytes(vm, &mut out, text.as_bytes())?;
     }
     vm.push_string(&out)
+}
+
+/// LuaJIT formats strings directly; other values get one `__tostring` call then default rendering.
+fn format_value(vm: &mut Vm, value: Value) -> Result<Value, LuaError> {
+    if matches!(value, Value::String(_)) {
+        return Ok(value);
+    }
+    let shown = vm.display_value(value)?;
+    vm.display_raw_value(shown)
 }
 
 /// A type tag and the complete local handle keep arenas and recycled slots distinct without exposing addresses.
