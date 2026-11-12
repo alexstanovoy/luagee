@@ -1,0 +1,43 @@
+NULL
+NULL
+NULL
+NULL
+NULL
+NULL
+NULL
+NULL
+NULL
+NULL
+NULL
+NULL
+NULL
+2	1	true
+3	1	false
+3	2	false
+4	1	false
+4	2	false
+4	3	false
+5	1	false
+5	2	false
+5	3	false
+5	4	false
+6	1	false
+6	2	false
+6	3	false
+6	4	false
+6	5	false
+7	1	false
+7	2	false
+7	3	false
+7	4	false
+7	5	false
+7	6	false
+8	1	false
+8	2	false
+8	3	false
+8	4	false
+8	5	false
+8	6	false
+8	7	false
+true
+false	bad argument #2 to '?' (value expected)

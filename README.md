@@ -249,3 +249,7 @@ checked to cover the native Rust header and its `Rc` counters on every target.
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+`string.format("%p", value)` uses deterministic, type-tagged local handles, including their generations, instead of
+host addresses. Strings with equal bytes share an identity. Nil, booleans and numbers print `NULL`, as in LuaJIT;
+width, precision and flags do not affect `%p`.

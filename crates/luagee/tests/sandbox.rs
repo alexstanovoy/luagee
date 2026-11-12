@@ -224,3 +224,28 @@ fn table_move_destination_growth_is_accounted_under_the_memory_limit() {
     let ended = lua.exec("move", b"for i=1,8 do table.move(source,1,1024,-100000*i,destination) end");
     assert!(matches!(ended, Err(Error::Limit(Limit::Memory))), "{ended:?}");
 }
+
+#[test]
+fn format_pointer_identity_is_reproducible_and_survives_collection() {
+    let source = b"local t={}; local id=string.format('%p',t); collectgarbage(); assert(id==string.format('%p',t)); local released=string.format('%p',{}); collectgarbage(); assert(released~=string.format('%p',{})); print(id, string.format('%p',print), string.format('%p','text'))";
+    let run = || {
+        let output = Rc::new(RefCell::new(Vec::new()));
+        let sink = output.clone();
+        let mut lua = lua(Limits::DEFAULT);
+        lua.set_print(Box::new(move |bytes| sink.borrow_mut().extend_from_slice(bytes)));
+        lua.exec("identity", source).expect("identity relations hold");
+        output.take()
+    };
+    assert_eq!(run(), run(), "identities depend only on local handles, including generations and object kinds");
+}
+
+#[test]
+fn format_pointer_distinguishes_userdata_without_stringifying_it() {
+    let mut lua = lua(Limits::DEFAULT);
+    let first = lua.vm().userdata(1u8, None, 0).expect("first userdata");
+    lua.pin(first).expect("root");
+    let second = lua.vm().userdata(2u8, None, 0).expect("second userdata");
+    lua.pin(second).expect("root");
+    let check = lua.load("userdata_identity", b"local a,b=...; assert(string.format('%p',a)==string.format('%p',a)); assert(string.format('%p',a)~=string.format('%p',b))").expect("compiles");
+    lua.call(check, &[first, second]).expect("distinct stable identities");
+}
