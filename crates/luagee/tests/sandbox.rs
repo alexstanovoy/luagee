@@ -249,3 +249,23 @@ fn format_pointer_distinguishes_userdata_without_stringifying_it() {
     let check = lua.load("userdata_identity", b"local a,b=...; assert(string.format('%p',a)==string.format('%p',a)); assert(string.format('%p',a)~=string.format('%p',b))").expect("compiles");
     lua.call(check, &[first, second]).expect("distinct stable identities");
 }
+
+#[test]
+fn format_quote_charges_for_escape_expansion_before_copying() {
+    let mut lua = lua(Limits { fuel_per_call: 5_000, fuel_per_tick: 5_000, string_length: 1 << 20, ..Limits::DEFAULT });
+    lua.exec("setup", b"source=string.rep(string.char(1),12000); template=string.rep('%q',8)").expect("inputs fit");
+    lua.begin_tick();
+    let ended = lua.exec("quote", b"return string.format(template,source,source,source,source,source,source,source,source)");
+    assert!(matches!(ended, Err(Error::Limit(Limit::FuelPerCall))), "{ended:?}");
+}
+
+#[test]
+fn format_quote_checks_expanded_string_and_heap_bounds() {
+    let mut lua = lua(Limits { string_length: 100, ..Limits::DEFAULT });
+    let ended = lua.exec("quote", b"return string.format('%q', string.rep(string.char(1),50))");
+    assert!(matches!(ended, Err(Error::Runtime { ref message, .. }) if message.contains("string length overflow")), "{ended:?}");
+    let mut lua = self::lua(Limits { memory: 256 << 10, fuel_per_call: 1_000_000, fuel_per_tick: 1_000_000, ..Limits::DEFAULT });
+    lua.exec("setup", b"source=string.rep(string.char(1),40000)").expect("source fits");
+    let ended = lua.exec("quote", b"return string.format('%q%q%q',source,source,source)");
+    assert!(matches!(ended, Err(Error::Limit(Limit::Memory))), "{ended:?}");
+}

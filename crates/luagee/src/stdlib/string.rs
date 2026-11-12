@@ -905,50 +905,50 @@ fn strip_zeros(text: &str) -> String {
     format!("{mantissa}{exponent}")
 }
 
-/// `%q`: a string as a Lua literal (LuaJIT's escapes), or a number's text.
+/// `%q`: quote LuaJIT's string rendering, including non-strings, after checking the full escaped size.
 fn quote(vm: &mut Vm, value: Value, out: &mut Vec<u8>) -> Result<(), LuaError> {
-    match value {
-        Value::String(s) => {
-            let s = vm.heap.string(s).to_vec();
-            out.push(b'"');
-            for (i, &c) in s.iter().enumerate() {
-                match c {
-                    b'"' | b'\\' | b'\n' => {
-                        out.push(b'\\');
-                        out.push(c);
-                    }
-                    0 => {
-                        let next_digit = s.get(i + 1).is_some_and(u8::is_ascii_digit);
-                        out.extend_from_slice(if next_digit { b"\\000" } else { b"\\0" });
-                    }
-                    c if c < 0x20 || c == 0x7f => {
-                        let next_digit = s.get(i + 1).is_some_and(u8::is_ascii_digit);
-                        let text = if next_digit {
-                            format!("\\{c:03}")
-                        } else {
-                            format!("\\{c}")
-                        };
-                        out.extend_from_slice(text.as_bytes());
-                    }
-                    _ => out.push(c),
-                }
-            }
-            out.push(b'"');
-        }
-        Value::Number(n) => {
-            out.push(b'"');
-            out.extend_from_slice(number::format(n).as_bytes());
-            out.push(b'"');
-        }
-        _ => {
-            let shown = vm.display_value(value)?;
-            if let Value::String(s) = shown {
-                out.extend_from_slice(vm.heap.string(s));
-            }
-        }
+    let shown = format_value(vm, value)?;
+    let Value::String(id) = shown else {
+        return Err(vm.error("string expected"));
+    };
+    let bytes = vm.heap.string_rc(id);
+    vm.charge_fuel(1 + bytes.len() as u64 / 16)?;
+    let mut length = 2usize;
+    for (i, &byte) in bytes.iter().enumerate() {
+        length = length.saturating_add(quoted_byte(byte, bytes.get(i + 1)).1);
     }
-    if out.len() > vm.limits.string_length {
+    if out.len().saturating_add(length) > vm.limits.string_length {
         return Err(vm.string_overflow());
     }
+    vm.charge_fuel(1 + length as u64 / 16)?;
+    out.push(b'"');
+    for (i, &byte) in bytes.iter().enumerate() {
+        let (escaped, length) = quoted_byte(byte, bytes.get(i + 1));
+        out.extend_from_slice(&escaped[..length]);
+    }
+    out.push(b'"');
     Ok(())
+}
+
+fn quoted_byte(byte: u8, next: Option<&u8>) -> ([u8; 4], usize) {
+    match byte {
+        b'"' | b'\\' | b'\n' => ([b'\\', byte, 0, 0], 2),
+        0 if !next.is_some_and(u8::is_ascii_digit) => ([b'\\', b'0', 0, 0], 2),
+        mut c if c < 0x20 || c == 0x7f => {
+            let digits = if next.is_some_and(u8::is_ascii_digit) || c >= 100 {
+                3
+            } else if c >= 10 {
+                2
+            } else {
+                1
+            };
+            let mut escaped = [b'\\', 0, 0, 0];
+            for index in (1..=digits).rev() {
+                escaped[index] = b'0' + c % 10;
+                c /= 10;
+            }
+            (escaped, digits + 1)
+        }
+        c => ([c, 0, 0, 0], 1),
+    }
 }
