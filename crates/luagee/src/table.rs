@@ -10,6 +10,9 @@ use crate::{Limit, LuaError};
 pub(crate) type WriteBudget<'a> = dyn FnMut(u64, usize) -> Result<(), LuaError> + 'a;
 use crate::value::{TableId, VALUE_BYTES, Value};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Copy, Debug)]
 struct Entry {
     key: Value,
@@ -111,7 +114,7 @@ impl Table {
     pub(crate) fn set(
         &mut self,
         key: Value,
-        hash: u64,
+        hash: impl FnOnce() -> u64,
         value: Value,
         hasher: &KeyHasher,
         budget: &mut WriteBudget<'_>,
@@ -122,13 +125,11 @@ impl Table {
                 return Ok(());
             }
             if value == Value::Nil {
-                if let Some(e) = self.find(key, hash) {
-                    self.entries[e].value = Value::Nil;
-                }
                 return Ok(());
             }
             return self.append(value, hasher, budget);
         }
+        let hash = hash();
         if let Some(e) = self.find(key, hash) {
             self.entries[e].value = value;
             return Ok(());
@@ -205,6 +206,9 @@ impl Table {
         hasher: &KeyHasher,
         budget: &mut WriteBudget<'_>,
     ) -> Result<usize, LuaError> {
+        if self.entries.is_empty() {
+            return Ok(0);
+        }
         for count in 0..=self.entries.len() {
             budget(1, 0)?;
             let next = self

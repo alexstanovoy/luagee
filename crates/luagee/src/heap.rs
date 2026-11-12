@@ -707,7 +707,10 @@ impl Heap {
         value: Value,
         fuel: &mut dyn FnMut(u64) -> Result<(), LuaError>,
     ) -> Result<(), LuaError> {
-        let hash = self.key_hash(key);
+        let cached_hash = match key {
+            Value::Number(_) => 0,
+            _ => self.key_hash(key),
+        };
         let hasher = self.hasher;
         self.barrier(key);
         self.barrier(value);
@@ -722,8 +725,15 @@ impl Heap {
             *memory = total;
             Ok(())
         };
-        self.tables
-            .get_mut(t.0)
-            .set(key, hash, value, &hasher, &mut budget)
+        self.tables.get_mut(t.0).set(
+            key,
+            || match key {
+                Value::Number(number) => hasher.number(number),
+                _ => cached_hash,
+            },
+            value,
+            &hasher,
+            &mut budget,
+        )
     }
 }
