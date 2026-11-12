@@ -81,6 +81,7 @@ fn single_class(c: u8, class: u8) -> bool {
         b'a' => c.is_ascii_alphabetic(),
         b'c' => c.is_ascii_control(),
         b'd' => c.is_ascii_digit(),
+        b'g' => c.is_ascii_graphic(),
         b'l' => c.is_ascii_lowercase(),
         b'p' => c.is_ascii_punctuation(),
         b's' => matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c),
