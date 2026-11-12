@@ -562,22 +562,19 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         }
         let digits = |i: &mut usize| {
             let from = *i;
-            while template.get(*i).is_some_and(u8::is_ascii_digit) {
+            while *i - from < 2 && template.get(*i).is_some_and(u8::is_ascii_digit) {
                 *i += 1;
             }
             (from, *i)
         };
         let (from, to) = digits(&mut i);
-        let too_long = to - from > 2;
         spec.width = std::str::from_utf8(&template[from..to])
             .ok()
             .and_then(|d| d.parse().ok())
             .unwrap_or(0);
-        let mut precision_too_long = false;
         if template.get(i) == Some(&b'.') {
             i += 1;
             let (from, to) = digits(&mut i);
-            precision_too_long = to - from > 2;
             spec.precision = Some(
                 std::str::from_utf8(&template[from..to])
                     .ok()
@@ -585,11 +582,9 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                     .unwrap_or(0),
             );
         }
-        if too_long || precision_too_long || i - start > 5 + 2 + 3 {
-            return Err(vm.error("invalid format (width or precision too long)"));
-        }
         let Some(&conversion) = template.get(i) else {
-            return Err(vm.error("invalid option '%' to 'format'"));
+            let shown = crate::shown(&template[start - 1..i]);
+            return Err(vm.error(format!("invalid option '{shown}' to 'format'")));
         };
         i += 1;
         if b"diuoxXceEfFgGaAqsp".contains(&conversion) && argument >= args.count {

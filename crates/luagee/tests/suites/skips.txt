@@ -77,6 +77,7 @@ skip luau-conformance/strconv.luau:46-46 -- luau: Luau prints the shortest exact
 skip luau-conformance/strconv.luau:50-52 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
 skip luau-conformance/strconv.luau:55-55 -- luau: Luau prints the shortest exact digits; Lua 5.1 prints %.14g
 skip luau-conformance/strings.luau:120-121 -- luau: Luau's %q writes "\0" as \000 and "\r" as \r; LuaJIT's writes \0 and \13
+skip luau-conformance/strings.luau:145-145 -- luau: repeated format flags are rejected by Luau but accepted by LuaJIT
 skip luau-conformance/strings.luau:159-188 -- luau: Luau's %* format, table.create
 skip luau-conformance/strings.luau:211-253 -- luau: string.split
 skip luau-conformance/tmerror.luau:40-40 -- luau: Luau's message names no field here; LuaJIT's says "attempt to call field 'missingmethod'"

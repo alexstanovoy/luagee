@@ -269,3 +269,12 @@ fn format_quote_checks_expanded_string_and_heap_bounds() {
     let ended = lua.exec("quote", b"return string.format('%q%q%q',source,source,source)");
     assert!(matches!(ended, Err(Error::Limit(Limit::Memory))), "{ended:?}");
 }
+
+#[test]
+fn format_repeated_flags_spend_fuel_in_proportion_to_template_length() {
+    let mut lua = lua(Limits { fuel_per_call: 5_000, fuel_per_tick: 5_000, ..Limits::DEFAULT });
+    lua.exec("setup", b"template='%'..string.rep('-',8000)..'d'").expect("template fits");
+    lua.begin_tick();
+    let ended = lua.exec("format", b"for i=1,10 do string.format(template,1) end");
+    assert!(matches!(ended, Err(Error::Limit(Limit::FuelPerCall))), "{ended:?}");
+}

@@ -22,12 +22,17 @@ Lua 5.1 with the extensions LuaJIT 2.1 adds to it, as a long-lived LuaJIT 2.1 bu
 - 5.1's function environments: `setfenv`, `getfenv`, `module` with `package.seeall`;
 - LuaJIT's library behaviour where it differs from PUC Lua 5.1: `tostring` and `%g` print `nan` for every NaN, `%d`
   and `%x` format 64-bit integers, `string.rep` takes a separator, `tonumber` reads `inf`/`nan`/`0b...`,
-  `table.getn`, `foreach`, `foreachi`, `maxn`, `table.new` and `table.clear` (from `require`), `coroutine.isyieldable`,
+  `table.getn`, `foreach`, `foreachi`, `maxn`, `table.move`, `table.new` and `table.clear` (from `require`), `coroutine.isyieldable`,
   and a coroutine may yield through `pcall` and `xpcall`;
 - LuaJIT's wording of error messages, including the names of the variables involved (`attempt to call global 'f'
   (a nil value)`), a library function named as its caller referred to it (`local tinsert = table.insert` makes
   `bad argument #1 to 'tinsert'`), and LuaJIT's positions for tail calls (a function's `return f(x)` frame is gone,
   so errors in `f` report from its caller's caller).
+
+Repeated `string.format` flags are accepted as in LuaJIT: flag count is bounded by the template's string limit and
+charged in fuel before parsing, rather than rejected by a separate flag-count limit. Width and precision each consume
+at most two decimal digits, keeping generated fields bounded to 99; an extra digit is an invalid conversion, as in
+LuaJIT. This accepts repeated zero flags without treating them as a huge width.
 
 The conformance corpus (`crates/luagee/tests/conformance`) holds scripts with the output LuaJIT 2.1 prints for them;
 luagee prints the same, byte for byte. `tools/lua_diff/lua_diff.py` re-records them from a LuaJIT build and compares
@@ -103,6 +108,11 @@ table there; numbers are printed and read in Rust, never through C's `printf` or
 their keys arrived, `tostring` of a table or function prints an id, the collector runs at points the interpreter's
 own accounting decides, and `math.random` draws from a stream the host seeds. The same seed and the same calls give
 the same output.
+
+
+`string.format("%p", value)` uses deterministic, type-tagged local handles, including their generations, instead of
+host addresses. Strings with equal bytes share an identity. Nil, booleans and numbers print `NULL`, as in LuaJIT;
+width, precision and flags do not affect `%p`.
 
 ## Development
 
@@ -249,7 +259,3 @@ checked to cover the native Rust header and its `Rc` counters on every target.
 ## License
 
 MIT, see [LICENSE](LICENSE).
-
-`string.format("%p", value)` uses deterministic, type-tagged local handles, including their generations, instead of
-host addresses. Strings with equal bytes share an identity. Nil, booleans and numbers print `NULL`, as in LuaJIT;
-width, precision and flags do not affect `%p`.
