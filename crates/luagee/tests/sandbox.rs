@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use luagee::{Error, Limit, Limits, Lua, Value};
+use luagee::{Error, GcStress, Limit, Limits, Lua, Value};
 
 fn lua(limits: Limits) -> Lua {
     Lua::new(
@@ -75,6 +75,51 @@ fn garbage_made_across_many_calls_is_collected_under_a_small_cap() {
         );
     }
     assert!(lua.memory() < 4 << 20);
+}
+
+/// What only an upvalue cell or a userdata's metatable holds is alive: a collection, explicit or automatic, in every
+/// collector mode, leaves the closure and the userdata able to use it.
+#[test]
+fn objects_held_only_by_upvalues_and_userdata_metatables_survive_collection() {
+    for stress in [GcStress::Off, GcStress::Incremental, GcStress::Full] {
+        let mut lua = lua(Limits::DEFAULT);
+        lua.set_gc_stress(stress);
+        let reader = lua
+            .exec(
+                "upvalues",
+                b"local t = {1, 2, x = 'held'} local s = string.rep('s', 40) local function inner() return #s end
+                  return function(u) collectgarbage() return #t, t.x, inner(), getmetatable(u).tag end",
+            )
+            .expect("prepares")[0];
+        lua.pin(reader).expect("root fits");
+        let vm = lua.vm();
+        let metatable = vm.new_table().expect("metatable");
+        let tag = vm.new_string(b"meta").expect("tag");
+        let key = vm.new_string(b"tag").expect("key");
+        vm.raw_set(metatable, key, tag).expect("field");
+        let object = vm.userdata(7u8, Some(metatable), 0).expect("userdata");
+        lua.pin(object).expect("root fits");
+        lua.collect().expect("collects");
+        lua.collect().expect("collects again");
+        lua.begin_tick();
+        let values = lua
+            .call(reader, &[object])
+            .expect("every held object is alive");
+        let texts: Vec<_> = [values[1], values[3]]
+            .map(|value| lua.bytes(value).map(<[u8]>::to_vec))
+            .into();
+        assert_eq!(values[0], Value::Number(2.0), "{stress:?}: the table");
+        assert_eq!(
+            values[2],
+            Value::Number(40.0),
+            "{stress:?}: the string and function"
+        );
+        assert_eq!(
+            texts,
+            [Some(b"held".to_vec()), Some(b"meta".to_vec())],
+            "{stress:?}: the table's field and the metatable"
+        );
+    }
 }
 
 /// A collection of a large heap costs fuel like any work: it runs only as far as the call's fuel goes, and the calls
