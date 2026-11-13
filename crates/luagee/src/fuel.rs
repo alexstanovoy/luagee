@@ -22,10 +22,13 @@ impl Fuel {
         Ok(())
     }
 
-    /// The units of work, at `per_fuel` units a fuel, that the fuel left pays for.
+    /// The units of work, at `per_fuel` units a fuel, that the fuel left pays for, the part of a fuel that a price of
+    /// `units / per_fuel` (rounded down) leaves free included.
     #[inline]
     pub(crate) fn affordable(&self, per_fuel: usize) -> usize {
-        usize::try_from(self.left).map_or(usize::MAX, |left| left.saturating_mul(per_fuel))
+        usize::try_from(self.left).map_or(usize::MAX, |left| {
+            left.saturating_mul(per_fuel).saturating_add(per_fuel - 1)
+        })
     }
 
     /// Ends the call: nothing is left.

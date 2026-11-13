@@ -404,12 +404,15 @@ impl Table {
         &self.array
     }
 
-    /// Every live key and value, for the collector.
-    pub(crate) fn pairs(&self) -> impl Iterator<Item = (Value, Value)> + '_ {
-        self.entries
-            .iter()
-            .filter(|e| e.value != Value::Nil)
-            .map(|e| (e.key, e.value))
+    /// How many hash entries the table holds, removed ones too: the collector's walk over them.
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// A hash entry's key and value (nil for a removed key), for the collector.
+    pub(crate) fn entry(&self, index: usize) -> (Value, Value) {
+        let entry = &self.entries[index];
+        (entry.key, entry.value)
     }
 
     /// The largest positive numeric key (`table.maxn`), found looking at no more than `limit` slots: the array's nil

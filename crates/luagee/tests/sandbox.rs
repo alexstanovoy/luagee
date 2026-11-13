@@ -122,6 +122,44 @@ fn objects_held_only_by_upvalues_and_userdata_metatables_survive_collection() {
     }
 }
 
+/// Large tables and coroutine stacks are traced a piece at a time while the script runs between the pieces: values
+/// moved by a rebuild of the hash part, by a migration into the array part, by sorting, or by a coroutine running, are
+/// all still found.
+#[test]
+fn objects_moved_while_a_large_object_is_half_traced_survive_collection() {
+    // A full collection at every instruction never leaves an object half traced: the other two modes do.
+    for stress in [GcStress::Off, GcStress::Incremental] {
+        let mut lua = lua(Limits {
+            fuel_per_call: 50_000_000,
+            fuel_per_tick: 50_000_000,
+            ..Limits::DEFAULT
+        });
+        lua.set_gc_stress(stress);
+        lua.exec(
+            "moves",
+            br#"
+            local t = {}
+            for i = 2, 6000 do t[i] = {i} end
+            local co = coroutine.wrap(function(...)
+                local held = {...}
+                while true do coroutine.yield(#held, held[#held][1]) end
+            end)
+            for round = 1, 4 do
+                for i = 1, 300 do t[-i] = {-i} end
+                if round == 2 then t[1] = {1} end
+                for i = 1, 300 do t[-i] = nil end
+                local a, b = co({round}, {round + 1})
+                assert(a == 2 and b == 2)
+            end
+            table.sort(t, function(x, y) return x[1] > y[1] end)
+            for _ = 1, 3 do collectgarbage("step") end
+            for i = 1, 6000 do assert(t[i][1] == 6001 - i, i) end
+        "#,
+        )
+        .unwrap_or_else(|error| panic!("{stress:?}: {error}"));
+    }
+}
+
 /// A collection of a large heap costs fuel like any work: it runs only as far as the call's fuel goes, and the calls
 /// after it finish it.
 #[test]

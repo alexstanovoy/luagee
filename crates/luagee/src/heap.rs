@@ -266,6 +266,28 @@ impl<T> Arena<T> {
         self.try_get_mut(id).expect("a live internal handle")
     }
 
+    /// Whether an internal live handle is marked.
+    pub(crate) fn is_marked(&self, id: Handle) -> bool {
+        let slot = &self.slots[id.index() as usize];
+        assert_eq!(
+            slot.generation,
+            id.generation(),
+            "an internal handle has a live generation"
+        );
+        slot.marked
+    }
+
+    /// Unmarks an internal live handle while marking, so that it is traced again (its caller grays it).
+    pub(crate) fn unmark(&mut self, id: Handle) {
+        let slot = &mut self.slots[id.index() as usize];
+        assert_eq!(
+            slot.generation,
+            id.generation(),
+            "an internal unmark has a live generation"
+        );
+        slot.marked = false;
+    }
+
     /// Marks an internal live handle; true when it was not marked yet.
     pub(crate) fn mark(&mut self, id: Handle) -> bool {
         assert_eq!(

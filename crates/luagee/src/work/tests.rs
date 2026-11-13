@@ -19,116 +19,38 @@ const REMOVED_KEYS: &str = "local t={} for i=1,n do t[-i]=i end for i=1,n do t[-
 const ARRAY: &str = "local t={} for i=1,n do t[i]=i end";
 const HASH: &str = "local t={} for i=1,n do t[-i]=i end";
 const TEXT: &str = "local s=string.rep('x',n)";
+/// A coroutine suspended `n / 16` Lua frames deep, each with 50 nil registers, collecting before each yield.
+const DEEP_REGISTERS: &str = "local function f(d) local a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15,a16,a17,a18,a19,a20
+    local b1,b2,b3,b4,b5,b6,b7,b8,b9,b10,b11,b12,b13,b14,b15,b16,b17,b18,b19,b20,b21,b22,b23,b24,b25,b26,b27,b28,b29,b30
+    if d > 0 then f(d - 1) else while true do collectgarbage() coroutine.yield() end end end
+    local co = coroutine.create(function() f(math.floor(n / 16)) end) coroutine.resume(co)";
 
+// One row a line: the table reads as the list of operations it covers.
+#[rustfmt::skip]
 const ROWS: &[Row] = &[
-    (
-        "table.maxn, cleared array",
-        CLEARED_ARRAY,
-        "return table.maxn(t)",
-        "next(t) == nil",
-    ),
-    (
-        "table.maxn, removed keys",
-        REMOVED_KEYS,
-        "return table.maxn(t)",
-        "next(t) == nil",
-    ),
-    (
-        "table.maxn, live keys",
-        "local t={} for i=1,n do t[i+0.5]=i end",
-        "return table.maxn(t)",
-        "t[1.5] == 1",
-    ),
-    (
-        "next, cleared array",
-        CLEARED_ARRAY,
-        "return next(t)",
-        "#t == 0",
-    ),
-    (
-        "next, removed keys",
-        REMOVED_KEYS,
-        "return next(t)",
-        "next(t) == nil",
-    ),
-    (
-        "table.foreach, removed keys",
-        REMOVED_KEYS,
-        "return table.foreach(t,print)",
-        "next(t) == nil",
-    ),
-    (
-        "table.foreach, native callback",
-        HASH,
-        "return table.foreach(t,coroutine.running)",
-        "t[-n] == n",
-    ),
-    (
-        "table.foreachi, native callback",
-        ARRAY,
-        "return table.foreachi(t,coroutine.running)",
-        "#t == n",
-    ),
-    (
-        "table.sort, native comparator",
-        ARRAY,
-        "table.sort(t,rawequal)",
-        "#t == n",
-    ),
-    (
-        "string.gsub, native replacement",
-        "local s=string.rep('x',n)",
-        "return string.gsub(s,'.',type)",
-        "#s == n",
-    ),
-    (
-        "assert, long message, Lua caller",
-        TEXT,
-        "return pcall(function() assert(false, s) end)",
-        "#s == n",
-    ),
-    (
-        "error, long message, located",
-        TEXT,
-        "return pcall(function() error(s) end)",
-        "#s == n",
-    ),
-    (
-        "error, long message, rethrown through Lua",
-        TEXT,
-        "return pcall(function() local _, e = pcall(error, s, 0) error(e) end)",
-        "#s == n",
-    ),
-    (
-        "string.match, long set",
-        "local p='['..string.rep('x',n)..']'",
-        "return string.match('y',p)",
-        "#p == n+2",
-    ),
-    (
-        "string.find, long set at each position",
-        "local p='['..string.rep('x',n)..']'",
-        "return string.find(string.rep('y',64),p)",
-        "#p == n+2",
-    ),
-    (
-        "string.match, long set repeated",
-        "local p='['..string.rep('a',n)..'x]*$'",
-        "return string.match(string.rep('x',64),p)",
-        "#p == n+5",
-    ),
-    (
-        "string.match, long set lazily repeated",
-        "local p='['..string.rep('a',n)..'x]-$'",
-        "return string.match(string.rep('x',64),p)",
-        "#p == n+5",
-    ),
-    (
-        "string.find, long plain-looking pattern",
-        "local p=string.rep('x',n)..'.'",
-        "return string.find('y',p)",
-        "#p == n+1",
-    ),
+    ("table.maxn, cleared array", CLEARED_ARRAY, "return table.maxn(t)", "next(t) == nil"),
+    ("table.maxn, removed keys", REMOVED_KEYS, "return table.maxn(t)", "next(t) == nil"),
+    ("table.maxn, live keys", "local t={} for i=1,n do t[i+0.5]=i end", "return table.maxn(t)", "t[1.5] == 1"),
+    ("next, cleared array", CLEARED_ARRAY, "return next(t)", "#t == 0"),
+    ("next, removed keys", REMOVED_KEYS, "return next(t)", "next(t) == nil"),
+    ("table.foreach, removed keys", REMOVED_KEYS, "return table.foreach(t,print)", "next(t) == nil"),
+    ("table.foreach, native callback", HASH, "return table.foreach(t,coroutine.running)", "t[-n] == n"),
+    ("table.foreachi, native callback", ARRAY, "return table.foreachi(t,coroutine.running)", "#t == n"),
+    ("table.sort, native comparator", ARRAY, "table.sort(t,rawequal)", "#t == n"),
+    ("string.gsub, native replacement", TEXT, "return string.gsub(s,'.',type)", "#s == n"),
+    ("assert, long message, Lua caller", TEXT, "return pcall(function() assert(false, s) end)", "#s == n"),
+    ("error, long message, located", TEXT, "return pcall(function() error(s) end)", "#s == n"),
+    ("error, long message, rethrown", TEXT, "return pcall(function() local _, e = pcall(error, s, 0) error(e) end)", "#s == n"),
+    ("string.match, long set", "local p='['..string.rep('x',n)..']'", "return string.match('y',p)", "#p == n+2"),
+    ("string.find, long set at each position", "local p='['..string.rep('x',n)..']'", "return string.find(string.rep('y',64),p)", "#p == n+2"),
+    ("string.match, long set repeated", "local p='['..string.rep('a',n)..'x]*$'", "return string.match(string.rep('x',64),p)", "#p == n+5"),
+    ("string.match, long set lazily repeated", "local p='['..string.rep('a',n)..'x]-$'", "return string.match(string.rep('x',64),p)", "#p == n+5"),
+    ("string.find, long plain-looking pattern", "local p=string.rep('x',n)..'.'", "return string.find('y',p)", "#p == n+1"),
+    // A coroutine that runs out of fuel dies: there the check is only that the call ran.
+    ("collectgarbage, deep nil registers", DEEP_REGISTERS, "return coroutine.resume(co)", "true"),
+    ("collectgarbage, live tables", "local t={} for i=1,n do t[i]={} end", "local _ = t collectgarbage()", "#t == n"),
+    ("collectgarbage, one large table", ARRAY, "local _ = t collectgarbage()", "#t == n"),
+    ("collectgarbage, one large hash", HASH, "local _ = t collectgarbage()", "t[-n] == n"),
 ];
 
 fn interpreter() -> Lua {
