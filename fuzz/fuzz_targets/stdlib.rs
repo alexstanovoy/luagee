@@ -16,7 +16,7 @@ fuzz_target!(|data: &[u8]| {
 });
 
 fn call(u: &mut Unstructured) -> Result<String> {
-    let source = match u.int_in_range(0..=9)? {
+    let source = match u.int_in_range(0..=10)? {
         0 => format!(
             "return string.format({}, {}, {}, {})",
             format_string(u)?,
@@ -78,6 +78,25 @@ fn call(u: &mut Unstructured) -> Result<String> {
         }
         7 => format!("return select({}, 1, 2, 3)", number(u)?),
         8 => format!("return unpack({{1, 2, 3}}, {}, {})", number(u)?, number(u)?),
+        9 => {
+            let source = if u.arbitrary()? {
+                "t".to_owned()
+            } else {
+                value(u)?
+            };
+            let destination = if u.arbitrary()? {
+                "t".to_owned()
+            } else {
+                value(u)?
+            };
+            format!(
+                "local t=setmetatable({{1,2,3}},{{__index=function() error('raw read') end, \
+                 __newindex=function() error('raw write') end}}); return table.move({source},{},{},{},{destination})",
+                value(u)?,
+                value(u)?,
+                value(u)?
+            )
+        }
         _ => {
             let function = u.choose(&[
                 "bit.band",
@@ -143,9 +162,9 @@ fn pattern(u: &mut Unstructured) -> Result<String> {
 
 /// Mostly the bytes format strings are made of.
 fn format_string(u: &mut Unstructured) -> Result<String> {
-    const PIECES: [&[u8]; 20] = [
+    const PIECES: [&[u8]; 21] = [
         b"%", b"%d", b"%5.2f", b"%s", b"%q", b"%x", b"%X", b"%o", b"%c", b"%e", b"%g", b"%i",
-        b"%u", b"%-+ #0", b"99", b".", b"%%", b"%10.3s", b"%a", b"x",
+        b"%u", b"%-+ #0", b"99", b".", b"%%", b"%10.3s", b"%a", b"x", b"%p",
     ];
     let mut bytes = Vec::new();
     for _ in 0..u.int_in_range(0..=6)? {

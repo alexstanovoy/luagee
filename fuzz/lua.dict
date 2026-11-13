@@ -179,3 +179,7 @@
 "host.read_unrooted()"
 
 "host.foreign_probe(29)"
+
+"move"
+"table.move"
+"%p"

@@ -1,5 +1,5 @@
 //! Lua programs from fuzzer bytes: every program parses, ends (loops and calls are bounded by construction), and in
-//! the deterministic dialect prints the same in any correct Lua 5.1 / LuaJIT 2.1 interpreter, so two interpreters can
+//! the deterministic dialect prints the same in any interpreter targeting LuaJIT 2.1 semantics, so two interpreters can
 //! be compared on it.
 //!
 //! The deterministic dialect leaves out what correct interpreters may print differently: table and function
@@ -351,7 +351,7 @@ impl Generator<'_, '_> {
     }
 
     fn library_call(&mut self, depth: u32) -> Result<()> {
-        const FUNCTIONS: [&str; 30] = [
+        const FUNCTIONS: [&str; 31] = [
             "tostring",
             "tonumber",
             "type",
@@ -376,6 +376,7 @@ impl Generator<'_, '_> {
             "table.concat",
             "table.insert",
             "table.remove",
+            "table.move",
             "unpack",
             "bit.band",
             "bit.bor",
@@ -393,6 +394,18 @@ impl Generator<'_, '_> {
                 "unpack" => "tunpack",
                 other => other,
             };
+        }
+        if function == "table.move" {
+            // Small integer ranges terminate in the reference; arbitrary controls are covered by the stdlib target.
+            let first = self.u.int_in_range(-3..=3)?;
+            let count = self.u.int_in_range(-1..=8)?;
+            let target = self.u.int_in_range(-3..=8)?;
+            let destination = if self.u.arbitrary()? { ", v3" } else { "" };
+            self.source.push_str(&format!(
+                "table.move(v4, {first}, {}, {target}{destination})",
+                first + count
+            ));
+            return Ok(());
         }
         if function == "string.rep" {
             // Bounded, so that no program asks for more than any interpreter gives.
