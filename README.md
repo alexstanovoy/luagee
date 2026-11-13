@@ -150,6 +150,10 @@ let mut limits = LIMITS;
 limits.fuel_per_call = 1_000_000;
 ```
 
+`Lua::new` refuses limits that cannot hold an interpreter (`Error::InvalidLimits`, naming the field): a `memory` below
+`Limits::MIN_MEMORY` (64 KiB) and a `string_length` below `Limits::MIN_STRING_LENGTH` (16). Every other value is
+accepted and a script meets it as its own bound; `Limits::validate` checks without making an interpreter.
+
 Added public callback argument access (`Args::len/is_empty`, zero-based `Vm::arg`,
 `check_*`, `opt_integer`, `opt_string`, `arg_error`), `results`, `new_string` and
 `bytes`. Callbacks can create empty tables, read/write raw fields, set table
@@ -257,9 +261,9 @@ prices changed for scripts (fixtures run whole, so each includes the fill or loo
 | `string.match('y', '[' .. 1000 bytes)` (never closed), caught | 271 | 333 | the scan that finds it malformed, 1 a 16 bytes |
 | an error message of `n` bytes reaching the host | — | + `n / 16` | converting it to text |
 | naming the register of an error (`field 'x'`) | `1 + pc/8 + locals/8` | units looked at / 8 | what the scan looks at, the name's copy included (+3 to +5 in the rows above) |
-| `load`, `loadstring`, `require`, `dofile` of 915 bytes of ordinary code (conformance scripts) | 228 | 2049 | every token read costs 8 (`TOKEN_FUEL`), after the quarter fuel a byte |
-| the same of 102,038 bytes | 25,509 | 278,426 | as above: about 10 times, 2.7 fuel a byte; at the default `fuel_per_call` a call loads some 180 KB of ordinary source, so a host with larger modules raises it or loads them with `Lua::load`, which is outside script fuel |
-| `load` of 1,000 comment lines (`--x`), `a=a ` x 1000, `x={1,2,3}` lines x 1000 | 1513, 1513, 3763 | 1521, 25521, 75771 | as above: a comment costs its bytes only, a token 8 |
+| `load`, `loadstring`, `require`, `dofile` of 1,276 bytes of ordinary code (`ORDINARY` in `tests/fuel_prices.rs`, 4 times) | 319 | 2,636 | every token read costs 8 (`TOKEN_FUEL`), after the quarter fuel a byte |
+| the same of 114,840 bytes (360 times) | 28,710 | 236,083 | as above: about 8 times, 2 fuel a byte; at the default `fuel_per_call` a call loads some 240 KB of such code (some 180 KB of the denser conformance scripts), so a host with larger modules raises it or loads them with `Lua::load`, which is outside script fuel |
+| the whole chunk `load(string.rep(unit, 1000))` of `--x\n` (comments), `a=a ` and `x={1,2,3}\n` | 1,513, 1,513, 3,763 | 1,521, 25,521, 75,771 | as above: a comment costs its bytes only, a token 8; these include building the source with `string.rep` |
 | a function taking an upvalue while it compiles (`load`, a chunk with nested functions) | 0 | 4 | the name is copied and indexed; a name used deep inside nested functions is taken by each of them, however short the source |
 | creating a closure of 8, 60 or 255 upvalues (one closure, the loop around it left out) | 5, 5, 5 | 6, 12, 36 | the cells it copies, 1 a 8 |
 | `collectgarbage()` over 1000 tables in a table | 10090 | 10299 | roots paid, a removed entry looked at counts |

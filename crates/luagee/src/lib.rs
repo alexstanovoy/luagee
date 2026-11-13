@@ -92,7 +92,7 @@ pub(crate) fn shown(bytes: &[u8]) -> String {
     format!("{}...", String::from_utf8_lossy(&bytes[..SHOWN]))
 }
 pub use heap::HostFn;
-pub use limits::Limits;
+pub use limits::{Limits, LimitsError};
 #[cfg(feature = "fs")]
 pub use loader::FolderLoader;
 pub use loader::Loader;

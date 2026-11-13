@@ -155,3 +155,47 @@ fn a_call_from_a_host_callback_pays_both_boundary_crossings_and_one_for_the_call
         );
     }
 }
+
+/// A block of ordinary code, about 280 bytes: the README quotes what loading it repeated costs.
+const ORDINARY: &str = "do
+  local function clamp(value, low, high)
+    if value < low then return low end
+    if value > high then return high end
+    return value
+  end
+  local items = { 'alpha', 'beta', 'gamma' }
+  local counts = {}
+  for index, name in ipairs(items) do
+    counts[name] = clamp(index * 3, 1, 5) -- keep it small
+  end
+end
+";
+
+/// What `load` of `ORDINARY` repeated costs by itself: the price of the chunk that builds the source and loads it,
+/// less the price of the chunk that only builds it. Besides the bytes it loads.
+fn ordinary_load_price(repeats: usize) -> (usize, u64) {
+    let building =
+        format!("local block = [==[{ORDINARY}]==] local s = string.rep(block, {repeats})");
+    let loading = format!("{building} assert(load(s))");
+    (ORDINARY.len() * repeats, price(&loading) - price(&building))
+}
+
+#[test]
+fn loading_ordinary_code_costs_the_prices_the_readme_gives() {
+    // (repeats, bytes, fuel). Before tokens were paid for, `load` cost a quarter fuel a byte: 319 and 28,710.
+    let pinned = [(4, 1276, 2636), (360, 114_840, 236_083)];
+    let mut wrong = Vec::new();
+    for (repeats, bytes, recorded) in pinned {
+        let (loaded, fuel) = ordinary_load_price(repeats);
+        eprintln!(
+            "{repeats}: {loaded} bytes, before {}, after {fuel}",
+            loaded / 4
+        );
+        if (loaded, fuel) != (bytes, recorded) {
+            wrong.push(format!(
+                "{repeats} repeats: {loaded} bytes, {fuel} fuel; recorded {bytes}, {recorded}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}

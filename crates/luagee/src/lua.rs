@@ -96,8 +96,9 @@ pub(crate) fn compile_chunk(
 }
 
 impl Lua {
-    /// An interpreter with these limits and keys.
+    /// An interpreter with these limits and keys; `Error::InvalidLimits` when the limits cannot hold one.
     pub fn new(limits: Limits, keys: Keys) -> Result<Lua, Error> {
+        limits.validate().map_err(Error::InvalidLimits)?;
         let owner = crate::value::next_owner()?;
         let mut vm = Vm::new(limits, keys, owner).map_err(|e| to_error(&mut None, e))?;
         let fuel = std::mem::replace(&mut vm.heap.fuel.left, u64::MAX);

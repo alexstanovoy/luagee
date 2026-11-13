@@ -20,6 +20,13 @@
 /// limits.call_depth = 200;
 /// assert_eq!(limits.memory, 8 << 20);
 /// ```
+///
+/// [`Lua::new`](crate::Lua::new) refuses limits that cannot hold an interpreter at all
+/// ([`Error::InvalidLimits`](crate::Error::InvalidLimits)): a `memory` below [`Limits::MIN_MEMORY`] and a
+/// `string_length` below [`Limits::MIN_STRING_LENGTH`]. Every other value is accepted, and a script meets it as its
+/// own bound: `fuel_per_call` of 0 runs out of fuel at once, a `call_depth` of 0 overflows on the first call, a
+/// `syntax_depth` of 0 refuses any source. The depths are native stack the host must have (see their fields), so a huge
+/// `syntax_depth` or `pattern_depth` is the host's choice of how deep a script may take its stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -135,6 +142,35 @@ impl Limits {
 }
 
 impl Limits {
+    /// The least `memory`: a new interpreter with the standard library counts some 47,000 bytes (the cap is checked
+    /// a quarter over it), and the smallest scripts need about 2,000 more. How much a host's scripts need beyond that
+    /// is for the host to say.
+    pub const MIN_MEMORY: usize = 64 << 10;
+    /// The least `string_length`: the interpreter's own names (the longest, `__metatable`, is 11 bytes) must fit. A
+    /// script's error messages are not bounded by it, so even this smallest bound lets a script fail with its own error.
+    pub const MIN_STRING_LENGTH: usize = 16;
+
+    /// Whether an interpreter can be made with these limits: the error names the field and the least it may be.
+    ///
+    /// # Errors
+    ///
+    /// [`LimitsError`] for a `memory` or `string_length` below its minimum.
+    pub const fn validate(&self) -> Result<(), LimitsError> {
+        if self.memory < Limits::MIN_MEMORY {
+            return Err(LimitsError::Memory {
+                given: self.memory,
+                minimum: Limits::MIN_MEMORY,
+            });
+        }
+        if self.string_length < Limits::MIN_STRING_LENGTH {
+            return Err(LimitsError::StringLength {
+                given: self.string_length,
+                minimum: Limits::MIN_STRING_LENGTH,
+            });
+        }
+        Ok(())
+    }
+
     /// The defaults.
     pub const DEFAULT: Limits = Limits {
         fuel_per_call: 500_000,
@@ -151,6 +187,43 @@ impl Limits {
     };
 }
 
+/// Why [`Limits`] cannot make an interpreter: a field below the least it may be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LimitsError {
+    /// `memory` is below [`Limits::MIN_MEMORY`].
+    Memory {
+        /// What the limits say.
+        given: usize,
+        /// The least it may be.
+        minimum: usize,
+    },
+    /// `string_length` is below [`Limits::MIN_STRING_LENGTH`].
+    StringLength {
+        /// What the limits say.
+        given: usize,
+        /// The least it may be.
+        minimum: usize,
+    },
+}
+
+impl std::fmt::Display for LimitsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LimitsError::Memory { given, minimum } => write!(
+                f,
+                "memory is {given} bytes, but an interpreter needs at least {minimum}"
+            ),
+            LimitsError::StringLength { given, minimum } => write!(
+                f,
+                "string_length is {given} bytes, but an interpreter needs at least {minimum}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LimitsError {}
+
 impl Default for Limits {
     fn default() -> Self {
         Limits::DEFAULT
@@ -161,3 +234,5 @@ impl Default for Limits {
 const _: () = assert!(Limits::DEFAULT.fuel_per_call <= Limits::DEFAULT.fuel_per_tick);
 const _: () = assert!(Limits::DEFAULT.string_length < Limits::DEFAULT.memory);
 const _: () = assert!(Limits::DEFAULT.module_size <= Limits::DEFAULT.scripts_size);
+// The defaults are valid ones.
+const _: () = assert!(Limits::DEFAULT.validate().is_ok());

@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::LimitsError;
+
 pub(crate) const RETIRED_MESSAGE: &str = "interpreter retired after a host callback panic";
 
 /// What ended a call into a script: the host gets this, never a panic, and the interpreter stays usable.
@@ -28,6 +30,8 @@ pub enum Error {
     /// retry its way past a bound. (The other bounds raise Lua's own catchable errors: "stack overflow", "string
     /// length overflow", "pattern too complex", "chunk has too many syntax levels".)
     Limit(Limit),
+    /// [`Lua::new`](crate::Lua::new) was given limits that cannot hold an interpreter.
+    InvalidLimits(LimitsError),
 }
 
 /// Which uncatchable bound of the [`Limits`](crate::Limits) a script crossed.
@@ -63,6 +67,7 @@ impl fmt::Display for Error {
                 Ok(())
             }
             Error::Limit(limit) => write!(f, "{limit}"),
+            Error::InvalidLimits(error) => write!(f, "invalid limits: {error}"),
         }
     }
 }
