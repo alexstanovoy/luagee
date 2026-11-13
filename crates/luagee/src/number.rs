@@ -129,10 +129,12 @@ pub fn to_integer(number: f64) -> Option<i64> {
     }
 }
 
-/// LuaJIT uses the sign bit for numeric-for direction, so +0 and -0 choose opposite bounds.
+/// Real steps follow LuaJIT's sign-bit direction, including +0 versus -0.
+/// NaN always takes Lua 5.1's nonpositive branch (`limit <= index`): its sign and payload stay unobservable,
+/// even where LuaJIT's sign-bit implementation makes unequal-bound NaN loops platform-dependent.
 #[must_use]
 pub fn for_in_range(index: f64, limit: f64, step: f64) -> bool {
-    if step.is_sign_positive() {
+    if !step.is_nan() && step.is_sign_positive() {
         index <= limit
     } else {
         limit <= index

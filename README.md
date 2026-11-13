@@ -109,6 +109,10 @@ their keys arrived, `tostring` of a table or function prints an id, the collecto
 own accounting decides, and `math.random` draws from a stream the host seeds. The same seed and the same calls give
 the same output.
 
+Numeric-for loops preserve LuaJIT's signed-zero direction for real steps. A NaN step always uses the Lua 5.1
+nonpositive comparison (`limit <= index`), independent of its sign or payload. This intentionally differs from
+LuaJIT where its sign-bit test makes unequal-bound NaN loops depend on how that NaN was produced or the platform.
+Equal-bound and NaN-bound cases remain reference-tested; unequal-bound NaN expectations test this explicit rule.
 
 `string.format("%p", value)` uses deterministic, type-tagged local handles, including their generations, instead of
 host addresses. Strings with equal bytes share an identity. Nil, booleans and numbers print `NULL`, as in LuaJIT;
