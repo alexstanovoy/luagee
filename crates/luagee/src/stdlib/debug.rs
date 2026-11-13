@@ -47,7 +47,7 @@ fn getinfo(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
             }
         }
     };
-    let info = vm.heap.new_table(0, 6)?;
+    let info = vm.allocate_table(0, 6)?;
     let (source, short, what, defined) = match function.map(|f| vm.heap.functions.get(f.0)) {
         Some(Function::Lua { proto, .. }) => (
             Value::String(proto.source),

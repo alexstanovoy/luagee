@@ -181,6 +181,17 @@ impl<T> Arena<T> {
         }
     }
 
+    fn reserve_growth(&mut self, growth: usize) -> usize {
+        if growth == 0 {
+            return 0;
+        }
+        debug_assert!(self.free.is_empty());
+        debug_assert_eq!(self.slots.len(), self.slots.capacity());
+        let previous = self.slots.capacity();
+        self.slots.reserve_exact(growth);
+        self.slots.capacity() - previous
+    }
+
     /// A live handle at a trusted slot index (the intern index is maintained with the arena).
     pub(crate) fn id_at(&self, index: u32) -> Handle {
         let slot = &self.slots[index as usize];
@@ -605,9 +616,44 @@ impl Heap {
         *self.cells.get_mut(cell.0) = value;
     }
 
-    pub(crate) fn new_table(&mut self, array: usize, hash: usize) -> Result<TableId, LuaError> {
+    pub(crate) fn new_table(
+        &mut self,
+        array: usize,
+        hash: usize,
+        fuel: &mut dyn FnMut(u64) -> Result<(), LuaError>,
+    ) -> Result<TableId, LuaError> {
         let table = Table::with_capacity(array, hash);
-        self.charge(table.bytes() + self.tables.growth() * TABLE_SIZE)?;
+        let room = self
+            .ceiling()
+            .checked_sub(self.memory)
+            .and_then(|room| room.checked_sub(table.bytes()))
+            .ok_or(LuaError::Limit(crate::Limit::Memory))?;
+        let wanted = self.tables.growth();
+        let growth = wanted.min(room / TABLE_SIZE);
+        if wanted != 0 && growth == 0 {
+            return Err(LuaError::Limit(crate::Limit::Memory));
+        }
+        if growth < wanted {
+            // A capped reservation may lose geometric amortisation. Pay its full possible relocation first.
+            let copied = self
+                .tables
+                .slots
+                .len()
+                .checked_mul(TABLE_SIZE)
+                .ok_or(LuaError::Limit(crate::Limit::Memory))?;
+            fuel(1 + (copied / (VALUE_BYTES * crate::vm::VALUES_PER_FUEL)) as u64)?;
+        }
+        self.charge(table.bytes() + growth * TABLE_SIZE)?;
+        let actual = self.tables.reserve_growth(growth);
+        if actual > growth {
+            // Keep allocator over-grants accounted even when the resulting quota check refuses the allocation.
+            self.memory = self
+                .memory
+                .saturating_add((actual - growth).saturating_mul(TABLE_SIZE));
+            if self.memory > self.ceiling() {
+                return Err(LuaError::Limit(crate::Limit::Memory));
+            }
+        }
         Ok(TableId(self.tables.insert(table)))
     }
 

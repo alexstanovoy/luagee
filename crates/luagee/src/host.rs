@@ -36,7 +36,7 @@ impl Vm {
     /// An empty table. Pin it before calling back into Lua if Lua cannot otherwise reach it.
     pub fn new_table(&mut self) -> Result<TableId, LuaError> {
         self.charge_fuel(crate::vm::ALLOCATION_FUEL)?;
-        self.heap.new_table(0, 0)
+        self.allocate_table(0, 0)
     }
 
     /// A table lookup without metamethods. Collected handles raise Lua errors; handles belong to this interpreter.

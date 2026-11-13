@@ -115,7 +115,7 @@ impl Vm {
         name: &str,
         functions: &[(&'static str, Native)],
     ) -> Result<TableId, LuaError> {
-        let table = self.heap.new_table(0, functions.len())?;
+        let table = self.allocate_table(0, functions.len())?;
         for &(field, f) in functions {
             self.register(table, field, f)?;
         }

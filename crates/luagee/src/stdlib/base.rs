@@ -46,9 +46,9 @@ pub(super) fn open(vm: &mut Vm) -> Result<(), LuaError> {
     vm.set_field(globals, "_G", Value::Table(globals))?;
     let version = vm.new_string(b"Lua 5.1")?;
     vm.set_field(globals, "_VERSION", version)?;
-    let package = vm.heap.new_table(0, 4)?;
+    let package = vm.allocate_table(0, 4)?;
     vm.set_field(package, "loaded", Value::Table(vm.loaded))?;
-    let preload = vm.heap.new_table(0, 0)?;
+    let preload = vm.allocate_table(0, 0)?;
     vm.set_field(package, "preload", Value::Table(preload))?;
     vm.register(package, "seeall", seeall)?;
     vm.set_field(globals, "package", Value::Table(package))?;
@@ -774,7 +774,7 @@ fn module(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                 table = match vm.heap.raw_get(table, key) {
                     Value::Table(t) => t,
                     Value::Nil => {
-                        let t = vm.heap.new_table(0, 4)?;
+                        let t = vm.allocate_table(0, 4)?;
                         vm.raw_set_checked(table, key, Value::Table(t))?;
                         t
                     }
@@ -816,7 +816,7 @@ fn seeall(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let meta = match vm.heap.table(table).metatable {
         Some(mt) => mt,
         None => {
-            let mt = vm.heap.new_table(0, 1)?;
+            let mt = vm.allocate_table(0, 1)?;
             vm.heap.set_metatable(table, Some(mt));
             mt
         }

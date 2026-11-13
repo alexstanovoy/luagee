@@ -371,6 +371,18 @@ macro_rules! located {
 }
 
 impl Vm {
+    /// Allocation never collects: host temporaries stay valid until explicit reentry/collection.
+    pub(crate) fn allocate_table(
+        &mut self,
+        array: usize,
+        hash: usize,
+    ) -> Result<TableId, LuaError> {
+        let fuel = &mut self.fuel;
+        let limit = self.fuel_limit;
+        self.heap
+            .new_table(array, hash, &mut |work| Self::spend_fuel(fuel, limit, work))
+    }
+
     pub(crate) fn new(limits: Limits, keys: crate::Keys, owner: u64) -> Result<Vm, LuaError> {
         assert_ne!(owner, 0, "an interpreter has a nonzero owner identity");
         let mut heap = Heap::new(limits.memory, keys.hash, owner);
@@ -395,8 +407,8 @@ impl Vm {
             metatable: intern("__metatable")?,
             name: intern("__name")?,
         };
-        let globals = heap.new_table(0, 64)?;
-        let loaded = heap.new_table(0, 16)?;
+        let globals = heap.new_table(0, 64, &mut |_| Ok(()))?;
+        let loaded = heap.new_table(0, 16, &mut |_| Ok(()))?;
         let mut threads = Arena::new(owner);
         let main = ThreadId(threads.insert(ThreadState::new()));
         threads.get_mut(main.0).status = ThreadStatus::Running;
@@ -1728,7 +1740,7 @@ impl Vm {
                         located!(self, self.charge_fuel(ALLOCATION_FUEL), pc);
                         let t = located!(
                             self,
-                            self.heap.new_table(usize::from(array), usize::from(hash)),
+                            self.allocate_table(usize::from(array), usize::from(hash)),
                             pc
                         );
                         self.stack[base + usize::from(a)] = Value::Table(t);

@@ -64,7 +64,7 @@ const NEW_HINT: i64 = 1 << 12;
 fn new(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let array = vm.check_integer(args, 0)?.clamp(0, NEW_HINT) as usize;
     let hash = vm.check_integer(args, 1)?.clamp(0, NEW_HINT) as usize;
-    let table = vm.heap.new_table(array, hash)?;
+    let table = vm.allocate_table(array, hash)?;
     vm.results(&[Value::Table(table)])
 }
 

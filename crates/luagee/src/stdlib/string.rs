@@ -29,7 +29,7 @@ pub(super) fn open(vm: &mut Vm) -> Result<(), LuaError> {
             ("upper", upper),
         ],
     )?;
-    let meta = vm.heap.new_table(0, 1)?;
+    let meta = vm.allocate_table(0, 1)?;
     vm.raw_set_checked(meta, Value::String(vm.names.index), Value::Table(string))?;
     vm.string_meta = Some(meta);
     Ok(())
