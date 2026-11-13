@@ -1181,7 +1181,15 @@ impl Vm {
         self.stack.truncate(slot + 1 + count);
         let (function, count) = self.callable(slot, count)?;
         match self.heap.functions.get(function.0) {
-            Function::Native { .. } => self.call_native(function, slot, count, site),
+            Function::Native { .. } => {
+                // A native calling a native pays as a call instruction would: the callee may do no paid work at all,
+                // so a native looping over callbacks (`table.foreachi(t, type)`) would otherwise run for free.
+                if site == CallSite::Native {
+                    self.charge_fuel(1)?;
+                    crate::work::visit(crate::work::Work::Steps, 1);
+                }
+                self.call_native(function, slot, count, site)
+            }
             Function::Lua { .. } => {
                 let previous_native_depth = self.native_depth;
                 self.enter_native()?;

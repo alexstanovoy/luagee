@@ -1,48 +1,92 @@
-//! Fuel is proportional to the work it pays for, and paid before the work: for every operation whose work a script
-//! sizes, at three sizes, the counted work stays within the fuel spent, a call given half that fuel is refused having
-//! done at most half the work, the exact fuel suffices and one less is refused.
+//! Fuel is proportional to the work it pays for, and paid before the work. For every operation whose work a script
+//! sizes, at three sizes: the counted work stays within the fuel spent; a call given half that fuel is refused having
+//! done no more work than that half pays for, and leaves the state as it was; the exact fuel suffices and one less is
+//! refused. Work is counted at the price the operation charges for it (see `Work::per_fuel`).
 
 use crate::{Error, Keys, Limit, Limits, Lua, Value};
 
 /// Rounding: each kind of work may round up by one fuel.
 const SLACK: u64 = 2;
 const SIZES: [usize; 3] = [64, 1024, 16384];
+const AMPLE: u64 = 1 << 40;
 
-/// An operation whose work grows with `n`: `prepare` (Lua with `n` bound) sets up the state, `operation` is the body of
-/// the function measured, and `unchanged` an expression that is true while a refused call left the state as it was.
-struct Row {
-    name: &'static str,
-    prepare: &'static str,
-    operation: &'static str,
-    unchanged: &'static str,
-}
+/// An operation whose work grows with `n`: its name, the Lua that prepares the state (with `n` bound), the body of the
+/// function measured, and an expression that is true while the state is as the preparation left it.
+type Row = (&'static str, &'static str, &'static str, &'static str);
+
+const CLEARED_ARRAY: &str = "local t={} for i=1,n do t[i]=i end for i=1,n do t[i]=nil end";
+const REMOVED_KEYS: &str = "local t={} for i=1,n do t[-i]=i end for i=1,n do t[-i]=nil end";
+const ARRAY: &str = "local t={} for i=1,n do t[i]=i end";
+const HASH: &str = "local t={} for i=1,n do t[-i]=i end";
 
 const ROWS: &[Row] = &[
-    Row {
-        name: "table.maxn over a cleared array",
-        prepare: "local t={} for i=1,n do t[i]=i end for i=1,n do t[i]=nil end",
-        operation: "return table.maxn(t)",
-        unchanged: "next(t) == nil",
-    },
-    Row {
-        name: "table.maxn over removed hash keys",
-        prepare: "local t={} for i=1,n do t[-i]=i end for i=1,n do t[-i]=nil end",
-        operation: "return table.maxn(t)",
-        unchanged: "next(t) == nil",
-    },
-    Row {
-        name: "table.maxn over live hash keys",
-        prepare: "local t={} for i=1,n do t[i+0.5]=i end",
-        operation: "return table.maxn(t)",
-        unchanged: "t[1.5] == 1",
-    },
+    (
+        "table.maxn, cleared array",
+        CLEARED_ARRAY,
+        "return table.maxn(t)",
+        "next(t) == nil",
+    ),
+    (
+        "table.maxn, removed keys",
+        REMOVED_KEYS,
+        "return table.maxn(t)",
+        "next(t) == nil",
+    ),
+    (
+        "table.maxn, live keys",
+        "local t={} for i=1,n do t[i+0.5]=i end",
+        "return table.maxn(t)",
+        "t[1.5] == 1",
+    ),
+    (
+        "next, cleared array",
+        CLEARED_ARRAY,
+        "return next(t)",
+        "#t == 0",
+    ),
+    (
+        "next, removed keys",
+        REMOVED_KEYS,
+        "return next(t)",
+        "next(t) == nil",
+    ),
+    (
+        "table.foreach, removed keys",
+        REMOVED_KEYS,
+        "return table.foreach(t,print)",
+        "next(t) == nil",
+    ),
+    (
+        "table.foreach, native callback",
+        HASH,
+        "return table.foreach(t,coroutine.running)",
+        "t[-n] == n",
+    ),
+    (
+        "table.foreachi, native callback",
+        ARRAY,
+        "return table.foreachi(t,coroutine.running)",
+        "#t == n",
+    ),
+    (
+        "table.sort, native comparator",
+        ARRAY,
+        "table.sort(t,rawequal)",
+        "#t == n",
+    ),
+    (
+        "string.gsub, native replacement",
+        "local s=string.rep('x',n)",
+        "return string.gsub(s,'.',type)",
+        "#s == n",
+    ),
 ];
 
 fn interpreter() -> Lua {
     Lua::new(
         Limits {
-            fuel_per_call: 1 << 40,
-            fuel_per_tick: 1 << 40,
+            fuel_per_call: AMPLE,
+            fuel_per_tick: AMPLE,
             ..Limits::DEFAULT
         },
         Keys {
@@ -53,75 +97,84 @@ fn interpreter() -> Lua {
     .expect("state")
 }
 
-/// A prepared interpreter with the measured function and the state check, collected, its counts reset.
-fn prepared(row: &Row, n: usize) -> (Lua, Value, Value) {
+/// What one run did: its outcome, the work counted (in fuel at each kind's price, and in units) and the fuel spent.
+struct Run {
+    outcome: Result<(), Error>,
+    work: u64,
+    units: u64,
+    fuel: u64,
+}
+
+/// Prepares the row's state in a new interpreter and runs the operation with `budget` fuel for the call; a refused
+/// call must leave the state as it was.
+fn run(&(name, prepare, operation, unchanged): &Row, n: usize, budget: u64) -> Run {
     let mut lua = interpreter();
     let source = format!(
-        "local n = {n} {} return function() {} end, function() return {} end",
-        row.prepare, row.operation, row.unchanged
+        "local n = {n} {prepare} return function() {operation} end, function() return {unchanged} end"
     );
-    let functions = lua.exec(row.name, source.as_bytes()).expect("prepares");
+    let functions = lua.exec(name, source.as_bytes()).expect("prepares");
     for &function in &functions {
         lua.pin(function).expect("root fits");
     }
     lua.collect().expect("collects");
     super::take();
-    (lua, functions[0], functions[1])
-}
-
-/// Runs the operation with `budget` fuel for the call: its outcome, the work it did in fuel and in units, the fuel spent.
-fn run(row: &Row, n: usize, budget: u64) -> (Result<(), Error>, u64, u64, u64) {
-    let (mut lua, operation, unchanged) = prepared(row, n);
     lua.vm().limits.fuel_per_call = budget;
     lua.begin_tick();
-    let outcome = lua.call(operation, &[]).map(drop);
+    let outcome = lua.call(functions[0], &[]).map(drop);
     let (work, units) = super::take();
-    let spent = (1 << 40) - lua.tick_fuel_left();
+    let fuel = AMPLE - lua.tick_fuel_left();
     if outcome.is_err() {
-        lua.vm().limits.fuel_per_call = 1 << 40;
+        lua.vm().limits.fuel_per_call = AMPLE;
         lua.begin_tick();
-        let check = lua.call(unchanged, &[]).expect("the state check runs");
+        let check = lua.call(functions[1], &[]).expect("the state check runs");
         assert_eq!(
             check,
             [Value::Boolean(true)],
-            "{}, n={n}: a refused call left the state as it was",
-            row.name
+            "{name}, n={n}: a refused call changed the state"
         );
     }
-    (outcome, work, units, spent)
+    Run {
+        outcome,
+        work,
+        units,
+        fuel,
+    }
+}
+
+fn refused(run: &Run) -> bool {
+    matches!(run.outcome, Err(Error::Limit(Limit::FuelPerCall)))
 }
 
 /// What one row breaks at one size, if anything.
 fn violations(row: &Row, n: usize) -> Vec<String> {
-    let refused =
-        |outcome: &Result<(), Error>| matches!(outcome, Err(Error::Limit(Limit::FuelPerCall)));
-    let mut found = Vec::new();
-    let (outcome, work, units, fuel) = run(row, n, 1 << 40);
-    if let Err(error) = outcome {
+    let full = run(row, n, AMPLE);
+    if let Err(error) = &full.outcome {
         return vec![format!("fails with ample fuel: {error}")];
     }
+    let (fuel, units) = (full.fuel, full.units);
+    let mut found = Vec::new();
     if units < n as u64 {
         found.push(format!("the counter misses the work: {units} units"));
     }
-    if work > fuel + SLACK {
-        found.push(format!("{work} fuel of work for {fuel} fuel"));
+    if full.work > fuel + SLACK {
+        found.push(format!("{} fuel of work for {fuel} fuel", full.work));
     }
-    let half = fuel / 2;
-    let (outcome, refused_work, ..) = run(row, n, half);
-    if !refused(&outcome) {
+    let half = run(row, n, fuel / 2);
+    if !refused(&half) {
+        found.push(format!("half the fuel is not refused: {:?}", half.outcome));
+    }
+    // Paid before it is done: refused at half the fuel, the work done was paid out of that half.
+    if half.work > fuel / 2 + SLACK {
         found.push(format!(
-            "half the fuel ({half}) is not refused: {outcome:?}"
+            "{} fuel of work done before refusing at {} fuel",
+            half.work,
+            fuel / 2
         ));
     }
-    if refused_work > half + SLACK {
-        found.push(format!(
-            "{refused_work} fuel of work done before refusing at {half}"
-        ));
-    }
-    if let (Err(error), ..) = run(row, n, fuel) {
+    if let Err(error) = run(row, n, fuel).outcome {
         found.push(format!("the exact fuel ({fuel}) does not suffice: {error}"));
     }
-    if !refused(&run(row, n, fuel - 1).0) {
+    if !refused(&run(row, n, fuel - 1)) {
         found.push(format!("one fuel less than {fuel} is not refused"));
     }
     found
@@ -135,7 +188,7 @@ fn script_sized_work_is_paid_in_proportion_and_before_it_is_done() {
             SIZES.into_iter().flat_map(move |n| {
                 violations(row, n)
                     .into_iter()
-                    .map(move |violation| format!("{}, n={n}: {violation}", row.name))
+                    .map(move |violation| format!("{}, n={n}: {violation}", row.0))
             })
         })
         .collect();

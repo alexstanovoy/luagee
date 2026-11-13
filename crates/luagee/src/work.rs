@@ -7,6 +7,8 @@
 pub(crate) enum Work {
     /// Table slots looked at.
     Slots,
+    /// Work paid one fuel a unit: functions a native function calls, slots `next` steps over.
+    Steps,
 }
 
 impl Work {
@@ -15,13 +17,20 @@ impl Work {
     pub(crate) const fn per_fuel(self) -> u64 {
         match self {
             Work::Slots => crate::vm::VALUES_PER_FUEL as u64,
+            Work::Steps => 1,
         }
     }
 }
 
+/// Every kind of work, in the order of its discriminant.
+#[cfg(test)]
+const ALL: [Work; 2] = [Work::Slots, Work::Steps];
+#[cfg(test)]
+const KINDS: usize = ALL.len();
+
 #[cfg(test)]
 std::thread_local! {
-    static DONE: std::cell::Cell<[u64; 1]> = const { std::cell::Cell::new([0; 1]) };
+    static DONE: std::cell::Cell<[u64; KINDS]> = const { std::cell::Cell::new([0; KINDS]) };
 }
 
 /// Records `units` of `work` done.
@@ -40,9 +49,8 @@ pub(crate) fn visit(work: Work, units: usize) {
 /// The work recorded since the last `take`, in fuel at each kind's price (rounded up), and in units.
 #[cfg(test)]
 pub(crate) fn take() -> (u64, u64) {
-    let counts = DONE.with(|done| done.replace([0; 1]));
-    let kinds = [Work::Slots];
-    let fuel = kinds
+    let counts = DONE.with(|done| done.replace([0; KINDS]));
+    let fuel = ALL
         .iter()
         .map(|&kind| counts[kind as usize].div_ceil(kind.per_fuel()))
         .sum();

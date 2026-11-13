@@ -1,7 +1,7 @@
 //! The base library: `print`, `type`, `pcall`, `setfenv`, `require`, ... Source-only loading, no files.
 
 use crate::heap::Function;
-use crate::table::InvalidKey;
+use crate::table::NextError;
 use crate::value::{StrId, TableId, Value};
 use crate::vm::{Args, LuaError, Vm};
 use crate::{Limit, ModuleName};
@@ -261,7 +261,9 @@ fn next(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let table = vm.check_table(args, 0)?;
     let key = vm.arg(args, 1);
     let hash = vm.heap.key_hash(key);
-    match vm.heap.table(table).next(key, hash) {
+    // Each empty slot stepped over costs a fuel: the walk stops where the fuel left stops paying for it.
+    let affordable = vm.heap.fuel.affordable(1);
+    match vm.heap.table(table).next(key, hash, affordable) {
         Ok((found, skipped)) => {
             vm.charge_fuel(skipped as u64)?;
             match found {
@@ -269,7 +271,8 @@ fn next(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                 None => vm.results(&[Value::Nil]),
             }
         }
-        Err(InvalidKey) => Err(vm.error("invalid key to 'next'")),
+        Err(NextError::Unaffordable) => Err(vm.heap.fuel.exhaust()),
+        Err(NextError::InvalidKey) => Err(vm.error("invalid key to 'next'")),
     }
 }
 

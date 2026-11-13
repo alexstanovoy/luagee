@@ -35,8 +35,13 @@ pub(crate) struct Table {
     pub(crate) metatable: Option<TableId>,
 }
 
-/// What `next` found wrong.
-pub(crate) struct InvalidKey;
+/// Why `next` found no entry to return.
+pub(crate) enum NextError {
+    /// The key is not in the table.
+    InvalidKey,
+    /// The next entry lies past the empty slots the caller can pay to step over.
+    Unaffordable,
+}
 
 impl Table {
     /// An empty table with room for `array` array items and `hash` other keys; it holds `planned_bytes(array, hash)`.
@@ -341,34 +346,43 @@ impl Table {
     }
 
     /// The entry after `key` (nil: the first), for `next` and `pairs`, and how many empty slots it stepped over (the
-    /// work the caller pays for).
+    /// work the caller pays for), stepping over no more than `limit`.
     pub(crate) fn next(
         &self,
         key: Value,
         hash: u64,
-    ) -> Result<(Option<(Value, Value)>, usize), InvalidKey> {
+        limit: usize,
+    ) -> Result<(Option<(Value, Value)>, usize), NextError> {
         let mut at = match key {
             Value::Nil => 0,
             _ => match self.array_slot(key) {
                 Some(i) if i < self.array.len() => i + 1,
-                _ => self.array.len() + self.find(key, hash).ok_or(InvalidKey)? + 1,
+                _ => {
+                    let entry = self.find(key, hash).ok_or(NextError::InvalidKey)?;
+                    self.array.len() + entry + 1
+                }
             },
         };
         let start = at;
-        while at < self.array.len() {
-            if self.array[at] != Value::Nil {
-                return Ok((
-                    Some((Value::Number((at + 1) as f64), self.array[at])),
-                    at - start,
-                ));
+        let slots = self.array.len() + self.entries.len();
+        while at < slots {
+            let found = if at < self.array.len() {
+                let value = self.array[at];
+                (value != Value::Nil).then(|| (Value::Number((at + 1) as f64), value))
+            } else {
+                let entry = &self.entries[at - self.array.len()];
+                (entry.value != Value::Nil).then_some((entry.key, entry.value))
+            };
+            if found.is_some() {
+                return Ok((found, at - start));
             }
+            if at - start == limit {
+                return Err(NextError::Unaffordable);
+            }
+            crate::work::visit(crate::work::Work::Steps, 1);
             at += 1;
         }
-        let rest = &self.entries[at - self.array.len()..];
-        match rest.iter().position(|e| e.value != Value::Nil) {
-            Some(i) => Ok((Some((rest[i].key, rest[i].value)), at - start + i)),
-            None => Ok((None, at - start + rest.len())),
-        }
+        Ok((None, at - start))
     }
 
     /// Removes every key, keeping the storage (`table.clear`): as assigning nil to each, so a `next` loop over the

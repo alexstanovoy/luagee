@@ -1,6 +1,7 @@
 //! The table library, with LuaJIT's 5.1 extras (`foreach`, `foreachi`, `getn`, `maxn`); every element moved or
 //! compared is paid in fuel.
 
+use crate::table::NextError;
 use crate::value::{TableId, Value};
 use crate::vm::{Args, LuaError, Vm};
 
@@ -287,10 +288,15 @@ fn foreach(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let mut key = Value::Nil;
     loop {
         let hash = vm.heap.key_hash(key);
-        let Ok((found, skipped)) = vm.heap.table(t).next(key, hash) else {
-            return Ok(0);
+        // Each entry and each empty slot stepped over costs a fuel, paid for before the walk reaches it.
+        vm.charge_fuel(1)?;
+        let affordable = vm.heap.fuel.affordable(1);
+        let (found, skipped) = match vm.heap.table(t).next(key, hash, affordable) {
+            Ok(step) => step,
+            Err(NextError::Unaffordable) => return Err(vm.heap.fuel.exhaust()),
+            Err(NextError::InvalidKey) => return Ok(0),
         };
-        vm.charge_fuel(skipped as u64 + 1)?;
+        vm.charge_fuel(skipped as u64)?;
         let Some((k, v)) = found else { return Ok(0) };
         let result = vm.call_meta(f, &[k, v])?;
         if result != Value::Nil {
