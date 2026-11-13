@@ -671,16 +671,16 @@ impl Heap {
         *self.cells.get_mut(cell.0) = value;
     }
 
+    /// A new table with room for `array` array items and `hash` other keys, counted before its storage exists.
     pub(crate) fn new_table(&mut self, array: usize, hash: usize) -> Result<TableId, LuaError> {
-        let table = Table::with_capacity(array, hash);
+        let bytes =
+            Table::planned_bytes(array, hash).ok_or(LuaError::Limit(crate::Limit::Memory))?;
         let ceiling = self.ceiling();
-        self.tables.reserve(
-            &mut self.memory,
-            ceiling,
-            table.bytes(),
-            TABLE_SIZE,
-            &mut self.fuel,
-        )?;
+        self.tables
+            .reserve(&mut self.memory, ceiling, bytes, TABLE_SIZE, &mut self.fuel)?;
+        let table = Table::with_capacity(array, hash);
+        // An allocator may grant more than asked: what the table holds is counted.
+        self.charge(table.bytes().saturating_sub(bytes))?;
         Ok(TableId(self.tables.insert(table)))
     }
 

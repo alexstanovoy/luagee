@@ -39,17 +39,37 @@ pub(crate) struct Table {
 pub(crate) struct InvalidKey;
 
 impl Table {
-    /// An empty table with room for `array` array items and `hash` other keys.
+    /// An empty table with room for `array` array items and `hash` other keys; it holds `planned_bytes(array, hash)`.
     pub(crate) fn with_capacity(array: usize, hash: usize) -> Table {
-        let mut table = Table {
+        #[cfg(test)]
+        tests::note_storage_construction();
+        let (entries, index) =
+            Self::hash_capacity(hash).expect("a table's planned storage is addressable");
+        Table {
             array: Vec::with_capacity(array),
-            ..Table::default()
-        };
-        if hash > 0 {
-            table.entries.reserve(hash);
-            table.index = vec![0; (hash * 2).next_power_of_two().max(4)];
+            entries: Vec::with_capacity(entries),
+            index: vec![0; index],
+            metatable: None,
         }
-        table
+    }
+
+    /// The bytes `with_capacity(array, hash)` will hold, known before any of it is allocated.
+    pub(crate) fn planned_bytes(array: usize, hash: usize) -> Option<usize> {
+        let (entries, index) = Self::hash_capacity(hash)?;
+        crate::heap::TABLE_SIZE
+            .checked_add(array.checked_mul(VALUE_BYTES)?)?
+            .checked_add(entries.checked_mul(ENTRY_BYTES)?)?
+            .checked_add(index.checked_mul(4)?)
+    }
+
+    /// The entries and index slots reserved for `hash` keys: none for none, else at least four entries (as growing
+    /// from empty gives) and an index at most half full.
+    fn hash_capacity(hash: usize) -> Option<(usize, usize)> {
+        if hash == 0 {
+            return Some((0, 0));
+        }
+        let index = hash.checked_mul(2)?.checked_next_power_of_two()?.max(4);
+        Some((hash.max(4), index))
     }
 
     /// The bytes this table holds, as the interpreter counts them.
