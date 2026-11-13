@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0
+## 0.1.0 (2026-11-13)
 
 The first release of luagee: a Lua 5.1 interpreter with LuaJIT 2.1's extensions (`goto`, the `bit` library, number
 syntax, library behaviour and error wording), in safe Rust, with no dependencies, for running scripts nobody vouches for.
