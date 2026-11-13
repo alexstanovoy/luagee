@@ -50,6 +50,49 @@ fn capped_table_arena_growth_prepays_its_exact_relocation_budget() {
     }
 }
 
+/// The string arena grows through the same reservation: a growth capped by the ceiling pays for its relocation from
+/// the running call's fuel, exactly, and refuses without counting memory when that fuel is short.
+#[test]
+fn capped_string_arena_growth_prepays_its_relocation_from_the_call_fuel() {
+    let price = 1
+        + (4 * super::STRING_OVERHEAD / (crate::value::VALUE_BYTES * crate::vm::VALUES_PER_FUEL))
+            as u64;
+    for initial in [price - 1, price] {
+        let mut heap = Heap::new(1 << 20, [1, 2], 1);
+        heap.fuel.left = 1_000;
+        for name in [b"a", b"b", b"c", b"d"] {
+            heap.intern(name).expect("four strings fit");
+        }
+        assert_eq!(
+            heap.fuel.left, 1_000,
+            "geometric growth has no fallback charge"
+        );
+        // Room under the ceiling for the next string and two more slots, not the four a doubling wants.
+        let target = heap.memory + super::STRING_OVERHEAD + 1 + 2 * super::STRING_OVERHEAD + 16;
+        heap.cap = (0..target)
+            .find(|cap| cap + cap / 4 >= target)
+            .expect("a cap");
+        let before = heap.memory;
+        heap.fuel.left = initial;
+        let result = heap.intern(b"e");
+        assert_eq!(
+            heap.fuel.left, 0,
+            "exact fallback charge, including refusal"
+        );
+        if initial == price {
+            result.expect("minimum prepaid growth succeeds");
+            assert_eq!(heap.strings.slots.capacity(), 6);
+        } else {
+            assert!(matches!(
+                result,
+                Err(crate::LuaError::Limit(Limit::FuelPerCall))
+            ));
+            assert_eq!(heap.memory, before, "refused work counts no memory");
+            assert_eq!(heap.strings.slots.capacity(), 4);
+        }
+    }
+}
+
 #[test]
 fn table_arena_refuses_before_work_when_no_new_slot_fits() {
     let mut heap = four_slot_heap(TABLE_SIZE * 38 / 5);

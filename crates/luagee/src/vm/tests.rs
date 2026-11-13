@@ -2,6 +2,7 @@
 //! stopped by fuel anywhere and resumed by the next call.
 
 use super::{Partial, Phase};
+use crate::heap::Function;
 use crate::{Error, GcStress, Keys, Limit, Limits, Lua, Value};
 
 /// A table of `{i}` tables at keys 2..=count in its hash part, rooted by a global; marking started and run until the
@@ -231,4 +232,131 @@ fn a_full_collection_stopped_by_fuel_anywhere_resumes_on_the_next_call() {
     let script = "live = {} for i = 1, 3 do live[i] = {i, tostring(i)} end local s = 'x' .. 1
         local co = coroutine.create(function() coroutine.yield() end) coroutine.resume(co) held = co";
     resumes_after_every_fuel_stop(GcStress::Full, script, 1);
+}
+
+/// An interpreter that ran `prepare` (with a 100000-item array `t` of `{i}`, traced from its end so that its first
+/// items stay untraced for some hundreds of instructions), collected, then started marking.
+fn marking(prepare: &str) -> Lua {
+    let mut lua = Lua::new(
+        Limits {
+            fuel_per_call: AMPLE,
+            fuel_per_tick: AMPLE,
+            ..Limits::DEFAULT
+        },
+        Keys {
+            hash: [193, 271],
+            random: 0,
+        },
+    )
+    .expect("state");
+    let source = format!("t = {{}} for i = 1, 100000 do t[i] = {{i}} end {prepare}");
+    lua.exec("prepare", source.as_bytes()).expect("prepares");
+    lua.collect().expect("collects");
+    lua.vm().gc_start().expect("marking starts");
+    lua
+}
+
+/// Runs `moves` while marking, finishes the collection and runs `check`.
+fn moved_then_checked(mut lua: Lua, moves: &str, check: &str) {
+    assert_eq!(lua.vm().heap.phase, Phase::Marking);
+    lua.exec("moves", moves.as_bytes()).expect("moves");
+    lua.collect().expect("collects");
+    lua.exec("check", check.as_bytes())
+        .expect("what was moved is alive");
+}
+
+/// A value stored into an upvalue cell already traced is grayed by the store.
+#[test]
+fn a_store_into_a_traced_cell_keeps_the_value_stored() {
+    let mut lua = marking("local c f = function(v) if v then c = v end return c end");
+    let f = lua.exec("f", b"return f").expect("f")[0];
+    let vm = lua.vm();
+    let Value::Function(id) = f else {
+        panic!("a function")
+    };
+    let Function::Lua { upvalues, .. } = vm.heap.functions.get(id.0) else {
+        panic!("a Lua function")
+    };
+    let cell = Value::Cell(upvalues[0]);
+    vm.trace(f);
+    vm.trace(cell);
+    moved_then_checked(lua, "f(t[1]) t[1] = nil", "assert(f()[1] == 1)");
+}
+
+/// A closure made while marking is born marked: the cells it captures, made before marking and held by nothing
+/// traced, are grayed when it is made.
+#[test]
+fn a_closure_made_while_marking_keeps_the_cells_it_captures() {
+    let lua = marking("local o = {1} t[1] = function() return function() return o end end");
+    moved_then_checked(lua, "g = t[1]() t[1] = nil", "assert(g()[1] == 1)");
+}
+
+/// A coroutine made while marking is born marked: its function, held by nothing traced, is grayed when it is made.
+#[test]
+fn a_coroutine_made_while_marking_keeps_its_function() {
+    let lua = marking("local o = {1} t[1] = function() return o end");
+    moved_then_checked(
+        lua,
+        "co = coroutine.create(t[1]) t[1] = nil",
+        "local ok, o = coroutine.resume(co) assert(ok and o[1] == 1)",
+    );
+}
+
+/// The handler of an `xpcall` a suspended coroutine is inside, held by nothing else, survives.
+#[test]
+fn a_suspended_coroutine_keeps_the_handler_of_its_xpcall() {
+    let mut lua = marking(
+        "co = coroutine.create(function()
+             local o = {1}
+             return xpcall(function() coroutine.yield() error('e') end, function() return o end)
+         end)
+         coroutine.resume(co)",
+    );
+    lua.collect().expect("collects");
+    lua.exec(
+        "check",
+        b"local ok, handled, o = coroutine.resume(co) assert(ok and not handled and o[1] == 1)",
+    )
+    .expect("the handler is alive");
+}
+
+/// What a half-traced table has left is clamped to what it now holds: a rebuild that drops removed entries below
+/// the cursor, or an array part shorter than when its trace began, ends the pieces instead of reading past them.
+/// The cursors are set past the table's parts here (its values are scalars, so skipping a part loses nothing).
+#[test]
+fn a_half_traced_table_that_shrank_is_traced_to_its_end() {
+    for (entries, array) in [(1000, None), (0, Some(1000))] {
+        let mut lua = marking("u = {1, 2, [10] = 3}");
+        let u = lua.exec("u", b"return u").expect("u")[0];
+        let Value::Table(id) = u else {
+            panic!("a table")
+        };
+        let vm = lua.vm();
+        while vm.gc_partial.is_some() {
+            vm.trace_gray(16).expect("ends the object half traced");
+        }
+        assert!(vm.heap.tables.mark(id.0));
+        vm.gc_partial = Some(Partial::Table { id, entries, array });
+        vm.trace_gray(AMPLE as usize).expect("traces");
+        assert!(vm.gc_partial.is_none(), "the pieces ended");
+        lua.collect().expect("collects");
+        lua.exec("check", b"assert(u[1] == 1 and u[10] == 3)")
+            .expect("checks");
+    }
+}
+
+/// A key whose entry was removed is not kept alive by the table it was removed from.
+#[test]
+fn a_removed_key_does_not_keep_its_object_alive() {
+    let mut lua = marking("");
+    lua.collect().expect("collects");
+    let before = lua.vm().heap.tables.live();
+    lua.exec("remove", b"local k = {} h = {} h[k] = 1 h[k] = nil")
+        .expect("removes");
+    lua.collect().expect("collects");
+    assert_eq!(
+        lua.vm().heap.tables.live(),
+        before + 1,
+        "only `h` is left of the two tables"
+    );
 }

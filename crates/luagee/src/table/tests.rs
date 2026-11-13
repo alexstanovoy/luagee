@@ -135,17 +135,24 @@ fn nil_gap_write_detects_a_broken_storage_invariant() {
     );
 }
 
-/// `table.new` hints reserve up to some 360 KB: refused by the memory cap before any of it is allocated.
+/// `table.new` hints reserve up to some 360 KB: refused by the memory cap before any of it is allocated, the hash
+/// part's index included (a 4096-key hint: 229 KB of entries and 32 KB of index, refused with 245 KB of room).
 #[test]
 fn table_new_is_refused_by_the_memory_cap_before_allocating_its_storage() {
+    for (array, room) in [(4096.0, 100_000), (0.0, 245_000)] {
+        table_new_is_refused_before_allocating(array, room);
+    }
+}
+
+fn table_new_is_refused_before_allocating(array: f64, room: usize) {
     let keys = crate::Keys {
         hash: [193, 271],
         random: 0,
     };
     let mut fresh = crate::Lua::new(crate::Limits::DEFAULT, keys).expect("state");
     fresh.collect().expect("collects");
-    // A ceiling (a quarter over the cap) some 100 KB above what a fresh interpreter holds.
-    let memory = (fresh.memory() + 100_000) * 4 / 5;
+    // A ceiling (a quarter over the cap) `room` above what a fresh interpreter holds.
+    let memory = (fresh.memory() + room) * 4 / 5;
     for (cap, constructions, refused) in
         [(memory, 0, true), (crate::Limits::DEFAULT.memory, 1, false)]
     {
@@ -161,7 +168,7 @@ fn table_new_is_refused_by_the_memory_cap_before_allocating_its_storage() {
             .exec("prepare", b"return require('table.new')")
             .expect("loads table.new")[0];
         STORAGE_CONSTRUCTIONS.with(|count| count.set(0));
-        let result = lua.call(new, &[Value::Number(4096.0), Value::Number(4096.0)]);
+        let result = lua.call(new, &[Value::Number(array), Value::Number(4096.0)]);
         assert_eq!(
             matches!(result, Err(crate::Error::Limit(crate::Limit::Memory))),
             refused,

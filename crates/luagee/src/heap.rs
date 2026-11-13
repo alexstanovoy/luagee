@@ -348,6 +348,12 @@ impl<T> Arena<T> {
         (kept, end - start)
     }
 
+    /// The objects held.
+    #[cfg(test)]
+    pub(crate) fn live(&self) -> usize {
+        self.objects
+    }
+
     /// The slots the sweep has yet to walk.
     pub(crate) fn unswept(&self) -> usize {
         self.slots.len().saturating_sub(self.swept)

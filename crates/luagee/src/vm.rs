@@ -2976,12 +2976,8 @@ impl Vm {
         if self.heap.phase == Phase::Marking {
             self.threads.unmark(from.0);
             self.heap.gray.push(Value::Thread(from));
-            // A coroutine half traced is traced again when it stops: its stack is a root while it runs.
-            if let Some(Partial::Thread { id, .. }) = self.gc_partial
-                && (id == from || id == to)
-            {
-                self.gc_partial = None;
-            }
+            // A half-traced coroutine needs nothing more: the one stopping is traced again whole, and the one starting
+            // leaves an empty stack in its slot (its own is the running stack, a root), where the trace ends.
         }
         let thread = self.threads.get_mut(to.0);
         std::mem::swap(&mut thread.stack, &mut self.stack);
