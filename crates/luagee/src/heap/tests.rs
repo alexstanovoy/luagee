@@ -47,3 +47,25 @@ fn exhausted_generations_retire_the_slot_instead_of_reusing_old_handles() {
     assert_ne!(last.index(), replacement.index());
     assert!(arena.try_get(last).is_none());
 }
+
+#[test]
+fn vm_hash_storage_writes_keep_the_numeric_hash_counter_connected() {
+    let mut lua = crate::Lua::new(
+        crate::Limits::DEFAULT,
+        crate::Keys {
+            hash: [193, 271],
+            random: 0,
+        },
+    )
+    .expect("state");
+    let function = lua
+        .load("hash", b"local t={} for i=1,1000 do t[-i]=i end")
+        .expect("compile");
+    NUMERIC_HASHES.with(|count| count.set(0));
+    lua.call(function, &[]).expect("hash writes");
+    assert_eq!(
+        NUMERIC_HASHES.with(std::cell::Cell::get),
+        1000,
+        "a disconnected counter cannot make the no-hashing test pass vacuously"
+    );
+}
