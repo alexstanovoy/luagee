@@ -23,8 +23,6 @@ type Compile<T> = Result<T, ParseError>;
 const MAX_REGISTERS: u32 = 250;
 /// The locals a function may have active at once (LuaJIT's and Lua 5.1's limit).
 const MAX_LOCALS: usize = 200;
-/// The upvalues a function may have (LuaJIT's limit).
-const MAX_UPVALUES: usize = 60;
 /// Values a table constructor stores per `SetList`.
 const FIELDS_PER_FLUSH: u32 = 50;
 
@@ -35,6 +33,7 @@ pub(crate) fn compile(
     source: StrId,
     heap: &mut Heap,
     max_depth: u32,
+    max_upvalues: u8,
 ) -> Compile<Rc<Proto>> {
     let mut resolver = Resolver {
         functions: Vec::new(),
@@ -52,6 +51,7 @@ pub(crate) fn compile(
         source,
         depth: 0,
         max_depth,
+        max_upvalues: usize::from(max_upvalues),
     };
     compiler.function_proto(&[], true, block, 0, 0)
 }
@@ -379,6 +379,8 @@ struct Compiler<'h> {
     source: StrId,
     depth: u32,
     max_depth: u32,
+    /// `Limits::function_upvalues`: a function's captures may not outgrow it, so an upvalue's index fits its `u8`.
+    max_upvalues: usize,
 }
 
 fn is_arith(op: BinOp) -> Option<ArithOp> {
@@ -601,7 +603,9 @@ impl Compiler<'_> {
             .iter()
             .position(|n| n == name)
         {
-            return Ok(Some(i as u8));
+            return Ok(Some(
+                u8::try_from(i).expect("the limit is a u8, so every index below it fits"),
+            ));
         }
         let parent = function - 1;
         let capture = if let Some(local) = self.functions[parent]
@@ -620,13 +624,15 @@ impl Compiler<'_> {
         } else {
             return Ok(None);
         };
-        if self.functions[function].captures.len() >= MAX_UPVALUES {
-            return Err(self.limit(function, MAX_UPVALUES, "upvalues"));
+        if self.functions[function].captures.len() >= self.max_upvalues {
+            return Err(self.limit(function, self.max_upvalues, "upvalues"));
         }
         let f = &mut self.functions[function];
         f.captures.push(capture);
         f.upvalue_names.push(name.clone());
-        Ok(Some((f.captures.len() - 1) as u8))
+        let index = u8::try_from(f.captures.len() - 1)
+            .expect("the limit is a u8, so every index below it fits");
+        Ok(Some(index))
     }
 
     // --- functions and blocks --------------------------------------------------------------------------------

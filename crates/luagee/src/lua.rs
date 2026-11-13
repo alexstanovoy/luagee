@@ -80,6 +80,7 @@ pub(crate) fn compile_chunk(
         name,
         &mut vm.heap,
         vm.limits.syntax_depth,
+        vm.limits.function_upvalues,
     ) {
         Ok(proto) => proto,
         Err(ParseError::Syntax(e)) => return Ok(Err(format!("{chunk}:{}: {}", e.line, e.message))),

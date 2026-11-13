@@ -22,9 +22,18 @@ pub const LIMITS: Limits = Limits {
     call_depth: 400,
     syntax_depth: 100,
     pattern_depth: 100,
+    function_upvalues: 60,
     module_size: 1 << 16,
     scripts_size: 1 << 18,
     module_count: 32,
+};
+
+/// [`LIMITS`] with the most upvalues a function may have: what the targets that only look for crashes and broken
+/// bounds run under, so the widest upvalue index and the largest closures are fuzzed too. The targets that compare
+/// runs with another interpreter's (stock Lua's and LuaJIT's limit is 60) keep [`LIMITS`].
+pub const WIDE_LIMITS: Limits = Limits {
+    function_upvalues: u8::MAX,
+    ..LIMITS
 };
 
 /// The bytes the process really holds beyond what the interpreter counts may not pass this: its count is an estimate
@@ -85,7 +94,11 @@ pub fn peak_while<T>(f: impl FnOnce() -> T) -> (T, usize) {
 /// An interpreter under [`LIMITS`] whose `print` writes into the returned buffer, and whose modules all read
 /// `return ...`.
 pub fn interpreter(keys: Keys) -> (Lua, Rc<RefCell<Vec<u8>>>) {
-    let mut lua = Lua::new(LIMITS, keys).expect("an interpreter");
+    interpreter_under(LIMITS, keys)
+}
+
+fn interpreter_under(limits: Limits, keys: Keys) -> (Lua, Rc<RefCell<Vec<u8>>>) {
+    let mut lua = Lua::new(limits, keys).expect("an interpreter");
     let printed = Rc::new(RefCell::new(Vec::new()));
     let sink = printed.clone();
     lua.set_print(Box::new(move |line| {
@@ -156,18 +169,18 @@ pub const KEYS: Keys = Keys {
     random: 3,
 };
 
-/// Runs a chunk and checks what the sandbox promises whatever it does: no panic (the fuzzer catches one), memory as
+/// Runs a chunk under [`WIDE_LIMITS`] and checks what the sandbox promises whatever it does: no panic (the fuzzer catches one), memory as
 /// counted under the ceiling and as really held near it, a collection afterwards that leaves at most the cap (or
 /// ends in the memory limit), and an interpreter that still runs a function within a few ticks (a collection the
 /// script left under way may take a call's fuel or two first).
 pub fn check_run(source: &[u8]) {
-    let (lua, _) = interpreter(KEYS);
+    let (lua, _) = interpreter_under(WIDE_LIMITS, KEYS);
     check_interpreter(lua, source, 1);
 }
 
 /// Exercises the external callback surface under both collection schedules, selected by input bytes.
 pub fn check_host(source: &[u8]) {
-    let (mut lua, _) = interpreter(KEYS);
+    let (mut lua, _) = interpreter_under(WIDE_LIMITS, KEYS);
     host_api::install(&mut lua).expect("callbacks fit");
     lua.set_gc_stress(match source.first().map(|n| n % 3) {
         Some(1) => luagee::GcStress::Full,

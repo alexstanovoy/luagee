@@ -1,6 +1,7 @@
 //! Runs a Lua file in the sandbox: `print` goes to stdout, `require` reads modules next to the file, and an error
 //! goes to stderr with exit code 1. The fuel per call is raised so that long test programs finish; `LUA_FUEL` and
-//! `LUA_MEMORY` (bytes) set them instead. `LUA_GC_STRESS=full` or `incremental` runs the collector all the time.
+//! `LUA_MEMORY` (bytes) set them instead, `LUA_UPVALUES` (at most 255) the
+//! upvalues a function may have. `LUA_GC_STRESS=full` or `incremental` runs the collector all the time.
 //!
 //!     cargo run --release -p luagee --example lua -- FILE.lua
 
@@ -24,10 +25,16 @@ fn main() {
     };
     let fuel = setting("LUA_FUEL", 1 << 40);
     let memory = setting("LUA_MEMORY", Limits::DEFAULT.memory as u64) as usize;
+    let function_upvalues = u8::try_from(setting(
+        "LUA_UPVALUES",
+        u64::from(Limits::DEFAULT.function_upvalues),
+    ))
+    .expect("LUA_UPVALUES is at most 255");
     let limits = Limits {
         fuel_per_call: fuel,
         fuel_per_tick: fuel,
         memory,
+        function_upvalues,
         ..Limits::DEFAULT
     };
     let mut lua = Lua::new(

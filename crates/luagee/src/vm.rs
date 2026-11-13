@@ -2124,6 +2124,9 @@ impl Vm {
     // Closure construction does not reenter execution; keep its temporaries off recursive execution frames.
     #[inline(never)]
     fn create_closure(&mut self, base: usize, child: Rc<Proto>) -> Result<FuncId, LuaError> {
+        // The cells it copies are paid before they are copied: 1 a 8, like any values moved, so that a host's
+        // `Limits::function_upvalues` of 255 costs no more per fuel than a closure of a few.
+        self.charge_fuel(ALLOCATION_FUEL + (child.captures.len() / VALUES_PER_FUEL) as u64)?;
         let env = self.running_env();
         let frame = self.frames.last().expect("a running frame");
         let mut upvalues = Vec::with_capacity(child.captures.len());
@@ -2136,7 +2139,6 @@ impl Vm {
                 Capture::Upvalue(u) => frame.upvalues[usize::from(u)],
             });
         }
-        self.charge_fuel(ALLOCATION_FUEL)?;
         self.heap.new_function(Function::Lua {
             proto: child,
             upvalues: upvalues.into(),

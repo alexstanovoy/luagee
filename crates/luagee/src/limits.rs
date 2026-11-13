@@ -27,6 +27,12 @@ pub struct Limits {
     /// How deeply a string pattern's matcher may recurse (optional items, expansions, captures): "pattern too
     /// complex". Some 0.3 KiB of native stack a level.
     pub pattern_depth: u32,
+    /// The upvalues one function may capture ("function at line N has more than M upvalues"): 60 as in stock Lua 5.1
+    /// and LuaJIT, a script's nested functions counting as they do there. A byte because that is how wide an upvalue's
+    /// index is in the bytecode, so no value can name more than the representation holds (255 is stock Lua's own
+    /// hard maximum). Raise it to run scripts written for a runtime built with a larger limit; each closure then
+    /// holds up to this many cells, counted as memory and as fuel like any other closure.
+    pub function_upvalues: u8,
     /// The bytes of one module's source.
     pub module_size: usize,
     /// The bytes of all the source one interpreter loads.
@@ -45,6 +51,7 @@ impl Limits {
         call_depth: 10_000,
         syntax_depth: 200,
         pattern_depth: 200,
+        function_upvalues: 60,
         module_size: 1 << 20,
         scripts_size: 32 << 20,
         module_count: 2048,

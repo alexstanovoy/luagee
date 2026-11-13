@@ -154,6 +154,7 @@ pub const FUZZ_LIMITS: Limits = Limits {
     call_depth: 400,
     syntax_depth: 100,
     pattern_depth: 100,
+    function_upvalues: 60,
     module_size: 1 << 16,
     scripts_size: 1 << 18,
     module_count: 32,

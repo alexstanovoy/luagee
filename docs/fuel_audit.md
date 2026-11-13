@@ -51,6 +51,7 @@ nothing to grow.
 | `load(reader)` pieces | source length, at most `module_size` | each piece at the compile price (1 a 4 bytes) before it is copied; the compile charges the rest | 1150 ns a fuel at 1 MB | within the fuel | work row `load, a reader's piece then a number` |
 | pattern set that never closes | pattern length | the scan to the pattern's end, 1 a 16 bytes, before the error | 190000 ns a fuel at 4 MB, caught and repeated | paid | `a_long_unclosed_set_is_malformed_only_when_its_scan_is_paid` |
 | a sweep stopped by fuel at an arena's end | — | each sweep step and the string index's shrink paid before; the arena is an enum ending in `Done` | the next call panicked ("six arenas") | resumes | `*_collection_stopped_by_fuel_anywhere_resumes_on_the_next_call` (plain, incremental, full) |
+| creating a closure | upvalues copied, at most `Limits::function_upvalues` (default 60, at most 255) | `ALLOCATION_FUEL` + 1 a 8 upvalues, before the copy (the cells are counted as memory by `Heap::new_function`) | 19, 49 (60, 255 upvalues) | 8, 12 | `a_closure_costs_its_instruction_an_allocation_and_one_fuel_for_every_eight_upvalues_it_copies`, `a_closure_whose_copy_is_not_paid_is_refused_before_it_is_made` |
 | `table.new(narray, nhash)` storage | hints up to 4096 | memory counted before the storage is built | built, then refused | refused first | `table_new_is_refused_by_the_memory_cap_before_allocating_its_storage` |
 
 ## Rows that hold
@@ -112,7 +113,7 @@ nothing to grow.
 | Step | Bound on the work | Paid before | ns per fuel after |
 |---|---|---|---|
 | roots | running stack, pins, frames, fixed names | 1 a 4 roots | 4, 2, 2 |
-| marking an object | a string, cell, userdata: 1; a function: upvalues (at most 60) and, once a collection, its prototypes' constants (compiled code, paid when loaded) | 1 a 4 units, nothing started past the fuel | 8, 2, 1 (one large table) |
+| marking an object | a string, cell, userdata: 1; a function: upvalues (at most `Limits::function_upvalues`, 255) and, once a collection, its prototypes' constants (compiled code, paid when loaded) | 1 a 4 units, nothing started past the fuel | 8, 2, 1 (one large table) |
 | a table or coroutine stack | its slots, in pieces of up to 4096 | each piece before it is traced | 11, 15, 28 (a hash of tables) |
 | sweeping | slots | 1 a 4 slots, each step paid before it is walked; an arena ends with its last slot | 4, 4, 5 |
 | the worklist (gray values) | values grayed by paid stores and traces | its growth counted as memory when it grows, and at the end of a collection | — |
