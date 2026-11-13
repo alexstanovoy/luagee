@@ -47,6 +47,10 @@ nothing to grow.
 | `coroutine.resume` of a deep coroutine | frames | the boundary frame is known, no walk | 27, 31, 69 (16, 128, 1024 frames) | 25, 20, 28 | measurement |
 | hash-to-array migration | moved keys | second lookup, 1 a key | 13, 14, 32 (whole fill + move) | 13, 17, 23 | work row `a write moving hash keys into the array`, `table_fuel` pin |
 | function, cell, userdata, string, coroutine arenas | arena size | relocation of a capped growth, before reserving | false memory errors in bands of the cap | none | `garbage_functions_cells_and_coroutines_exhaust_fuel_without_false_memory_errors` |
+| `loadstring(s)`, `load(s)` refused (bytecode) | source length | no copy any more: constant | 17000 ns a fuel at 4 MB (review) | constant fuel at any length | `a_refused_bytecode_chunk_costs_the_same_at_any_length` |
+| `load(reader)` pieces | source length, at most `module_size` | each piece at the compile price (1 a 4 bytes) before it is copied; the compile charges the rest | 1150 ns a fuel at 1 MB (review) | within the fuel | work row `load, a reader's piece then a number` |
+| pattern set that never closes | pattern length | the scan to the pattern's end, 1 a 16 bytes, before the error | 190000 ns a fuel at 4 MB, caught and repeated (review) | paid | `a_long_unclosed_set_is_malformed_only_when_its_scan_is_paid` |
+| a sweep stopped by fuel at an arena's end | — | each sweep step and the string index's shrink paid before; the arena is an enum ending in `Done` | the next call panicked ("six arenas") | resumes | `*_collection_stopped_by_fuel_anywhere_resumes_on_the_next_call` (plain, incremental, full) |
 | `table.new(narray, nhash)` storage | hints up to 4096 | memory counted before the storage is built | built, then refused | refused first | `table_new_is_refused_by_the_memory_cap_before_allocating_its_storage` |
 
 ## Rows that hold
@@ -86,7 +90,7 @@ nothing to grow.
 |---|---|---|---|---|
 | `error(v, level)` | message bytes; the level walk stops at a boundary or `pcall` frame, and the frames it walks are unwound by the error | message copy and new string, before copying | — | 32, 32, 32 (no position) / 5, 2, 1 (with one) |
 | `pcall`, `xpcall` | arguments and results | 1 a 8 values; a native handler 1 a call | stack counted | 5, 4, 4 |
-| `loadstring`, `load` | source bytes, at most `module_size` | 1 a 4 bytes before parsing (the source is copied first: bounded by the string or module size) | source limits, then the heap | 6, 3, 3 |
+| `loadstring`, `load` | source bytes, at most `module_size` | 1 a 4 bytes before parsing; a string source is shared, not copied; a reader's pieces are paid before they are copied | source limits, then the heap | 6, 3, 3 |
 | `require`, `dofile` | module source through the host's loader (trusted Rust), at most `module_size` | as `load` | module count and size limits | — |
 | `tonumber(s, base)` | digits | 1 + 1 a 16 bytes | — | 8, 6, 6 |
 | `print` | bytes written | 1 a 16 bytes | — | 3, 0.4, 0.3 |
@@ -132,7 +136,6 @@ nothing to grow.
   choose colliding keys, and every index is kept at most half full, so probe runs are short in expectation; the
   measurements of hash writes stay within a factor of three of array writes at 262144 keys.
 - Some work is bounded by a limit rather than paid in proportion: `#t` (64 probes), `__index` chains (100 links),
-  `string.format` widths (99), the frames of one coroutine (`call_depth`), copying a `load` source before parsing it
-  (`module_size` or the string length limit).
+  `string.format` widths (99), the frames of one coroutine (`call_depth`).
 - Times per fuel differ between operations by about an order of magnitude (from under 1 to some 35 ns): the prices
   are proportional, not equal.

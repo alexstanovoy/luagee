@@ -90,6 +90,7 @@ const ROWS: &[Row] = &[
     ("tonumber, long numeric string", "local s=string.rep(' ',n)..'1'", "return tonumber(s)", "#s == n+1"),
     ("arithmetic, long numeric string", "local s=string.rep(' ',n)..'1'", "return s + 1", "#s == n+1"),
     ("error naming, long field name", "local k=string.rep('k',n) local f=loadstring('local t={} return t.'..k..'.x')", "return pcall(f)", "#k == n"),
+    ("load, a reader's piece then a number", "local s=string.rep('x',n) local k=0", "return load(function() k=k+1 if k==1 then return s end return 1 end)", "#s == n"),
     ("a write moving hash keys into the array", "local t={} for i=2,n+1 do t[i]=i end", "t[1]=1", "t[1] == nil and t[n+1] == n+1"),
 ];
 
@@ -274,6 +275,25 @@ fn a_long_unclosed_set_is_malformed_only_when_its_scan_is_paid() {
             short.work <= full.fuel / 2 + SLACK,
             "n={n}: {} fuel of work before refusing",
             short.work
+        );
+    }
+}
+
+/// A chunk `load` or `loadstring` refuses before compiling it (bytecode) costs the same at any length: it is shared,
+/// never copied.
+#[test]
+fn a_refused_bytecode_chunk_costs_the_same_at_any_length() {
+    for operation in ["return loadstring(s)", "return load(s)"] {
+        let row: Row = (
+            "bytecode",
+            "local s='\\27'..string.rep('x',n)",
+            operation,
+            "#s == n+1",
+        );
+        let fuels = SIZES.map(|n| run(&row, n, AMPLE).fuel);
+        assert!(
+            fuels.iter().all(|&fuel| fuel == fuels[0]),
+            "{operation}: {fuels:?}"
         );
     }
 }

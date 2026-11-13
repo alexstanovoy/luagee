@@ -504,11 +504,13 @@ fn unpack(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 /// Compiles source into a function in the thread's globals, counting it against the source limits. Ok(Err(message))
 /// for source that does not compile. `name` is the chunk's name as given (what `debug.getinfo` reports as its
 /// source), `chunk` that name as positions print it.
+/// Compiles a chunk; `prepaid` of its price (a fuel a 4 bytes) was paid while its pieces were read.
 pub(crate) fn compile(
     vm: &mut Vm,
     source: &[u8],
     name: StrId,
     chunk: &str,
+    prepaid: u64,
 ) -> Result<Result<Value, String>, LuaError> {
     if source.first() == Some(&0x1b) {
         return Ok(Err(format!(
@@ -526,7 +528,7 @@ pub(crate) fn compile(
     if vm.modules_loaded > vm.limits.module_count {
         return Err(LuaError::Limit(Limit::ModuleCount));
     }
-    vm.charge_fuel(source.len() as u64 / 4)?;
+    vm.charge_fuel((source.len() as u64 / 4).saturating_sub(prepaid))?;
     crate::lua::compile_chunk(vm, source, name, chunk)
 }
 
@@ -583,18 +585,22 @@ fn loadstring(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     // Without a name, the chunk is named by its source, as in Lua.
     let name = vm.opt_string(args, 1)?.unwrap_or(text);
     let chunk = chunk_id(vm.heap.string(name));
-    let source = vm.heap.string(text).to_vec();
-    let compiled = compile(vm, &source, name, &chunk)?;
+    // Shared, not copied: a refused chunk (bytecode, too long) costs nothing in its length.
+    let source = vm.heap.string_rc(text);
+    let compiled = compile(vm, &source, name, &chunk, 0)?;
     loaded_result(vm, compiled)
 }
 
 fn load(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let chunk = vm.arg(args, 0);
     let given = vm.opt_string(args, 1)?;
-    let source = match chunk {
-        Value::String(s) => vm.heap.string(s).to_vec(),
+    let mut prepaid = 0;
+    // A string is shared, not copied, as `loadstring`'s; a reader's pieces are read into `read`.
+    let mut read = Vec::new();
+    let shared = match chunk {
+        Value::String(s) => Some(vm.heap.string_rc(s)),
         Value::Function(_) => {
-            let mut source = Vec::new();
+            let source = &mut read;
             loop {
                 // An error in the reader is load's failure, as in LuaJIT: nil and the error.
                 let piece = match vm.protect(|vm| vm.call_meta(chunk, &[]))? {
@@ -611,7 +617,13 @@ fn load(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                         if source.len() + bytes.len() > vm.limits.module_size {
                             return Err(LuaError::Limit(Limit::ModuleSize));
                         }
-                        source.extend_from_slice(bytes);
+                        // A piece is paid at the compile price before it is copied: a reader that then fails has
+                        // paid for what it read, and the compile charges only the rest.
+                        let price = bytes.len() as u64 / 4;
+                        crate::work::visit(crate::work::Work::Bytes, bytes.len());
+                        vm.charge_fuel(price)?;
+                        prepaid += price;
+                        source.extend_from_slice(vm.heap.string(s));
                     }
                     _ => {
                         let mut message = vm.where_(1);
@@ -621,10 +633,11 @@ fn load(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                     }
                 }
             }
-            source
+            None
         }
         _ => return Err(vm.arg_type_error(args, 0, "function")),
     };
+    let source = shared.as_deref().unwrap_or(&read);
     // Without a name, a string chunk is named by its source, as in Lua, and a reader's chunk is "=(load)".
     let name = match (given, chunk) {
         (Some(name), _) => name,
@@ -632,7 +645,7 @@ fn load(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         (None, _) => vm.heap.intern(b"=(load)")?,
     };
     let shown = chunk_id(vm.heap.string(name));
-    let compiled = compile(vm, &source, name, &shown)?;
+    let compiled = compile(vm, source, name, &shown, prepaid)?;
     loaded_result(vm, compiled)
 }
 
@@ -655,7 +668,7 @@ fn run_module(vm: &mut Vm, args: Args, name: &[u8], arg: Option<Value>) -> Resul
     let source = read_module(vm, args, name)?;
     let chunk = format!("@{}", crate::shown(name));
     let source_name = vm.heap.intern(chunk.as_bytes())?;
-    let function = match compile(vm, &source, source_name, &chunk_id(chunk.as_bytes()))? {
+    let function = match compile(vm, &source, source_name, &chunk_id(chunk.as_bytes()), 0)? {
         Ok(function) => function,
         Err(message) => {
             return Err(vm.error(format!(

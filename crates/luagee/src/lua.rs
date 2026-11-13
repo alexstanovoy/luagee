@@ -141,7 +141,7 @@ impl Lua {
         let compiled = vm
             .heap
             .intern(format!("@{chunk}").as_bytes())
-            .and_then(|name| crate::stdlib::compile_source(vm, source, name, chunk));
+            .and_then(|name| crate::stdlib::compile_source(vm, source, name, chunk, 0));
         vm.heap.fuel.left = fuel;
         let compiled = compiled.map_err(|e| to_error(&mut Some(vm), e))?;
         compiled.map_err(|message: String| Error::Syntax {
