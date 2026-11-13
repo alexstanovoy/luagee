@@ -257,6 +257,9 @@ prices changed for scripts (fixtures run whole, so each includes the fill or loo
 | `string.match('y', '[' .. 1000 bytes)` (never closed), caught | 271 | 333 | the scan that finds it malformed, 1 a 16 bytes |
 | an error message of `n` bytes reaching the host | — | + `n / 16` | converting it to text |
 | naming the register of an error (`field 'x'`) | `1 + pc/8 + locals/8` | units looked at / 8 | what the scan looks at, the name's copy included (+3 to +5 in the rows above) |
+| `load`, `loadstring`, `require`, `dofile` of 915 bytes of ordinary code (conformance scripts) | 228 | 2049 | every token read costs 8 (`TOKEN_FUEL`), after the quarter fuel a byte |
+| the same of 102,038 bytes | 25,509 | 278,426 | as above: about 10 times, 2.7 fuel a byte; at the default `fuel_per_call` a call loads some 180 KB of ordinary source, so a host with larger modules raises it or loads them with `Lua::load`, which is outside script fuel |
+| `load` of 1,000 comment lines (`--x`), `a=a ` x 1000, `x={1,2,3}` lines x 1000 | 1513, 1513, 3763 | 1521, 25521, 75771 | as above: a comment costs its bytes only, a token 8 |
 | a function taking an upvalue while it compiles (`load`, a chunk with nested functions) | 0 | 4 | the name is copied and indexed; a name used deep inside nested functions is taken by each of them, however short the source |
 | creating a closure of 8, 60 or 255 upvalues (one closure, the loop around it left out) | 5, 5, 5 | 6, 12, 36 | the cells it copies, 1 a 8 |
 | `collectgarbage()` over 1000 tables in a table | 10090 | 10299 | roots paid, a removed entry looked at counts |
@@ -272,7 +275,8 @@ Lua function (its return) costs 2 as well. `Vm::call` adds the results' `1 + res
 
 Unchanged, and pinned (`tests/table_fuel.rs`, `tests/fuel_prices.rs`): dense writes 4147, length appends 6147, fill
 and clear 7151, a numeric `for` 1006, `next` and `table.foreach` over empty slots (1 a slot), callbacks written in Lua,
-numeric coercion, `load` with a reader (its pieces prepay the compile price), a refused bytecode chunk. The
+numeric coercion, a refused bytecode chunk. (A reader's pieces still prepay the quarter fuel a byte of the compile
+price; its tokens are paid as the lexer reads them, as for any source.) The
 collector's worklist now counts as memory while it holds values (`collectgarbage("count")` shows it during marking). A call refused for want
 of fuel now refuses before work it cannot pay for, so some refusals come earlier than they did; the exact price of a
 call still suffices and one less is refused.

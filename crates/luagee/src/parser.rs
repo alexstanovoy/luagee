@@ -4,9 +4,10 @@
 //! nesting is bounded by `Limits::syntax_depth`; left-associative chains (`a + b + c ...`) are loops and nest nothing.
 //! Every node is counted against a byte budget, so a source cannot build an unbounded tree.
 
-use crate::Limit;
 use crate::ast::{BinOp, Block, Expr, ExprKind, Field, FunctionBody, Name, Statement, UnOp};
+use crate::fuel::Fuel;
 use crate::lexer::{Lexer, SyntaxError, Token};
+use crate::{Limit, LuaError};
 
 pub(crate) enum ParseError {
     Syntax(SyntaxError),
@@ -21,8 +22,10 @@ impl From<SyntaxError> for ParseError {
 
 type Parse<T> = Result<T, ParseError>;
 
-pub(crate) struct Parser<'a> {
+pub(crate) struct Parser<'a, 'f> {
     lexer: Lexer<'a>,
+    /// The fuel of the call that compiles, which each token read spends.
+    fuel: &'f mut Fuel,
     token: Token,
     /// The line of `token`.
     line: u32,
@@ -40,19 +43,27 @@ pub(crate) struct Parser<'a> {
 /// The bytes a node is counted as.
 const NODE: usize = 64;
 
+/// The fuel each token costs, spent as the lexer reads it: lexing, parsing and compiling take some 60 to 260 ns a token
+/// whatever its length (the dearest are new names and strings, which the heap interns, and chains of fields and
+/// operators), where the quarter fuel a byte that a source pays besides covers only reading its bytes. Eight keeps the
+/// dearest source in `examples/compile_price.rs` within the ~35 ns a fuel the audit allows.
+pub(crate) const TOKEN_FUEL: u64 = 8;
+
 /// Parses a chunk.
 pub(crate) fn parse(
     source: &[u8],
     max_depth: u32,
     max_string: usize,
     budget: usize,
+    fuel: &mut Fuel,
 ) -> Parse<Block> {
     let mut lexer = Lexer::new(source, max_string);
-    let token = lexer.next_token()?;
+    let token = read_token(&mut lexer, fuel)?;
     let line = lexer.line;
     let text = lexer.text();
     let mut parser = Parser {
         lexer,
+        fuel,
         token,
         line,
         last_line: line,
@@ -67,6 +78,16 @@ pub(crate) fn parse(
         return Err(parser.error_near("'<eof>' expected"));
     }
     Ok(block)
+}
+
+/// The next token, its price paid before the lexer reads it: a source that the call cannot pay for stops being read
+/// at the token that cannot be paid.
+fn read_token(lexer: &mut Lexer<'_>, fuel: &mut Fuel) -> Parse<Token> {
+    fuel.spend(TOKEN_FUEL).map_err(|error| match error {
+        LuaError::Limit(limit) => ParseError::Limit(limit),
+        LuaError::Runtime(_) => unreachable!("spending fuel only fails by running out"),
+    })?;
+    Ok(lexer.next_token()?)
 }
 
 fn binary_op(token: &Token) -> Option<(BinOp, u8, u8)> {
@@ -154,7 +175,7 @@ fn describe(token: &Token) -> String {
     }
 }
 
-impl<'a> Parser<'a> {
+impl<'a> Parser<'a, '_> {
     fn advance(&mut self) -> Parse<()> {
         self.last_line = self.line;
         match self.ahead.take() {
@@ -164,7 +185,7 @@ impl<'a> Parser<'a> {
                 self.text = text;
             }
             None => {
-                self.token = self.lexer.next_token()?;
+                self.token = read_token(&mut self.lexer, self.fuel)?;
                 self.line = self.lexer.line;
                 self.text = self.lexer.text();
             }
@@ -174,7 +195,7 @@ impl<'a> Parser<'a> {
 
     fn peek(&mut self) -> Parse<&Token> {
         if self.ahead.is_none() {
-            let token = self.lexer.next_token()?;
+            let token = read_token(&mut self.lexer, self.fuel)?;
             self.ahead = Some((token, self.lexer.line, self.lexer.text()));
         }
         Ok(&self.ahead.as_ref().expect("a token ahead").0)

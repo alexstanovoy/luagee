@@ -424,3 +424,41 @@ fn a_closure_the_call_cannot_pay_for_copies_no_cells() {
     );
     assert_eq!(copies(least - 1), 0, "one fuel less copies nothing");
 }
+
+/// Each token is paid for as the lexer reads it (`TOKEN_FUEL`), after the quarter fuel a byte that is paid up front: a
+/// budget that covers the bytes and five tokens reads five and stops at the sixth, having read no more than it paid for,
+/// however long the rest of the source is.
+#[test]
+fn a_compile_whose_fuel_ends_stops_reading_tokens_where_it_ends() {
+    use crate::parser::TOKEN_FUEL;
+    let row: Row = (
+        "tokens",
+        "local src = string.rep(';', n)",
+        "return load(src)",
+        "#src == n",
+    );
+    for n in SIZES {
+        // A token a byte, and the end of the source.
+        let tokens = n as u64 + 1;
+        let full = run(&row, n, AMPLE);
+        assert!(full.outcome.is_ok(), "n={n}: {:?}", full.outcome);
+        // Besides the tokens, the one step that looks for the chunk's trailing labels.
+        assert_eq!(
+            full.units,
+            TOKEN_FUEL * tokens + 1,
+            "n={n}: every token is counted"
+        );
+        let before_tokens = full.fuel - TOKEN_FUEL * tokens - 1;
+        for read in [0u64, 5, tokens / 2] {
+            let budget = before_tokens + TOKEN_FUEL * read + (TOKEN_FUEL - 1);
+            let short = run(&row, n, budget);
+            assert!(refused(&short), "n={n}, {read} tokens: {:?}", short.outcome);
+            assert_eq!(
+                short.units,
+                TOKEN_FUEL * read,
+                "n={n}: the compile reads the tokens it paid for and no more"
+            );
+            assert!(short.kept, "n={n}: a refused compile changed the state");
+        }
+    }
+}

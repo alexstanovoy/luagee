@@ -51,7 +51,8 @@ nothing to grow.
 | `load(reader)` pieces | source length, at most `module_size` | each piece at the compile price (1 a 4 bytes) before it is copied; the compile itself pays for the upvalues it takes (below) | 1150 ns a fuel at 1 MB | within the fuel | work row `load, a reader's piece then a number` |
 | pattern set that never closes | pattern length | the scan to the pattern's end, 1 a 16 bytes, before the error | 190000 ns a fuel at 4 MB, caught and repeated | paid | `a_long_unclosed_set_is_malformed_only_when_its_scan_is_paid` |
 | a sweep stopped by fuel at an arena's end | — | each sweep step and the string index's shrink paid before; the arena is an enum ending in `Done` | the next call panicked ("six arenas") | resumes | `*_collection_stopped_by_fuel_anywhere_resumes_on_the_next_call` (plain, incremental, full) |
-| compile, a name use (`resolve`) | functions nested x locals and upvalues scanned for each use | no scan: an index of the active locals by name finds the innermost declaration in one lookup; the upvalues a use makes each function take are paid when taken (`CAPTURE_FUEL`, 4) | 3338 (40 functions of 150 locals nested), 516 (255 upvalues) | 215, 231 | work rows `load, reads under 60 upvalues`, `load, reads under 40 nested functions of 150 locals`, `upvalues_taken_through_nested_functions_are_paid_one_by_one_before_they_are_taken` |
+| compile, a token | tokens, each lexed, parsed and compiled: 5 to 300 ns whatever its length | `TOKEN_FUEL` (8) as the lexer reads it, after the quarter fuel a byte up front; a compile the call cannot pay for stops at the token it cannot pay | 80 to 400 (`examples/compile_price.rs`: one-line statements 250, operator chains 350 to 430, field chains 600, distinct globals 200) | at most 32 (nested tables 20 to 32, distinct globals 21 to 24, distinct strings 14 to 24, typical code 10 to 17) | work rows `load, reads under 60 upvalues`, `load, reads under 40 nested functions of 150 locals`, `load, a block of labels`, `a_compile_whose_fuel_ends_stops_reading_tokens_where_it_ends`, prices in `tests/fuel_prices.rs` |
+| compile, a name use (`resolve`) | functions nested x locals and upvalues scanned for each use | no scan: an index of the active locals by name finds the innermost declaration in one lookup; the upvalues a use makes each function take are paid when taken (`CAPTURE_FUEL`, 4) | 3338 (40 functions of 150 locals nested), 516 (255 upvalues) | 231 and 215 with the quarter fuel a byte alone; 14 and 22 with the token price above | work rows `load, reads under 60 upvalues`, `load, reads under 40 nested functions of 150 locals`, `upvalues_taken_through_nested_functions_are_paid_one_by_one_before_they_are_taken` |
 | compile, a block of labels | statements after each, to see whether only labels follow | looked for once from the block's end | 8000 (40000 labels) | 290 | work row `load, a block of labels` |
 | creating a closure | upvalues copied, at most `Limits::function_upvalues` (default 60, at most 255) | `ALLOCATION_FUEL` + 1 a 8 upvalues, before the copy (the cells are counted as memory before the function's storage is built, `Heap::new_lua_function`) | 19, 49 (60, 255 upvalues) | 8, 12 | `a_closure_costs_its_instruction_an_allocation_and_one_fuel_for_every_eight_upvalues_it_copies`, `a_closure_whose_copy_is_not_paid_is_refused_before_it_is_made`, work row `closures of 56 upvalues`, `a_closure_the_call_cannot_pay_for_copies_no_cells` (the order: no cell is copied before the price is paid) |
 | `table.new(narray, nhash)` storage | hints up to 4096 | memory counted before the storage is built | built, then refused | refused first | `table_new_is_refused_by_the_memory_cap_before_allocating_its_storage` |
@@ -93,7 +94,7 @@ nothing to grow.
 |---|---|---|---|---|
 | `error(v, level)` | message bytes; the level walk stops at a boundary or `pcall` frame, and the frames it walks are unwound by the error | message copy and new string, before copying | — | 32, 32, 32 (no position) / 5, 2, 1 (with one) |
 | `pcall`, `xpcall` | arguments and results | 1 a 8 values; a native handler 1 a call | stack counted | 5, 4, 4 |
-| `loadstring`, `load` | source bytes, at most `module_size`; upvalues taken, at most functions nested x `Limits::function_upvalues` | 1 a 4 bytes before parsing, and `CAPTURE_FUEL` (4) when a function takes an upvalue, before it is taken; a string source is shared, not copied; a reader's pieces are paid before they are copied | source limits, then the heap | 6, 3, 3 |
+| `loadstring`, `load` | source bytes, at most `module_size`; tokens; upvalues taken, at most functions nested x `Limits::function_upvalues` | 1 a 4 bytes before parsing, `TOKEN_FUEL` (8) a token as the lexer reads it, and `CAPTURE_FUEL` (4) when a function takes an upvalue, each before it is done; a string source is shared, not copied; a reader's pieces are paid before they are copied | source limits, then the heap | 6, 3, 3 |
 | `require`, `dofile` | module source through the host's loader (trusted Rust), at most `module_size` | as `load` | module count and size limits | — |
 | `tonumber(s, base)` | digits | 1 + 1 a 16 bytes | — | 8, 6, 6 |
 | `print` | bytes written | 1 a 16 bytes | — | 3, 0.4, 0.3 |
@@ -137,11 +138,10 @@ nothing to grow.
 
 ## Known limits of this audit
 
-- Compiling is paid 1 a 4 source bytes, which is proportional to the work only for ordinary source. Source made
-  of one-line statements (`_ = g` repeated, 6 bytes and about three tokens each) costs 160 to 300 ns a fuel: lexing,
-  parsing and compiling take about 100 ns a token whatever its length, against the quarter fuel a byte. That is the
-  same at one upvalue as at 255 and at any nesting; a module of `module_size` (1 MiB) of such statements takes about
-  50 ms for 260,000 fuel. Pricing by token would close it, at a price for every `load` that is a decision of its own.
+- Compiling is paid per token, by the worst source's cost (`TOKEN_FUEL`), so source that is cheap to read is
+  overcharged: a comment or a string is only the quarter fuel a byte it is read at, which makes that 1 to 2 ns a fuel,
+  and a run of empty statements, a token of 1 byte each, about 1.3 (against the ~35 of the dearest). Typical code is
+  paid at 10 to 17 ns a fuel.
 - Hash probing (tables and the string index) is not priced per probe. With a secret SipHash key a script cannot
   choose colliding keys, and every index is kept at most half full, so probe runs are short in expectation; the
   measurements of hash writes stay within a factor of three of array writes at 262144 keys.

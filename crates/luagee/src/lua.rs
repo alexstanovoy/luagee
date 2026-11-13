@@ -69,6 +69,7 @@ pub(crate) fn compile_chunk(
         vm.limits.syntax_depth,
         vm.limits.string_length,
         budget,
+        &mut vm.heap.fuel,
     ) {
         Ok(block) => block,
         Err(ParseError::Syntax(e)) => return Ok(Err(format!("{chunk}:{}: {}", e.line, e.message))),

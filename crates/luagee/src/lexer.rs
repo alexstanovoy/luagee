@@ -163,7 +163,15 @@ impl<'a> Lexer<'a> {
         self.line += 1;
     }
 
+    /// The next token. It is counted as work (at the fuel a token is paid) where it is read, so that a token read
+    /// without being paid for would show in the tests.
     pub(crate) fn next_token(&mut self) -> Result<Token, SyntaxError> {
+        let token = self.scan()?;
+        crate::work::visit(crate::work::Work::Steps, crate::parser::TOKEN_FUEL as usize);
+        Ok(token)
+    }
+
+    fn scan(&mut self) -> Result<Token, SyntaxError> {
         loop {
             self.start = self.at;
             if self.at_end() {
