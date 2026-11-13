@@ -92,6 +92,21 @@ pub enum Value {
 }
 
 impl Value {
+    /// A type-tagged local handle, including its generation, shared by `%p` and default object rendering.
+    pub(crate) fn pointer_identity(self) -> String {
+        let (tag, handle) = match self {
+            Value::String(id) => (1, id.0),
+            Value::Table(id) => (2, id.0),
+            Value::Function(id) => (3, id.0),
+            Value::Userdata(id) => (4, id.0),
+            Value::Thread(id) => (5, id.0),
+            Value::Nil | Value::Boolean(_) | Value::Number(_) => return "NULL".to_owned(),
+            // Captured cells exist only in internal registers, never as Lua objects.
+            Value::Cell(_) => return "NULL".to_owned(),
+        };
+        format!("0x{tag:x}{:016x}", handle.local)
+    }
+
     /// Lua's truth: everything but `nil` and `false`.
     #[must_use]
     #[inline]

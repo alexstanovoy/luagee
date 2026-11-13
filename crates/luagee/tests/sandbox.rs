@@ -290,7 +290,7 @@ fn format_pointer_distinguishes_userdata_without_stringifying_it() {
     lua.pin(first).expect("root");
     let second = lua.vm().userdata(2u8, None, 0).expect("second userdata");
     lua.pin(second).expect("root");
-    let check = lua.load("userdata_identity", b"local a,b=...; assert(string.format('%p',a)==string.format('%p',a)); assert(string.format('%p',a)~=string.format('%p',b))").expect("compiles");
+    let check = lua.load("userdata_identity", b"local a,b=...; assert(string.format('%p',a)==string.format('%p',a)); assert(string.format('%p',a)~=string.format('%p',b)); for _,v in ipairs({a,b,print}) do assert(tostring(v):match('0x%x+$')==string.format('%p',v)) end").expect("compiles");
     lua.call(check, &[first, second])
         .expect("distinct stable identities");
 }

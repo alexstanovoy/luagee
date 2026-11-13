@@ -82,7 +82,8 @@ line how it must end, and the tests check that it does.
 
 ## Known differences from LuaJIT
 
-- A coroutine cannot yield inside a metamethod or a library callback (a `table.sort` comparator, a `gsub` function),
+- A coroutine cannot yield inside a metamethod or a library callback (a `table.sort` comparator, a `gsub` function,
+  or an `__eq` handler called by `table.move`),
   as in Lua 5.1. Yielding through `pcall` and `xpcall` works.
 - `__mode` and `__gc` have no effect: weak tables hold their entries, and nothing is finalized.
 - Native code calling back into Lua (metamethods, library callbacks, nested coroutine resumes) stops at 200
@@ -115,8 +116,10 @@ LuaJIT where its sign-bit test makes unequal-bound NaN loops depend on how that 
 Equal-bound and NaN-bound cases remain reference-tested; unequal-bound NaN expectations test this explicit rule.
 
 `string.format("%p", value)` uses deterministic, type-tagged local handles, including their generations, instead of
-host addresses. Strings with equal bytes share an identity. Nil, booleans and numbers print `NULL`, as in LuaJIT;
-width, precision and flags do not affect `%p`.
+host addresses. The encoding is `0x`, a kind digit (string 1, table 2, function 3, userdata 4, thread 5), then
+sixteen hex digits containing a 32-bit generation and a 32-bit slot. Strings with equal bytes share an identity. Nil, booleans and numbers print `NULL`, as in LuaJIT;
+width, precision and flags do not affect `%p`. Default `tostring` object text uses the same hex identity;
+its type prefix (including the native function's `builtin` label) is preserved.
 
 ## Development
 

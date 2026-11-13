@@ -202,7 +202,12 @@ fn move_range(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                 move_key(crate::number::add(index, difference)),
                 value,
             )?;
-            index = crate::number::add(index, step);
+            let next = crate::number::add(index, step);
+            if next == index {
+                // Rounding can stall inside the range even when both endpoints can advance.
+                vm.charge_fuel(u64::MAX)?;
+            }
+            index = next;
         }
     }
     vm.results(&[Value::Table(destination)])

@@ -625,7 +625,7 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                 let n = vm.check_number(args, argument)?;
                 format_hex_float(n, conversion == b'A', &spec)
             }
-            b'p' => pointer_identity(vm.check_any(args, argument)?),
+            b'p' => vm.check_any(args, argument)?.pointer_identity(),
             b'q' => {
                 let value = vm.check_any(args, argument)?;
                 quote(vm, value, &mut out)?;
@@ -672,19 +672,6 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 fn format_value(vm: &mut Vm, value: Value) -> Result<Value, LuaError> {
     let shown = vm.display_value(value)?;
     vm.display_raw_value(shown)
-}
-
-/// A type tag and the complete local handle keep arenas and recycled slots distinct without exposing addresses.
-fn pointer_identity(value: Value) -> String {
-    let (tag, handle) = match value {
-        Value::String(id) => (1, id.0),
-        Value::Table(id) => (2, id.0),
-        Value::Function(id) => (3, id.0),
-        Value::Userdata(id) => (4, id.0),
-        Value::Thread(id) => (5, id.0),
-        _ => return "NULL".to_owned(),
-    };
-    format!("0x{tag:x}{:016x}", handle.local)
 }
 
 fn pad_bytes(spec: &Spec, text: &mut Vec<u8>) {

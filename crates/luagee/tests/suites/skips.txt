@@ -56,7 +56,6 @@ omit luau-conformance/datetime.luau -- os: os.date and os.time
 omit luau-conformance/debug.luau -- luau: debug.info and Luau's debug library
 omit luau-conformance/exceptions.luau -- luau-api: the harness calls it to test C++ exceptions
 omit luau-conformance/iter.luau -- luau: generalized iteration and compound assignment (+=) throughout
-omit luau-conformance/move.luau -- sandbox: huge sparse moves exceed fuel; Luau also checks integer overflow differently
 omit luau-conformance/ndebug_upvalues.luau -- luau-api: yields from the main chunk for the harness to read upvalues
 omit luau-conformance/sort.luau -- luau: table.clone, table.freeze and += throughout
 omit luau-conformance/tpack.luau -- luau: string.pack and string.unpack
@@ -139,3 +138,14 @@ skip luajit-test-cleanup/lib/contents.lua#package.loaded -- sandbox: the sandbox
 omit luajit-test-cleanup/opt/sink/ffi.lua -- ffi: the FFI library
 omit luajit-test-cleanup/opt/sink/ffi_nosink.lua -- ffi: the FFI library
 skip luajit-test-cleanup/lib/contents.lua#pre-5.2 table -- luajit-version: this historical catalogue excludes table.move, which current LuaJIT provides
+omit luau-conformance/move.luau:69-71 -- slow: sparse moves scan 10 to 200 million raw keys under LuaJIT semantics
+omit luau-conformance/move.luau:73-75 -- slow: sparse moves scan 10 to 200 million raw keys under LuaJIT semantics
+omit luau-conformance/move.luau:78-80 -- slow: sparse moves scan 10 to 200 million raw keys under LuaJIT semantics
+omit luau-conformance/move.luau:83-85 -- slow: sparse moves scan 10 to 200 million raw keys under LuaJIT semantics
+omit luau-conformance/move.luau:88-90 -- slow: sparse moves scan 10 to 200 million raw keys under LuaJIT semantics
+omit luau-conformance/move.luau:129-131 -- slow: sparse moves scan 10 to 200 million raw keys under LuaJIT semantics
+omit luau-conformance/move.luau:134-136 -- slow: sparse moves scan 10 to 200 million raw keys under LuaJIT semantics
+omit luau-conformance/move.luau:156-160 -- luau: huge-range overflow errors differ from LuaJIT raw-key loops and fuel bounds
+omit luau-conformance/move.luau:162-165 -- luau: huge-range overflow errors differ from LuaJIT raw-key loops and fuel bounds
+skip luau-conformance/move.luau:161-161 -- luau: LuaJIT converts raw destination keys instead of rejecting wraparound
+skip luau-conformance/move.luau:167-167 -- luau: table.freeze is unavailable
