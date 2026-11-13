@@ -57,6 +57,7 @@ fn class_end(pattern: &[u8], mut p: usize) -> Result<usize, PatternError> {
         }
         // Look for the closing ']'; the first character may be one.
         loop {
+            crate::work::visit(crate::work::Work::Bytes, 1);
             if p >= pattern.len() {
                 return Err(PatternError::Message("malformed pattern (missing ']')"));
             }
@@ -108,6 +109,7 @@ fn in_set(c: u8, pattern: &[u8], p: usize, end: usize) -> bool {
     }
     let last = end - 1;
     while p < last {
+        crate::work::visit(crate::work::Work::Bytes, 1);
         if pattern[p] == b'%' {
             p += 1;
             if single_class(c, pattern[p]) {
@@ -172,7 +174,43 @@ impl<'a> Matcher<'a> {
             return Err(PatternError::Limit(self.fuel_limit));
         }
         self.fuel -= 1;
+        crate::work::visit(crate::work::Work::Steps, 1);
         Ok(())
+    }
+
+    /// The bytes of the pattern the fuel left pays for scanning, at sixteen bytes a fuel.
+    fn affordable_bytes(&self) -> usize {
+        usize::try_from(self.fuel).map_or(usize::MAX, |fuel| {
+            fuel.saturating_mul(16).saturating_add(15)
+        })
+    }
+
+    /// The end of the pattern item at `p`. Finding a set's `]` scans the set: it scans no further than the fuel pays
+    /// for, and is paid, sixteen bytes a fuel.
+    fn item_end(&mut self, p: usize) -> Result<usize, PatternError> {
+        let window = p
+            .saturating_add(self.affordable_bytes())
+            .min(self.pattern.len());
+        match class_end(&self.pattern[..window], p) {
+            Ok(end) => {
+                self.spend_many(((end - p) / 16) as u64)?;
+                Ok(end)
+            }
+            // What looks malformed may only be cut short: the rest of the set is past what the fuel pays for.
+            Err(PatternError::Message(_)) if window < self.pattern.len() => {
+                self.fuel = 0;
+                Err(PatternError::Limit(self.fuel_limit))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether `c` matches the item `pattern[p..end]`; testing a set scans it, paid first at sixteen bytes a fuel.
+    fn item_matches(&mut self, c: Option<u8>, p: usize, end: usize) -> Result<bool, PatternError> {
+        if self.pattern[p] == b'[' {
+            self.spend_many(((end - p) / 16) as u64)?;
+        }
+        Ok(single_match(c, self.pattern, p, end))
     }
 
     /// Tries to match the pattern from `p` against the source from `s`; the end of the match, if any.
@@ -222,11 +260,11 @@ impl<'a> Matcher<'a> {
                     if self.pattern.get(p) != Some(&b'[') {
                         return Err(PatternError::Message("missing '[' after '%f' in pattern"));
                     }
-                    let end = class_end(self.pattern, p)?;
+                    let end = self.item_end(p)?;
                     let previous = if s == 0 { 0 } else { self.source[s - 1] };
                     let current = self.source.get(s).copied().unwrap_or(0);
-                    if !in_set(previous, self.pattern, p, end)
-                        && in_set(current, self.pattern, p, end)
+                    if !self.item_matches(Some(previous), p, end)?
+                        && self.item_matches(Some(current), p, end)?
                     {
                         p = end;
                         continue;
@@ -243,9 +281,9 @@ impl<'a> Matcher<'a> {
                 }
                 _ => {}
             }
-            let end = class_end(self.pattern, p)?;
+            let end = self.item_end(p)?;
             let current = self.source.get(s).copied();
-            let matched = single_match(current, self.pattern, p, end);
+            let matched = self.item_matches(current, p, end)?;
             match self.pattern.get(end) {
                 Some(b'?') => {
                     if matched && let Some(result) = self.do_match(s + 1, end + 1)? {
@@ -275,7 +313,7 @@ impl<'a> Matcher<'a> {
 
     fn max_expand(&mut self, s: usize, p: usize, end: usize) -> Step {
         let mut count = 0;
-        while single_match(self.source.get(s + count).copied(), self.pattern, p, end) {
+        while self.item_matches(self.source.get(s + count).copied(), p, end)? {
             self.spend()?;
             count += 1;
         }
@@ -295,7 +333,7 @@ impl<'a> Matcher<'a> {
             if let Some(result) = self.do_match(s, end + 1)? {
                 return Ok(Some(result));
             }
-            if single_match(self.source.get(s).copied(), self.pattern, p, end) {
+            if self.item_matches(self.source.get(s).copied(), p, end)? {
                 s += 1;
             } else {
                 return Ok(None);
@@ -401,5 +439,8 @@ impl<'a> Matcher<'a> {
 
 /// Whether a pattern has no special characters (then `find` searches plainly).
 pub(crate) fn is_plain(pattern: &[u8]) -> bool {
-    !pattern.iter().any(|c| b"^$*+?.([%-".contains(c))
+    !pattern.iter().any(|c| {
+        crate::work::visit(crate::work::Work::Bytes, 1);
+        b"^$*+?.([%-".contains(c)
+    })
 }

@@ -257,7 +257,12 @@ fn find_aux(vm: &mut Vm, args: Args, find: bool) -> Result<usize, LuaError> {
     // LuaJIT starts past the end at the end: `("ab"):find("", 10)` finds the empty string at 3.
     let init = (position(vm.opt_integer(args, 2, 1)?, source.len()).max(1) - 1)
         .min(source.len() as i64) as usize;
-    if find && (vm.arg(args, 3).is_truthy() || is_plain(&pattern)) {
+    let plain = vm.arg(args, 3).is_truthy();
+    if find && !plain {
+        // Whether the pattern is plain is a scan of it: paid first.
+        vm.charge_fuel(pattern.len() as u64 / 16)?;
+    }
+    if find && (plain || is_plain(&pattern)) {
         vm.charge_fuel((source.len().saturating_sub(init) + pattern.len()) as u64 / 16)?;
         let found = search(&source[init..], &pattern);
         return match found {

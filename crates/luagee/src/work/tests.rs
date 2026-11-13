@@ -99,6 +99,36 @@ const ROWS: &[Row] = &[
         "return pcall(function() local _, e = pcall(error, s, 0) error(e) end)",
         "#s == n",
     ),
+    (
+        "string.match, long set",
+        "local p='['..string.rep('x',n)..']'",
+        "return string.match('y',p)",
+        "#p == n+2",
+    ),
+    (
+        "string.find, long set at each position",
+        "local p='['..string.rep('x',n)..']'",
+        "return string.find(string.rep('y',64),p)",
+        "#p == n+2",
+    ),
+    (
+        "string.match, long set repeated",
+        "local p='['..string.rep('a',n)..'x]*$'",
+        "return string.match(string.rep('x',64),p)",
+        "#p == n+5",
+    ),
+    (
+        "string.match, long set lazily repeated",
+        "local p='['..string.rep('a',n)..'x]-$'",
+        "return string.match(string.rep('x',64),p)",
+        "#p == n+5",
+    ),
+    (
+        "string.find, long plain-looking pattern",
+        "local p=string.rep('x',n)..'.'",
+        "return string.find('y',p)",
+        "#p == n+1",
+    ),
 ];
 
 fn interpreter() -> Lua {
@@ -244,4 +274,29 @@ fn an_error_message_exported_to_the_host_is_paid_before_it_is_converted() {
         );
         assert!(short.work <= full.fuel + SLACK, "n={n}");
     }
+}
+
+/// A set that never closes is malformed when the fuel pays for scanning it to the end, and ends the call by fuel when
+/// it does not: the scan that would find the error is never done unpaid.
+#[test]
+fn a_long_unclosed_set_is_malformed_only_when_its_scan_is_paid() {
+    let row: Row = (
+        "unclosed set",
+        "local p='['..string.rep('x',n)",
+        "return string.match('y',p)",
+        "#p == n+1",
+    );
+    let full = run(&row, 16384, AMPLE);
+    assert!(
+        matches!(&full.outcome, Err(Error::Runtime { message, .. }) if message.contains("missing ']'")),
+        "{:?}",
+        full.outcome
+    );
+    let short = run(&row, 16384, full.fuel / 2);
+    assert!(refused(&short), "{:?}", short.outcome);
+    assert!(
+        short.work <= full.fuel / 2 + SLACK,
+        "{} fuel of work",
+        short.work
+    );
 }
