@@ -239,26 +239,41 @@ fn an_error_message_exported_to_the_host_is_paid_before_it_is_converted() {
 }
 
 /// A set that never closes is malformed when the fuel pays for scanning it to the end, and ends the call by fuel when
-/// it does not: the scan that would find the error is never done unpaid.
+/// it does not: the scan that finds the error is paid, so that catching the error and trying again costs in
+/// proportion to the set.
 #[test]
 fn a_long_unclosed_set_is_malformed_only_when_its_scan_is_paid() {
     let row: Row = (
         "unclosed set",
         "local p='['..string.rep('x',n)",
-        "return string.match('y',p)",
+        "return pcall(string.match,'y',p)",
         "#p == n+1",
     );
-    let full = run(&row, 16384, AMPLE);
-    assert!(
-        matches!(&full.outcome, Err(Error::Runtime { message, .. }) if message.contains("missing ']'")),
-        "{:?}",
-        full.outcome
-    );
-    let short = run(&row, 16384, full.fuel / 2);
-    assert!(refused(&short), "{:?}", short.outcome);
-    assert!(
-        short.work <= full.fuel / 2 + SLACK,
-        "{} fuel of work",
-        short.work
-    );
+    for n in SIZES {
+        let full = run(&row, n, AMPLE);
+        assert!(full.outcome.is_ok(), "n={n}: {:?}", full.outcome);
+        assert!(
+            full.units >= n as u64,
+            "n={n}: the counter sees the scan, {} units",
+            full.units
+        );
+        assert!(
+            full.fuel >= (n / 16) as u64,
+            "n={n}: the scan of {n} bytes costs {} fuel",
+            full.fuel
+        );
+        assert!(
+            full.work <= full.fuel + SLACK,
+            "n={n}: {} fuel of work for {}",
+            full.work,
+            full.fuel
+        );
+        let short = run(&row, n, full.fuel / 2);
+        assert!(refused(&short), "n={n}: {:?}", short.outcome);
+        assert!(
+            short.work <= full.fuel / 2 + SLACK,
+            "n={n}: {} fuel of work before refusing",
+            short.work
+        );
+    }
 }

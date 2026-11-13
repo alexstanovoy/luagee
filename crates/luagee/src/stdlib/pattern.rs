@@ -186,7 +186,7 @@ impl<'a> Matcher<'a> {
     }
 
     /// The end of the pattern item at `p`. Finding a set's `]` scans the set: it scans no further than the fuel pays
-    /// for, and is paid, sixteen bytes a fuel.
+    /// for, and is paid, sixteen bytes a fuel, whether it finds the `]` or the pattern's end.
     fn item_end(&mut self, p: usize) -> Result<usize, PatternError> {
         let window = p
             .saturating_add(self.affordable_bytes())
@@ -201,7 +201,11 @@ impl<'a> Matcher<'a> {
                 self.fuel = 0;
                 Err(PatternError::Limit(self.fuel_limit))
             }
-            Err(error) => Err(error),
+            // Malformed: the scan to the pattern's end that found it is paid before the error is raised.
+            Err(error) => {
+                self.spend_many(((window - p) / 16) as u64)?;
+                Err(error)
+            }
         }
     }
 
