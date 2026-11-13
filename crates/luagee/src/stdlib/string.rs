@@ -670,9 +670,6 @@ fn format(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 
 /// LuaJIT formats strings directly; other values get one `__tostring` call then default rendering.
 fn format_value(vm: &mut Vm, value: Value) -> Result<Value, LuaError> {
-    if matches!(value, Value::String(_)) {
-        return Ok(value);
-    }
     let shown = vm.display_value(value)?;
     vm.display_raw_value(shown)
 }

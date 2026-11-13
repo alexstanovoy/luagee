@@ -245,6 +245,9 @@ impl Vm {
     /// `tostring`: what `__tostring` returns (whatever it is, as LuaJIT's `tostring` gives it), else the value's text
     /// (tables and functions by a stable id, never an address).
     pub(crate) fn display_value(&mut self, value: Value) -> Result<Value, LuaError> {
+        if matches!(value, Value::String(_)) {
+            return Ok(value);
+        }
         let handler = self.metamethod(value, self.names.tostring);
         if handler != Value::Nil {
             return self.call_meta(handler, &[value]);
