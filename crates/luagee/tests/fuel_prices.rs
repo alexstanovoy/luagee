@@ -16,11 +16,9 @@ fn price(source: &str) -> u64 {
 
 fn interpreter(fuel: u64) -> Lua {
     Lua::new(
-        Limits {
-            fuel_per_call: fuel,
-            fuel_per_tick: fuel,
-            ..Limits::DEFAULT
-        },
+        Limits::DEFAULT
+            .with_fuel_per_call(fuel)
+            .with_fuel_per_tick(fuel),
         Keys {
             hash: [193, 271],
             random: 0,

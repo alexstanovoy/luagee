@@ -19,11 +19,9 @@ fn lua(limits: Limits) -> Lua {
 
 #[test]
 fn calls_of_one_tick_share_its_fuel_and_a_new_tick_refills_it() {
-    let mut lua = lua(Limits {
-        fuel_per_call: 1_000_000,
-        fuel_per_tick: 1_000_000,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT
+        .with_fuel_per_call(1_000_000)
+        .with_fuel_per_tick(1_000_000));
     let spin = lua
         .load("spin", b"for i = 1, 600000 do end")
         .expect("compiles");
@@ -40,10 +38,7 @@ fn calls_of_one_tick_share_its_fuel_and_a_new_tick_refills_it() {
 
 #[test]
 fn all_the_source_one_interpreter_loads_is_bounded() {
-    let mut lua = lua(Limits {
-        scripts_size: 1 << 16,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT.with_scripts_size(1 << 16));
     let ended = lua.exec(
         "load",
         b"local s = 'return 1' .. (' '):rep(8000) for i = 1, 100 do loadstring(s) end",
@@ -56,10 +51,7 @@ fn all_the_source_one_interpreter_loads_is_bounded() {
 
 #[test]
 fn garbage_made_across_many_calls_is_collected_under_a_small_cap() {
-    let mut lua = lua(Limits {
-        memory: 4 << 20,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT.with_memory(4 << 20));
     let churn = lua
         .load(
             "churn",
@@ -129,11 +121,9 @@ fn objects_held_only_by_upvalues_and_userdata_metatables_survive_collection() {
 fn objects_moved_while_a_large_object_is_half_traced_survive_collection() {
     // A full collection at every instruction never leaves an object half traced: the other two modes do.
     for stress in [GcStress::Off, GcStress::Incremental] {
-        let mut lua = lua(Limits {
-            fuel_per_call: 50_000_000,
-            fuel_per_tick: 50_000_000,
-            ..Limits::DEFAULT
-        });
+        let mut lua = lua(Limits::DEFAULT
+            .with_fuel_per_call(50_000_000)
+            .with_fuel_per_tick(50_000_000));
         lua.set_gc_stress(stress);
         lua.exec(
             "moves",
@@ -164,12 +154,10 @@ fn objects_moved_while_a_large_object_is_half_traced_survive_collection() {
 /// after it finish it.
 #[test]
 fn a_collection_runs_only_as_far_as_the_fuel_and_later_calls_finish_it() {
-    let mut lua = lua(Limits {
-        fuel_per_call: 40_000,
-        fuel_per_tick: 40_000,
-        memory: 128 << 20,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT
+        .with_fuel_per_call(40_000)
+        .with_fuel_per_tick(40_000)
+        .with_memory(128 << 20));
     // Filling pays for the collections it sets off too, so some calls run out of fuel on the way; what they made
     // stays.
     let fill = lua
@@ -220,10 +208,7 @@ fn a_collection_runs_only_as_far_as_the_fuel_and_later_calls_finish_it() {
 
 #[test]
 fn memory_a_script_keeps_across_calls_runs_into_the_cap() {
-    let mut lua = lua(Limits {
-        memory: 4 << 20,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT.with_memory(4 << 20));
     let hoard = lua
         .load(
             "hoard",
@@ -247,10 +232,7 @@ fn memory_a_script_keeps_across_calls_runs_into_the_cap() {
 
 #[test]
 fn an_interpreter_runs_again_after_any_error() {
-    let mut lua = lua(Limits {
-        fuel_per_call: 100_000,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT.with_fuel_per_call(100_000));
     assert!(lua.exec("loop", b"while true do end").is_err());
     lua.begin_tick();
     assert!(lua.exec("error", b"error('x')").is_err());
@@ -283,11 +265,9 @@ fn the_same_seed_and_calls_print_the_same() {
 
 #[test]
 fn table_move_refuses_unaffordable_work_before_mutating_the_destination() {
-    let mut lua = lua(Limits {
-        fuel_per_call: 10_000,
-        fuel_per_tick: 10_000,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT
+        .with_fuel_per_call(10_000)
+        .with_fuel_per_tick(10_000));
     let ended = lua.exec(
         "move",
         b"destination = {99}; table.move({1}, 1, 100000, 1, destination)",
@@ -324,12 +304,10 @@ fn table_move_nonprogressing_ranges_exhaust_fuel_without_hanging() {
 
 #[test]
 fn table_move_destination_growth_is_accounted_under_the_memory_limit() {
-    let mut lua = lua(Limits {
-        memory: 256 << 10,
-        fuel_per_call: 1_000_000,
-        fuel_per_tick: 1_000_000,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT
+        .with_memory(256 << 10)
+        .with_fuel_per_call(1_000_000)
+        .with_fuel_per_tick(1_000_000));
     lua.exec(
         "setup",
         b"source = {}; for i=1,1024 do source[i]=i end; destination={}",
@@ -380,12 +358,10 @@ fn format_pointer_distinguishes_userdata_without_stringifying_it() {
 
 #[test]
 fn format_quote_charges_for_escape_expansion_before_copying() {
-    let mut lua = lua(Limits {
-        fuel_per_call: 5_000,
-        fuel_per_tick: 5_000,
-        string_length: 1 << 20,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT
+        .with_fuel_per_call(5_000)
+        .with_fuel_per_tick(5_000)
+        .with_string_length(1 << 20));
     lua.exec(
         "setup",
         b"source=string.rep(string.char(1),12000); template=string.rep('%q',8)",
@@ -404,10 +380,7 @@ fn format_quote_charges_for_escape_expansion_before_copying() {
 
 #[test]
 fn format_quote_checks_expanded_string_and_heap_bounds() {
-    let mut lua = lua(Limits {
-        string_length: 100,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT.with_string_length(100));
     let ended = lua.exec(
         "quote",
         b"return string.format('%q', string.rep(string.char(1),50))",
@@ -416,12 +389,12 @@ fn format_quote_checks_expanded_string_and_heap_bounds() {
         matches!(ended, Err(Error::Runtime { ref message, .. }) if message.contains("string length overflow")),
         "{ended:?}"
     );
-    let mut lua = self::lua(Limits {
-        memory: 256 << 10,
-        fuel_per_call: 1_000_000,
-        fuel_per_tick: 1_000_000,
-        ..Limits::DEFAULT
-    });
+    let mut lua = self::lua(
+        Limits::DEFAULT
+            .with_memory(256 << 10)
+            .with_fuel_per_call(1_000_000)
+            .with_fuel_per_tick(1_000_000),
+    );
     lua.exec("setup", b"source=string.rep(string.char(1),40000)")
         .expect("source fits");
     let ended = lua.exec(
@@ -436,11 +409,9 @@ fn format_quote_checks_expanded_string_and_heap_bounds() {
 
 #[test]
 fn format_repeated_flags_spend_fuel_in_proportion_to_template_length() {
-    let mut lua = lua(Limits {
-        fuel_per_call: 5_000,
-        fuel_per_tick: 5_000,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT
+        .with_fuel_per_call(5_000)
+        .with_fuel_per_tick(5_000));
     lua.exec("setup", b"template='%'..string.rep('-',8000)..'d'")
         .expect("template fits");
     lua.begin_tick();
@@ -468,11 +439,9 @@ fn numeric_for_signed_zero_steps_remain_cancellable_by_fuel() {
 
 #[test]
 fn native_error_names_charge_fuel_for_the_bytes_they_render() {
-    let mut lua = lua(Limits {
-        fuel_per_call: 10_000,
-        fuel_per_tick: 10_000,
-        ..Limits::DEFAULT
-    });
+    let mut lua = lua(Limits::DEFAULT
+        .with_fuel_per_call(10_000)
+        .with_fuel_per_tick(10_000));
     let name = "n".repeat(4096);
     let source = format!(
         "local t={{['{name}']=math.abs}}; for i=1,50 do pcall(function() t['{name}'](false) end) end"

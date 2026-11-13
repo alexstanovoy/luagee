@@ -14,11 +14,9 @@ fn table_move_keeps_new_base_prices_for_each_storage_path() {
     ] {
         for fuel in [minimum - 1, minimum] {
             let mut lua = Lua::new(
-                Limits {
-                    fuel_per_call: fuel,
-                    fuel_per_tick: fuel,
-                    ..Limits::DEFAULT
-                },
+                Limits::DEFAULT
+                    .with_fuel_per_call(fuel)
+                    .with_fuel_per_tick(fuel),
                 Keys {
                     hash: [193, 271],
                     random: 0,
@@ -56,11 +54,9 @@ fn table_workloads_keep_their_preoptimization_fuel_prices() {
     ] {
         for fuel in [minimum - 1, minimum] {
             let mut lua = Lua::new(
-                Limits {
-                    fuel_per_call: fuel,
-                    fuel_per_tick: fuel,
-                    ..Limits::DEFAULT
-                },
+                Limits::DEFAULT
+                    .with_fuel_per_call(fuel)
+                    .with_fuel_per_tick(fuel),
                 Keys {
                     hash: [193, 271],
                     random: 0,

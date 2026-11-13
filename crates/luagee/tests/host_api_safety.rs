@@ -9,11 +9,9 @@ use luagee::{Args, Error, GcStress, Keys, Limits, Lua, Value};
 
 fn interpreter() -> Lua {
     Lua::new(
-        Limits {
-            fuel_per_call: 20_000,
-            fuel_per_tick: 40_000,
-            ..Limits::DEFAULT
-        },
+        Limits::DEFAULT
+            .with_fuel_per_call(20_000)
+            .with_fuel_per_tick(40_000),
         Keys {
             hash: [17, 19],
             random: 23,
@@ -267,11 +265,9 @@ fn mixed_hash_and_array_writes_stay_linear() {
 #[cfg_attr(test, test)]
 fn interrupted_migration_leaves_the_original_table_valid() {
     let mut lua = Lua::new(
-        Limits {
-            fuel_per_call: 50_000,
-            fuel_per_tick: 100_000,
-            ..Limits::DEFAULT
-        },
+        Limits::DEFAULT
+            .with_fuel_per_call(50_000)
+            .with_fuel_per_tick(100_000),
         Keys {
             hash: [17, 19],
             random: 23,
@@ -341,11 +337,9 @@ fn require_retries_after_fuel_exhaustion_during_cache_commit() {
     // Find the exact exhausted-commit boundary without hard-coding VM instruction counts.
     for fuel in 1..=128 {
         let mut lua = Lua::new(
-            Limits {
-                fuel_per_call: fuel,
-                fuel_per_tick: 1000,
-                ..Limits::DEFAULT
-            },
+            Limits::DEFAULT
+                .with_fuel_per_call(fuel)
+                .with_fuel_per_tick(1000),
             Keys {
                 hash: [17, 19],
                 random: 23,
@@ -557,12 +551,10 @@ fn callback_panic_does_not_leave_an_active_callback_context() {
 #[cfg_attr(test, test)]
 fn callback_loop_results_remain_charged_until_return() {
     let mut lua = Lua::new(
-        Limits {
-            memory: 256 << 10,
-            fuel_per_call: 50_000_000,
-            fuel_per_tick: 50_000_000,
-            ..Limits::DEFAULT
-        },
+        Limits::DEFAULT
+            .with_memory(256 << 10)
+            .with_fuel_per_call(50_000_000)
+            .with_fuel_per_tick(50_000_000),
         Keys {
             hash: [17, 19],
             random: 23,

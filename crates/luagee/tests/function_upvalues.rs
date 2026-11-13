@@ -8,10 +8,7 @@ use luagee::{Error, Keys, Limit, Limits, Lua, Value};
 const LOCALS_PER_LEVEL: usize = 100;
 
 fn lua(function_upvalues: u8) -> Lua {
-    lua_with(Limits {
-        function_upvalues,
-        ..Limits::DEFAULT
-    })
+    lua_with(Limits::DEFAULT.with_function_upvalues(function_upvalues))
 }
 
 fn lua_with(limits: Limits) -> Lua {
@@ -268,12 +265,12 @@ fn a_closure_whose_copy_is_not_paid_is_refused_before_it_is_made() {
     let mut priced = lua(u8::MAX);
     priced.exec("priced", source.as_bytes()).expect("runs");
     let price = Limits::DEFAULT.fuel_per_tick - priced.tick_fuel_left();
-    let mut short = lua_with(Limits {
-        function_upvalues: u8::MAX,
-        fuel_per_call: price - 1,
-        fuel_per_tick: price - 1,
-        ..Limits::DEFAULT
-    });
+    let mut short = lua_with(
+        Limits::DEFAULT
+            .with_function_upvalues(u8::MAX)
+            .with_fuel_per_call(price - 1)
+            .with_fuel_per_tick(price - 1),
+    );
     let ended = short.exec("short", source.as_bytes());
     assert!(
         matches!(ended, Err(Error::Limit(Limit::FuelPerCall))),
@@ -283,11 +280,9 @@ fn a_closure_whose_copy_is_not_paid_is_refused_before_it_is_made() {
 
 #[test]
 fn closures_with_the_most_upvalues_count_as_memory_and_are_collected() {
-    let limits = Limits {
-        function_upvalues: u8::MAX,
-        memory: 4 << 20,
-        ..Limits::DEFAULT
-    };
+    let limits = Limits::DEFAULT
+        .with_function_upvalues(u8::MAX)
+        .with_memory(4 << 20);
     let mut lua = lua_with(limits);
     // Kept alive in a table, they run into the cap as a limit, not as a panic.
     let keep = script(255, |names| {

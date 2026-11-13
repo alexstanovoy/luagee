@@ -30,13 +30,11 @@ fn main() {
         u64::from(Limits::DEFAULT.function_upvalues),
     ))
     .expect("LUA_UPVALUES is at most 255");
-    let limits = Limits {
-        fuel_per_call: fuel,
-        fuel_per_tick: fuel,
-        memory,
-        function_upvalues,
-        ..Limits::DEFAULT
-    };
+    let limits = Limits::DEFAULT
+        .with_fuel_per_call(fuel)
+        .with_fuel_per_tick(fuel)
+        .with_memory(memory)
+        .with_function_upvalues(function_upvalues);
     let mut lua = Lua::new(
         limits,
         luagee::Keys {

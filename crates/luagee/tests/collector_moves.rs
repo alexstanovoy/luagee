@@ -168,11 +168,9 @@ fn program(seed: u64) -> String {
 /// What the program prints with the collector paced as `stress` says.
 fn printed(source: &str, stress: GcStress) -> Vec<String> {
     let mut lua = Lua::new(
-        Limits {
-            fuel_per_call: 1 << 36,
-            fuel_per_tick: 1 << 36,
-            ..Limits::DEFAULT
-        },
+        Limits::DEFAULT
+            .with_fuel_per_call(1 << 36)
+            .with_fuel_per_tick(1 << 36),
         Keys {
             hash: [5, 8],
             random: 13,

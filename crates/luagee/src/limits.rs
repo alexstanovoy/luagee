@@ -7,7 +7,21 @@
 /// The defaults suit a host that calls scripts many times a second: an interpreter runs some 50 to 250 million fuel
 /// units a second (allocation-heavy code is the slow end), so a whole tick's budget takes at most 10 to 40 ms; a few
 /// hundred source files of several megabytes in all load well inside the source bounds.
+///
+/// More bounds may be added, so the struct cannot be written out field by field outside this crate: start from
+/// [`Limits::DEFAULT`] and change what differs, with the `with_*` methods (they are `const`, so a limit can be a
+/// constant) or by assigning the fields.
+///
+/// ```
+/// use luagee::Limits;
+///
+/// const SMALL: Limits = Limits::DEFAULT.with_memory(8 << 20).with_function_upvalues(120);
+/// let mut limits = SMALL;
+/// limits.call_depth = 200;
+/// assert_eq!(limits.memory, 8 << 20);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Limits {
     /// The VM instructions one call from the host may run. Pattern matching charges its steps here too.
     pub fuel_per_call: u64,
@@ -39,6 +53,85 @@ pub struct Limits {
     pub scripts_size: usize,
     /// The modules one interpreter may load.
     pub module_count: u32,
+}
+
+impl Limits {
+    /// These limits with [`fuel_per_call`](Limits::fuel_per_call) set.
+    #[must_use]
+    pub const fn with_fuel_per_call(mut self, fuel_per_call: u64) -> Limits {
+        self.fuel_per_call = fuel_per_call;
+        self
+    }
+
+    /// These limits with [`fuel_per_tick`](Limits::fuel_per_tick) set.
+    #[must_use]
+    pub const fn with_fuel_per_tick(mut self, fuel_per_tick: u64) -> Limits {
+        self.fuel_per_tick = fuel_per_tick;
+        self
+    }
+
+    /// These limits with [`memory`](Limits::memory) set.
+    #[must_use]
+    pub const fn with_memory(mut self, memory: usize) -> Limits {
+        self.memory = memory;
+        self
+    }
+
+    /// These limits with [`string_length`](Limits::string_length) set.
+    #[must_use]
+    pub const fn with_string_length(mut self, string_length: usize) -> Limits {
+        self.string_length = string_length;
+        self
+    }
+
+    /// These limits with [`call_depth`](Limits::call_depth) set.
+    #[must_use]
+    pub const fn with_call_depth(mut self, call_depth: u32) -> Limits {
+        self.call_depth = call_depth;
+        self
+    }
+
+    /// These limits with [`syntax_depth`](Limits::syntax_depth) set.
+    #[must_use]
+    pub const fn with_syntax_depth(mut self, syntax_depth: u32) -> Limits {
+        self.syntax_depth = syntax_depth;
+        self
+    }
+
+    /// These limits with [`pattern_depth`](Limits::pattern_depth) set.
+    #[must_use]
+    pub const fn with_pattern_depth(mut self, pattern_depth: u32) -> Limits {
+        self.pattern_depth = pattern_depth;
+        self
+    }
+
+    /// These limits with [`function_upvalues`](Limits::function_upvalues) set.
+    #[must_use]
+    pub const fn with_function_upvalues(mut self, function_upvalues: u8) -> Limits {
+        self.function_upvalues = function_upvalues;
+        self
+    }
+
+    /// These limits with [`module_size`](Limits::module_size) set.
+    #[must_use]
+    pub const fn with_module_size(mut self, module_size: usize) -> Limits {
+        self.module_size = module_size;
+        self
+    }
+
+    /// These limits with [`scripts_size`](Limits::scripts_size) set.
+    #[must_use]
+    pub const fn with_scripts_size(mut self, scripts_size: usize) -> Limits {
+        self.scripts_size = scripts_size;
+        self
+    }
+
+    /// These limits with [`module_count`](Limits::module_count) set.
+    #[must_use]
+    pub const fn with_module_count(mut self, module_count: u32) -> Limits {
+        self.module_count = module_count;
+        self
+    }
 }
 
 impl Limits {

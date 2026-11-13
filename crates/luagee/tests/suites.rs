@@ -33,12 +33,10 @@ const WORKERS: usize = 4;
 
 /// The default limits, with the fuel raised so that the longest file (string and sort stress) ends, and room for the
 /// thousands of chunks the suites compile with `loadstring` in loops.
-const LIMITS: Limits = Limits {
-    fuel_per_call: 1 << 32,
-    fuel_per_tick: 1 << 32,
-    module_count: 1 << 16,
-    ..Limits::DEFAULT
-};
+const LIMITS: Limits = Limits::DEFAULT
+    .with_fuel_per_call(1 << 32)
+    .with_fuel_per_tick(1 << 32)
+    .with_module_count(1 << 16);
 
 /// The suites' folder: next to this file, or `/suites` under wasm, where `tools/wasm.sh` gives it to the guest (the
 /// folder loader resolves a folder only below a top-level guest folder there).

@@ -48,17 +48,13 @@ impl Kind {
     pub fn limits(self) -> Limits {
         match self {
             // The conformance scripts are long programs: fuel is no part of what they check.
-            Kind::Conformance => Limits {
-                fuel_per_call: 1 << 36,
-                fuel_per_tick: 1 << 36,
-                ..Limits::DEFAULT
-            },
-            Kind::Hostile => Limits {
-                fuel_per_call: 5_000_000,
-                fuel_per_tick: 5_000_000,
-                memory: 16 << 20,
-                ..Limits::DEFAULT
-            },
+            Kind::Conformance => Limits::DEFAULT
+                .with_fuel_per_call(1 << 36)
+                .with_fuel_per_tick(1 << 36),
+            Kind::Hostile => Limits::DEFAULT
+                .with_fuel_per_call(5_000_000)
+                .with_fuel_per_tick(5_000_000)
+                .with_memory(16 << 20),
             Kind::Fuzz => FUZZ_LIMITS,
         }
     }
@@ -146,19 +142,18 @@ impl Kind {
 }
 
 /// Small limits, so each input ends fast: those the fuzz targets run their inputs under.
-pub const FUZZ_LIMITS: Limits = Limits {
-    fuel_per_call: 200_000,
-    fuel_per_tick: 400_000,
-    memory: 8 << 20,
-    string_length: 1 << 20,
-    call_depth: 400,
-    syntax_depth: 100,
-    pattern_depth: 100,
-    function_upvalues: 60,
-    module_size: 1 << 16,
-    scripts_size: 1 << 18,
-    module_count: 32,
-};
+pub const FUZZ_LIMITS: Limits = Limits::DEFAULT
+    .with_fuel_per_call(200_000)
+    .with_fuel_per_tick(400_000)
+    .with_memory(8 << 20)
+    .with_string_length(1 << 20)
+    .with_call_depth(400)
+    .with_syntax_depth(100)
+    .with_pattern_depth(100)
+    .with_function_upvalues(60)
+    .with_module_size(1 << 16)
+    .with_scripts_size(1 << 18)
+    .with_module_count(32);
 
 struct Interpreter {
     lua: Lua,

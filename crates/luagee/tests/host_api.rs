@@ -90,11 +90,11 @@ fn callbacks_preserve_values_and_protect_userdata() {
 #[cfg_attr(test, test)]
 fn callbacks_keep_roots_across_nested_collection() {
     for stress in [GcStress::Full, GcStress::Incremental] {
-        let mut lua = interpreter(Limits {
-            fuel_per_call: 5_000_000,
-            fuel_per_tick: 20_000_000,
-            ..Limits::DEFAULT
-        });
+        let mut lua = interpreter(
+            Limits::DEFAULT
+                .with_fuel_per_call(5_000_000)
+                .with_fuel_per_tick(20_000_000),
+        );
         lua.set_gc_stress(stress);
         lua.exec(
             "roots",
@@ -121,11 +121,11 @@ fn nested_calls_keep_limits_and_the_interpreter_recovers() {
         (20_000, 40_000, Limit::FuelPerCall),
         (40_000, 20_000, Limit::FuelPerTick),
     ] {
-        let mut lua = interpreter(Limits {
-            fuel_per_call,
-            fuel_per_tick,
-            ..Limits::DEFAULT
-        });
+        let mut lua = interpreter(
+            Limits::DEFAULT
+                .with_fuel_per_call(fuel_per_call)
+                .with_fuel_per_tick(fuel_per_tick),
+        );
         let ended = lua.exec(
             "fuel",
             b"pcall(host.invoke, function() while true do host.optional() end end)",
@@ -167,12 +167,12 @@ fn host_allocations_and_roots_are_bounded() {
         &b"local t = host.make(1) while true do host.remember(t) end"[..],
         &b"while true do host.retain() end"[..],
     ] {
-        let mut lua = interpreter(Limits {
-            memory: 256 << 10,
-            fuel_per_call: 10_000_000,
-            fuel_per_tick: 10_000_000,
-            ..Limits::DEFAULT
-        });
+        let mut lua = interpreter(
+            Limits::DEFAULT
+                .with_memory(256 << 10)
+                .with_fuel_per_call(10_000_000)
+                .with_fuel_per_tick(10_000_000),
+        );
         let ended = lua.exec("memory", source);
         assert!(
             matches!(ended, Err(Error::Limit(Limit::Memory))),
@@ -289,11 +289,11 @@ fn metatable_writes_and_duplicate_roots_survive_collection() {
 #[cfg_attr(test, test)]
 fn deepest_host_reentry_keeps_stack_margin() {
     let run = || {
-        let mut lua = interpreter(Limits {
-            fuel_per_call: 5_000_000,
-            fuel_per_tick: 5_000_000,
-            ..Limits::DEFAULT
-        });
+        let mut lua = interpreter(
+            Limits::DEFAULT
+                .with_fuel_per_call(5_000_000)
+                .with_fuel_per_tick(5_000_000),
+        );
         lua.exec("deep_host", br#"
             local blocks = ('for i=1,1 do '):rep(199) .. ('end '):rep(199)
             local calls = 'return ' .. ('f('):rep(198) .. '1' .. (')'):rep(198)
@@ -372,11 +372,11 @@ fn stale_handles_are_rejected_after_collection_and_slot_reuse() {
 #[cfg_attr(test, test)]
 fn script_owned_tables_support_raw_operations_with_script_keys() {
     for stress in [GcStress::Off, GcStress::Incremental] {
-        let mut lua = interpreter(Limits {
-            fuel_per_call: 5_000_000,
-            fuel_per_tick: 5_000_000,
-            ..Limits::DEFAULT
-        });
+        let mut lua = interpreter(
+            Limits::DEFAULT
+                .with_fuel_per_call(5_000_000)
+                .with_fuel_per_tick(5_000_000),
+        );
         lua.set_gc_stress(stress);
         lua.exec("raw_tables", include_bytes!("host_api/raw_tables.lua"))
             .expect("raw API accepts script-owned tables and validates keys");
@@ -398,11 +398,11 @@ fn typed_callback_payloads_and_invalid_result_counts_are_checked() {
 
 #[cfg_attr(test, test)]
 fn callback_hash_churn_and_migration_preserve_table_state() {
-    let mut lua = interpreter(Limits {
-        fuel_per_call: 5_000_000,
-        fuel_per_tick: 5_000_000,
-        ..Limits::DEFAULT
-    });
+    let mut lua = interpreter(
+        Limits::DEFAULT
+            .with_fuel_per_call(5_000_000)
+            .with_fuel_per_tick(5_000_000),
+    );
     lua.exec("hash_churn", include_bytes!("host_api/hash_churn.lua"))
         .expect("budgeted compaction and migration");
 }

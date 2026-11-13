@@ -14,27 +14,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use luagee::{Error, Keys, Limit, Limits, Lua, Value};
 
 /// Small bounds, so each input ends fast.
-pub const LIMITS: Limits = Limits {
-    fuel_per_call: 200_000,
-    fuel_per_tick: 400_000,
-    memory: 8 << 20,
-    string_length: 1 << 20,
-    call_depth: 400,
-    syntax_depth: 100,
-    pattern_depth: 100,
-    function_upvalues: 60,
-    module_size: 1 << 16,
-    scripts_size: 1 << 18,
-    module_count: 32,
-};
+pub const LIMITS: Limits = Limits::DEFAULT.with_fuel_per_call(200_000).with_fuel_per_tick(400_000).with_memory(8 << 20).with_string_length(1 << 20).with_call_depth(400).with_syntax_depth(100).with_pattern_depth(100).with_function_upvalues(60).with_module_size(1 << 16).with_scripts_size(1 << 18).with_module_count(32);
 
 /// [`LIMITS`] with the most upvalues a function may have: what the targets that only look for crashes and broken
 /// bounds run under, so the widest upvalue index and the largest closures are fuzzed too. The targets that compare
 /// runs with another interpreter's (stock Lua's and LuaJIT's limit is 60) keep [`LIMITS`].
-pub const WIDE_LIMITS: Limits = Limits {
-    function_upvalues: u8::MAX,
-    ..LIMITS
-};
+pub const WIDE_LIMITS: Limits = LIMITS.with_function_upvalues(u8::MAX);
 
 /// The bytes the process really holds beyond what the interpreter counts may not pass this: its count is an estimate
 /// (a `Vec` may hold up to twice what it uses), plus the parser's and compiler's passing buffers and the fuzzer's own.

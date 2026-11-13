@@ -138,6 +138,18 @@ rustup.
 
 ## Embedding API changes (unreleased, 0.1)
 
+`Limits` is `#[non_exhaustive]`, so that adding a bound (`function_upvalues` is one) breaks no embedder. **Breaking:**
+a `Limits { .. }` literal, even with `..Limits::DEFAULT`, no longer compiles outside the crate. Start from
+`Limits::DEFAULT` and change what differs, with the `const` methods `with_*` or by assigning fields:
+
+```rust
+use luagee::Limits;
+
+const LIMITS: Limits = Limits::DEFAULT.with_memory(64 << 20).with_function_upvalues(120);
+let mut limits = LIMITS;
+limits.fuel_per_call = 1_000_000;
+```
+
 Added public callback argument access (`Args::len/is_empty`, zero-based `Vm::arg`,
 `check_*`, `opt_integer`, `opt_string`, `arg_error`), `results`, `new_string` and
 `bytes`. Callbacks can create empty tables, read/write raw fields, set table
