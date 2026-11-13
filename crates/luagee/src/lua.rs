@@ -191,6 +191,16 @@ impl Lua {
         } else {
             result.map_err(|error| {
                 let error = vm.locate(error, None);
+                // The message goes to the host as text: converting a script's string of any length is paid first.
+                if let LuaError::Runtime(thrown) = &error
+                    && let Value::String(message) = thrown.value
+                {
+                    let length = vm.heap.string(message).len();
+                    if let Err(limit) = vm.charge_fuel(length as u64 / 16) {
+                        return to_error(&mut Some(vm), limit);
+                    }
+                    crate::work::visit(crate::work::Work::Bytes, length);
+                }
                 to_error(&mut Some(vm), error)
             })
         };

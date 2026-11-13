@@ -67,7 +67,15 @@ fn assert(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
         return vm.results(&values);
     }
     let message = match vm.arg(args, 1) {
-        Value::String(s) => vm.heap.string(s).to_vec(),
+        // A string is raised as it is (its position added where a Lua caller locates it): no copy.
+        Value::String(s) => {
+            let error = LuaError::runtime(Value::String(s), crate::vm::Traceback::default(), false);
+            return Err(if vm.call_site.is_from_lua() {
+                error
+            } else {
+                vm.locate_nowhere(error)
+            });
+        }
         // A number message is raised as its text, with a position, as LuaJIT does.
         Value::Number(n) => crate::number::format(n).into_bytes(),
         Value::Nil if args.count < 2 => b"assertion failed!".to_vec(),
@@ -85,11 +93,12 @@ fn assert(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 }
 
 fn collectgarbage(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
-    let option = match vm.opt_string(args, 0)? {
-        Some(s) => vm.heap.string(s).to_vec(),
-        None => b"collect".to_vec(),
+    // Shared, not copied: an invalid option can be a string of any length.
+    let option: std::rc::Rc<[u8]> = match vm.opt_string(args, 0)? {
+        Some(s) => vm.heap.string_rc(s),
+        None => std::rc::Rc::from(&b"collect"[..]),
     };
-    match option.as_slice() {
+    match &option[..] {
         b"collect" => {
             vm.request_collection();
             vm.results(&[Value::Number(0.0)])
@@ -131,7 +140,9 @@ fn error(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
                     let mut text = position;
                     match value {
                         Value::String(s) => {
-                            vm.charge_fuel(vm.heap.string(s).len() as u64 / 16)?;
+                            let length = vm.heap.string(s).len();
+                            vm.charge_fuel(length as u64 / 16)?;
+                            crate::work::visit(crate::work::Work::Bytes, length);
                             text.extend_from_slice(vm.heap.string(s));
                         }
                         Value::Number(n) => {

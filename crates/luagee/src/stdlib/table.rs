@@ -235,9 +235,10 @@ fn move_key(index: f64) -> i64 {
 
 fn concat(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let t = vm.check_table(args, 0)?;
-    let separator = match vm.opt_string(args, 1)? {
-        Some(s) => vm.heap.string(s).to_vec(),
-        None => Vec::new(),
+    // Shared, not copied: the range may be empty and the separator never used.
+    let separator: std::rc::Rc<[u8]> = match vm.opt_string(args, 1)? {
+        Some(s) => vm.heap.string_rc(s),
+        None => std::rc::Rc::from(&[][..]),
     };
     let first = vm.opt_integer(args, 2, 1)?;
     let last = match vm.arg(args, 3) {

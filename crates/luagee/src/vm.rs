@@ -510,10 +510,8 @@ impl Vm {
         let value = match (value, self.frames.last()) {
             (Value::String(s), Some(frame)) => {
                 let at = pc.unwrap_or(frame.pc).saturating_sub(1);
-                let mut text = Self::position(&frame.proto, at).into_bytes();
-                text.extend_from_slice(b": ");
-                text.extend_from_slice(self.heap.string(s));
-                match self.heap.intern(&text) {
+                let position = Self::position(&frame.proto, at);
+                match self.prefixed(position, s) {
                     Ok(s) => Value::String(s),
                     Err(e) => return e,
                 }
@@ -541,11 +539,8 @@ impl Vm {
         let caller = &self.frames[self.frames.len() - 2];
         let value = match value {
             Value::String(s) => {
-                let mut text =
-                    Self::position(&caller.proto, caller.pc.saturating_sub(1)).into_bytes();
-                text.extend_from_slice(b": ");
-                text.extend_from_slice(self.heap.string(s));
-                match self.heap.intern(&text) {
+                let position = Self::position(&caller.proto, caller.pc.saturating_sub(1));
+                match self.prefixed(position, s) {
                     Ok(s) => Value::String(s),
                     Err(e) => return e,
                 }
@@ -553,6 +548,18 @@ impl Vm {
             value => value,
         };
         LuaError::runtime(value, self.traceback(), true)
+    }
+
+    /// An error message with its position in front, as a new string: copying and hashing the message (a script's
+    /// string, of any length) is paid first, at sixteen bytes a fuel each.
+    fn prefixed(&mut self, position: String, message: StrId) -> Result<StrId, LuaError> {
+        let length = self.heap.string(message).len();
+        self.charge_fuel(2 * (length / 16) as u64)?;
+        crate::work::visit(crate::work::Work::Bytes, 2 * length);
+        let mut text = position.into_bytes();
+        text.extend_from_slice(b": ");
+        text.extend_from_slice(self.heap.string(message));
+        self.heap.intern(&text)
     }
 
     /// Marks an error as located without adding a position (raised by a native that no Lua code called directly).
@@ -747,6 +754,7 @@ impl Vm {
         }
         // Making a string (hashing, interning, collecting it later) costs more than an instruction.
         self.charge_fuel(ALLOCATION_FUEL + (bytes.len() / 16) as u64)?;
+        crate::work::visit(crate::work::Work::Bytes, bytes.len());
         Ok(Value::String(self.heap.intern(bytes)?))
     }
 

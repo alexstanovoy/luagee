@@ -18,6 +18,7 @@ const CLEARED_ARRAY: &str = "local t={} for i=1,n do t[i]=i end for i=1,n do t[i
 const REMOVED_KEYS: &str = "local t={} for i=1,n do t[-i]=i end for i=1,n do t[-i]=nil end";
 const ARRAY: &str = "local t={} for i=1,n do t[i]=i end";
 const HASH: &str = "local t={} for i=1,n do t[-i]=i end";
+const TEXT: &str = "local s=string.rep('x',n)";
 
 const ROWS: &[Row] = &[
     (
@@ -78,6 +79,24 @@ const ROWS: &[Row] = &[
         "string.gsub, native replacement",
         "local s=string.rep('x',n)",
         "return string.gsub(s,'.',type)",
+        "#s == n",
+    ),
+    (
+        "assert, long message, Lua caller",
+        TEXT,
+        "return pcall(function() assert(false, s) end)",
+        "#s == n",
+    ),
+    (
+        "error, long message, located",
+        TEXT,
+        "return pcall(function() error(s) end)",
+        "#s == n",
+    ),
+    (
+        "error, long message, rethrown through Lua",
+        TEXT,
+        "return pcall(function() local _, e = pcall(error, s, 0) error(e) end)",
         "#s == n",
     ),
 ];
@@ -193,4 +212,36 @@ fn script_sized_work_is_paid_in_proportion_and_before_it_is_done() {
         })
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A script's error message reaches the host as text: the conversion of a message of any length is paid first, and a
+/// call that cannot pay for it ends by its fuel instead.
+#[test]
+fn an_error_message_exported_to_the_host_is_paid_before_it_is_converted() {
+    let row: Row = ("error to the host", TEXT, "error(s, 0)", "#s == n");
+    for n in SIZES {
+        let full = run(&row, n, AMPLE);
+        assert!(
+            matches!(&full.outcome, Err(Error::Runtime { message, .. }) if message.len() == n),
+            "n={n}: {:?}",
+            full.outcome.as_ref().map_err(|e| e.to_string().len())
+        );
+        assert!(
+            full.units >= n as u64,
+            "n={n}: the counter sees the conversion"
+        );
+        assert!(
+            full.work <= full.fuel + SLACK,
+            "n={n}: {} fuel of work for {}",
+            full.work,
+            full.fuel
+        );
+        let short = run(&row, n, full.fuel - 1);
+        assert!(
+            refused(&short),
+            "n={n}: one fuel less ends by fuel: {:?}",
+            short.outcome.map_err(|e| e.to_string().len())
+        );
+        assert!(short.work <= full.fuel + SLACK, "n={n}");
+    }
 }

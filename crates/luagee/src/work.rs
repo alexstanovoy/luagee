@@ -7,6 +7,8 @@
 pub(crate) enum Work {
     /// Table slots looked at.
     Slots,
+    /// Bytes copied or hashed.
+    Bytes,
     /// Work paid one fuel a unit: functions a native function calls, slots `next` steps over.
     Steps,
 }
@@ -17,6 +19,7 @@ impl Work {
     pub(crate) const fn per_fuel(self) -> u64 {
         match self {
             Work::Slots => crate::vm::VALUES_PER_FUEL as u64,
+            Work::Bytes => 16,
             Work::Steps => 1,
         }
     }
@@ -24,7 +27,7 @@ impl Work {
 
 /// Every kind of work, in the order of its discriminant.
 #[cfg(test)]
-const ALL: [Work; 2] = [Work::Slots, Work::Steps];
+const ALL: [Work; 3] = [Work::Slots, Work::Bytes, Work::Steps];
 #[cfg(test)]
 const KINDS: usize = ALL.len();
 

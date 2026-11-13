@@ -102,9 +102,10 @@ fn reverse(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 fn rep(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let (_, s) = bytes_of(vm, args, 0)?;
     let count = vm.check_integer(args, 1)?;
-    let separator = match vm.opt_string(args, 2)? {
-        Some(sep) => vm.heap.string(sep).to_vec(),
-        None => Vec::new(),
+    // Shared, not copied: a count below 2 never uses the separator.
+    let separator: Rc<[u8]> = match vm.opt_string(args, 2)? {
+        Some(sep) => vm.heap.string_rc(sep),
+        None => Rc::from(&[][..]),
     };
     if count <= 0 || (s.is_empty() && separator.is_empty()) {
         return vm.push_string(b"");
