@@ -252,6 +252,11 @@ prices changed for scripts (fixtures run whole, so each includes the fill or loo
 | `collectgarbage()` 64 frames deep, 5 nil locals a frame | 593 | 844 | every root is paid, nil registers included: 1 a 4 |
 | `table.new(4096, 4096)`, `table.new(0, 0)`, `table.clear` of 3 items | 14, 14, 29 | 15, 15, 30 | a collection that starts during the chunk pays for its roots |
 
+A host's own calls follow the same rule ([docs/fuel_audit.md](docs/fuel_audit.md), "Host boundaries"; pinned in
+`tests/fuel_prices.rs`): `Lua::call` costs `1 + args / 8` to cross, then the callee. A Lua function pays its
+instructions; a native function pays 1 for the call, so calling a native that does no paid work costs 2 and an empty
+Lua function (its return) costs 2 as well. `Vm::call` adds the results' `1 + results / 8`.
+
 Unchanged, and pinned (`tests/table_fuel.rs`, `tests/fuel_prices.rs`): dense writes 4147, length appends 6147, fill
 and clear 7151, a numeric `for` 1006, `next` and `table.foreach` over empty slots (1 a slot), callbacks written in Lua,
 numeric coercion, `load` with a reader (its pieces prepay the compile price), a refused bytecode chunk. The

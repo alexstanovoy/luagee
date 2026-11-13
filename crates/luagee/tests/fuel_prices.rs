@@ -1,7 +1,9 @@
 //! The prices of the operations whose fuel is paid before the work (README, "Fuel paid before the work"), pinned: a
 //! chunk run whole succeeds with exactly its price, one fuel less is refused, and the price is the one recorded.
 
-use luagee::{Error, Keys, Limit, Limits, Lua};
+use std::rc::Rc;
+
+use luagee::{Error, Keys, Limit, Limits, Lua, Value};
 
 /// The fuel a chunk costs, found by running it with ample fuel.
 fn price(source: &str) -> u64 {
@@ -70,4 +72,85 @@ fn operations_paid_before_their_work_cost_their_recorded_prices() {
         );
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A host function that does nothing, and a Lua function that does nothing, as `Value`s of `lua`.
+fn empty_functions(lua: &mut Lua) -> (Value, Value) {
+    let native = lua
+        .function("nothing", Rc::new(|vm, _args| vm.results(&[])))
+        .expect("a host function");
+    let script = lua
+        .exec("empty", b"return function() end")
+        .expect("a function")[0];
+    (native, script)
+}
+
+fn arguments(count: usize) -> Vec<Value> {
+    vec![Value::Number(1.0); count]
+}
+
+/// The fuel a top-level `Lua::call` of `function` with `count` arguments spends.
+fn host_call_price(lua: &mut Lua, function: Value, count: usize) -> u64 {
+    lua.begin_tick();
+    let before = lua.tick_fuel_left();
+    lua.call(function, &arguments(count)).expect("the call");
+    before - lua.tick_fuel_left()
+}
+
+/// The fuel a `Vm::call` of `function` with `count` arguments spends inside a host function (the outer call's own
+/// price taken off).
+fn callback_call_price(lua: &mut Lua, function: Value, count: usize) -> u64 {
+    let caller = lua
+        .function(
+            "caller",
+            Rc::new(move |vm, _args| {
+                vm.call(function, &arguments(count))?;
+                vm.results(&[])
+            }),
+        )
+        .expect("a host function");
+    let (idle, _) = empty_functions(lua);
+    host_call_price(lua, caller, 0) - host_call_price(lua, idle, 0)
+}
+
+#[test]
+fn a_host_call_pays_for_its_arguments_and_one_more_for_the_call_of_a_native_or_the_return_of_a_lua_function()
+ {
+    let mut lua = interpreter(1 << 20);
+    let (native, script) = empty_functions(&mut lua);
+    // `Lua::call`: `1 + arguments / 8` to cross the boundary, then the callee. A Lua callee runs instructions (an
+    // empty one, its return: 1); a native has none, so the call itself costs 1, as a native called by a native does.
+    // So a call is never free and an empty native costs what an empty Lua function does.
+    for (count, crossing) in [(0, 1), (7, 1), (8, 2), (16, 3)] {
+        assert_eq!(
+            host_call_price(&mut lua, native, count),
+            crossing + 1,
+            "a native, {count} arguments"
+        );
+        assert_eq!(
+            host_call_price(&mut lua, script, count),
+            crossing + 1,
+            "an empty Lua function, {count} arguments"
+        );
+    }
+}
+
+#[test]
+fn a_call_from_a_host_callback_pays_both_boundary_crossings_and_one_for_the_call_of_a_native_or_a_return()
+ {
+    let mut lua = interpreter(1 << 20);
+    let (native, script) = empty_functions(&mut lua);
+    // `Vm::call`: `1 + arguments / 8` in, `1 + results / 8` out, and the callee as above.
+    for (count, crossing) in [(0, 1), (8, 2), (16, 3)] {
+        assert_eq!(
+            callback_call_price(&mut lua, native, count),
+            crossing + 1 + 1,
+            "a native, {count} arguments"
+        );
+        assert_eq!(
+            callback_call_price(&mut lua, script, count),
+            crossing + 1 + 1,
+            "an empty Lua function, {count} arguments"
+        );
+    }
 }

@@ -126,9 +126,10 @@ nothing to grow.
 | Crossing | Bound | Paid before |
 |---|---|---|
 | `Lua::call` arguments | count | 1 + 1 a 8 values |
+| `Lua::call` of a native function | the call itself | 1, on top of the arguments: 2 + 1 a 8 values for a function that does no paid work. A Lua callee pays its instructions instead (an empty one, its return, 1), so an empty native and an empty Lua function cost the same, and no call is free |
 | `Lua::call` results | count | the returning instruction, 1 a 8 values |
 | an error message to the host | message bytes | 1 a 16 bytes, ending by fuel when unpaid |
-| `Vm::call` from a host callback | arguments and results | 1 + 1 a 8 values each way |
+| `Vm::call` from a host callback | arguments and results | 1 + 1 a 8 values each way; a native callee also pays 1 for the call, as a native called by a native does |
 | host callbacks themselves | arbitrary Rust | trusted: callbacks charge their own work (`Vm::charge_fuel`) |
 | `Lua::load`, `pin`, `string`, `set_global`, `collect` | host setup | trusted, outside script fuel (as before) |
 
