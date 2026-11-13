@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import shlex
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -11,6 +12,25 @@ ROOT = HERE.parent.parent
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_wasm_template_preserves_nested_kernel_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            kernels = folder / "kernels"
+            (kernels / "nested").mkdir(parents=True)
+            (kernels / "nested/answer.lua").write_text("print(42)\n")
+            (kernels / "nested/answer.out").write_text("42\n")
+            executable = folder / "interpreter"
+            executable.write_text(f"#!{sys.executable}\nimport pathlib, sys\nassert pathlib.Path(sys.argv[1]).is_file()\nprint(42)\n")
+            executable.chmod(0o700)
+            command = shlex.join([str(executable), str(kernels / "{}.lua")])
+            result = subprocess.run(
+                [sys.executable, str(HERE / "bench.py"), "--runs", "1", "--warmups", "0",
+                 "--kernels", str(kernels), "--candidate", f"native={executable}",
+                 "--source", f"native={ROOT}", "--wasm", command],
+                capture_output=True, timeout=20, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+
     def run_comparison(self, expected):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)

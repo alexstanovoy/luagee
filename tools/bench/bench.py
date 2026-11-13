@@ -79,8 +79,9 @@ def interpreters(args):
     return commands, provenance
 
 
-def run(command, script, expected, timeout):
-    command = [part.replace("{}", script.stem) for part in command] if any("{}" in p for p in command) else [*command, str(script)]
+def run(command, script, kernel, expected, timeout):
+    relative = Path(kernel).with_suffix("").as_posix()
+    command = [part.replace("{}", relative) for part in command] if any("{}" in p for p in command) else [*command, str(script)]
     environment = dict(os.environ, LUA_FUEL=str(1 << 40), LUA_MEMORY=str(512 << 20))
     started = time.perf_counter()
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -149,7 +150,7 @@ def measure(args):
         for script, kernel in zip(scripts, kernels):
             for name in order:
                 try:
-                    elapsed = run(commands[name], script, expected[kernel], args.timeout)
+                    elapsed = run(commands[name], script, kernel, expected[kernel], args.timeout)
                 except (ValueError, subprocess.TimeoutExpired) as error:
                     raise ValueError(f"{kernel}: {name}: {error}") from error
                 samples.append({"round": round_number, "warmup": round_number < args.warmups,
