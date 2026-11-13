@@ -3,7 +3,43 @@
 //! done no more work than that half pays for, and leaves the state as it was; the exact fuel suffices and one less is
 //! refused. Work is counted at the price the operation charges for it (see `Work::per_fuel`).
 
+use super::Work;
 use crate::{Error, Keys, Limit, Limits, Lua, Value};
+
+/// Every kind of work, in the order of its discriminant.
+const ALL: [Work; 4] = [Work::Slots, Work::Bytes, Work::Collector, Work::Steps];
+
+/// The units of a kind of work one fuel pays for: the price the operations charge for it.
+const fn per_fuel(work: Work) -> u64 {
+    match work {
+        Work::Slots => crate::vm::VALUES_PER_FUEL as u64,
+        Work::Bytes => 16,
+        Work::Collector => crate::vm::GC_OBJECTS_PER_FUEL as u64,
+        Work::Steps => 1,
+    }
+}
+
+std::thread_local! {
+    static DONE: std::cell::Cell<[u64; ALL.len()]> = const { std::cell::Cell::new([0; ALL.len()]) };
+}
+
+pub(super) fn record(work: Work, units: usize) {
+    DONE.with(|done| {
+        let mut counts = done.get();
+        counts[work as usize] += units as u64;
+        done.set(counts);
+    });
+}
+
+/// The work recorded since the last `take`, in fuel at each kind's price (rounded up), and in units.
+fn take() -> (u64, u64) {
+    let counts = DONE.with(|done| done.replace([0; ALL.len()]));
+    let fuel = ALL
+        .iter()
+        .map(|&kind| counts[kind as usize].div_ceil(per_fuel(kind)))
+        .sum();
+    (fuel, counts.iter().sum())
+}
 
 /// Rounding: each kind of work may round up by one fuel.
 const SLACK: u64 = 2;
@@ -94,11 +130,11 @@ fn run(&(name, prepare, operation, unchanged): &Row, n: usize, budget: u64) -> R
         lua.pin(function).expect("root fits");
     }
     lua.collect().expect("collects");
-    super::take();
+    take();
     lua.vm().limits.fuel_per_call = budget;
     lua.begin_tick();
     let outcome = lua.call(functions[0], &[]).map(drop);
-    let (work, units) = super::take();
+    let (work, units) = take();
     let fuel = AMPLE - lua.tick_fuel_left();
     lua.vm().limits.fuel_per_call = AMPLE;
     lua.begin_tick();
