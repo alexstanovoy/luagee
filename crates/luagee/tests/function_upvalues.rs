@@ -128,6 +128,20 @@ fn at_any_configured_limit_the_limit_compiles_and_one_more_is_refused_naming_it(
 }
 
 #[test]
+fn far_more_captures_than_a_byte_indexes_are_refused_at_the_limit_not_wrapped() {
+    // 256 and 257 upvalues would index 255 and 0 again if the index were cut to a byte: the limit refuses them first.
+    let mut lua = lua(u8::MAX);
+    for count in [256, 257, 300] {
+        let source = function_using(count);
+        assert_eq!(
+            load_error(&mut lua, &source),
+            Some(refusal(&source, 255)),
+            "{count} upvalues under a limit of 255"
+        );
+    }
+}
+
+#[test]
 fn a_limit_of_zero_refuses_the_first_capture() {
     let mut lua = lua(0);
     assert_eq!(

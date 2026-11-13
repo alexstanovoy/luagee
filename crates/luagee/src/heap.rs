@@ -841,6 +841,27 @@ impl Heap {
                 Function::Lua { upvalues, .. } => upvalues.len() * HANDLE_BYTES,
                 Function::Native { upvalues, .. } => upvalues.len() * VALUE_BYTES,
             };
+        self.reserve_function(size)?;
+        Ok(self.insert_function(function))
+    }
+
+    /// A Lua function of `upvalue_count` upvalues, which `build` makes only once the memory for it is counted and the
+    /// arena has room: a refused function allocates nothing.
+    pub(crate) fn new_lua_function(
+        &mut self,
+        upvalue_count: usize,
+        build: impl FnOnce() -> Function,
+    ) -> Result<FuncId, LuaError> {
+        self.reserve_function(FUNCTION_SIZE + upvalue_count * HANDLE_BYTES)?;
+        let function = build();
+        assert!(
+            matches!(&function, Function::Lua { upvalues, .. } if upvalues.len() == upvalue_count),
+            "the function built has the upvalues it was reserved for"
+        );
+        Ok(self.insert_function(function))
+    }
+
+    fn reserve_function(&mut self, size: usize) -> Result<(), LuaError> {
         let ceiling = self.ceiling();
         self.functions.reserve(
             &mut self.memory,
@@ -848,7 +869,10 @@ impl Heap {
             size,
             FUNCTION_SIZE,
             &mut self.fuel,
-        )?;
+        )
+    }
+
+    fn insert_function(&mut self, function: Function) -> FuncId {
         // Born marked during a collection, so what it refers to is grayed here: nothing else would trace it.
         if self.phase == Phase::Marking {
             match &function {
@@ -860,7 +884,7 @@ impl Heap {
             }
             self.count_gray();
         }
-        Ok(FuncId(self.functions.insert(function)))
+        FuncId(self.functions.insert(function))
     }
 
     pub(crate) fn new_cell(&mut self, value: Value) -> Result<CellId, LuaError> {

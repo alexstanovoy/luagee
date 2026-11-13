@@ -2128,21 +2128,27 @@ impl Vm {
         // `Limits::function_upvalues` of 255 costs no more per fuel than a closure of a few.
         self.charge_fuel(ALLOCATION_FUEL + (child.captures.len() / VALUES_PER_FUEL) as u64)?;
         let env = self.running_env();
-        let frame = self.frames.last().expect("a running frame");
-        let mut upvalues = Vec::with_capacity(child.captures.len());
-        for capture in &child.captures {
-            upvalues.push(match *capture {
-                Capture::Register(r) => match self.stack[base + usize::from(r)] {
-                    Value::Cell(cell) => cell,
-                    other => unreachable!("a captured local lives in a cell, found {other:?}"),
-                },
-                Capture::Upvalue(u) => frame.upvalues[usize::from(u)],
-            });
-        }
-        self.heap.new_function(Function::Lua {
-            proto: child,
-            upvalues: upvalues.into(),
-            env,
+        let (stack, frame) = (&self.stack, self.frames.last().expect("a running frame"));
+        let captures = child.captures.len();
+        // The cells are gathered once the heap has counted and made room for the function.
+        self.heap.new_lua_function(captures, || {
+            crate::work::visit(crate::work::Work::Cells, captures);
+            let upvalues: Rc<[CellId]> = child
+                .captures
+                .iter()
+                .map(|capture| match *capture {
+                    Capture::Register(r) => match stack[base + usize::from(r)] {
+                        Value::Cell(cell) => cell,
+                        other => unreachable!("a captured local lives in a cell, found {other:?}"),
+                    },
+                    Capture::Upvalue(u) => frame.upvalues[usize::from(u)],
+                })
+                .collect();
+            Function::Lua {
+                proto: child.clone(),
+                upvalues,
+                env,
+            }
         })
     }
 

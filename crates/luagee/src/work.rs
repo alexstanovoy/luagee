@@ -14,6 +14,8 @@ pub(crate) enum Work {
     /// Work paid one fuel a unit: functions a native function calls, slots `next` steps over, the upvalues a
     /// compiling function takes (at `compiler::CAPTURE_FUEL` a unit), the statements a block's end is looked for in.
     Steps,
+    /// Cells a closure copies from the running function into its upvalues, at the price of a value moved.
+    Cells,
     /// Name lookups the compiler makes, each at the price of a source byte: a name use is at least two bytes long and
     /// makes four of these.
     Names,
