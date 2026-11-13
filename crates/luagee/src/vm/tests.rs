@@ -431,3 +431,17 @@ fn a_chain_of_resumed_coroutines_survives_collections_at_its_innermost_level() {
         .unwrap_or_else(|error| panic!("{stress:?}: {error}"));
     }
 }
+
+/// The worklist's storage is memory: what it grows by while marking is counted as it grows.
+#[test]
+fn the_collectors_worklist_counts_as_memory_while_it_grows() {
+    let mut lua = marking("w = {} for i = 1, 20000 do w[i] = {} end");
+    let vm = lua.vm();
+    let (memory, worklist) = (vm.heap.memory, vm.heap.gray.bytes());
+    for _ in 0..64 {
+        vm.trace_gray(super::TRACE_PIECE).expect("traces");
+    }
+    let grown = vm.heap.gray.bytes() - worklist;
+    assert!(grown > 0, "tracing a table of tables grows the worklist");
+    assert_eq!(vm.heap.memory - memory, grown, "and only the worklist grew");
+}
