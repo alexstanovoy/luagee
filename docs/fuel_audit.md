@@ -114,10 +114,11 @@ nothing to grow.
 | roots | running stack, pins, frames, fixed names | 1 a 4 roots | 4, 2, 2 |
 | marking an object | a string, cell, userdata: 1; a function: upvalues (at most 60) and, once a collection, its prototypes' constants (compiled code, paid when loaded) | 1 a 4 units, nothing started past the fuel | 8, 2, 1 (one large table) |
 | a table or coroutine stack | its slots, in pieces of up to 4096 | each piece before it is traced | 11, 15, 28 (a hash of tables) |
-| sweeping | slots | 1 a 4 slots, before sweeping them | 4, 4, 5 |
+| sweeping | slots | 1 a 4 slots, each step paid before it is walked; an arena ends with its last slot | 4, 4, 5 |
+| the worklist (gray values) | values grayed by paid stores and traces | its growth counted as memory when it grows, and at the end of a collection | — |
 | freeing a string | its run in the string index: expected O(1) (secret hash, index at most half full) | with its slot | — |
 | freeing a function's last reference to compiled code | the prototype's size | paid when it was compiled | — |
-| shrinking the string index | the index | before rebuilding, else left for later | — |
+| shrinking the string index | the index | paid before rebuilding, out of the same run as the sweep step, else left for later | — |
 
 ### Host boundaries
 

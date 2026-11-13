@@ -234,16 +234,25 @@ prices changed for scripts (fixtures run whole, so each includes the fill or loo
 | `string.gsub(s, '.', type)`, 1000 bytes | 11895 | 12895 | as above, a call a match |
 | `assert(false, s)` from Lua, 1000-byte `s`, caught | 145 | 269 | locating a message copies and hashes it: 2 a 16 bytes |
 | `local t; return t.x` from Lua, caught | 13 | 16 | as above for its 40-byte message, less for naming `t` (below) |
+| calling a nil local, caught | 14 | 17 | locating the message, and naming `f` by what the scan looks at |
+| arithmetic on a nil local, caught | 13 | 18 | as above |
+| indexing a nil field (`t.a.b`), caught | 18 | 21 | as above |
+| `xpcall(error, type, 'x')`, 100 times | 1006 | 1106 | the handler `type` is a native called by a native: 1 a call |
 | `string.match('y', '[' .. 1000 bytes .. ']')` | 272 | 520 | each scan of a set, 1 a 16 bytes |
 | `string.find('y', 'abcdefghijklmnopq')` | 8 | 9 | deciding the pattern is plain, 1 a 16 bytes |
+| `string.match('y', '[' .. 1000 bytes)` (never closed), caught | 271 | 333 | the scan that finds it malformed, 1 a 16 bytes |
 | an error message of `n` bytes reaching the host | — | + `n / 16` | converting it to text |
-| naming the register of an error (`field 'x'`) | `1 + pc/8 + locals/8` | units looked at / 8 | what the scan looks at, the name's copy included |
-| `collectgarbage()` over 1000 tables in a table | 10090 | 10328 | roots paid, a removed entry looked at counts |
-| `collectgarbage()` 64 frames deep | 529 | 521 | marked or empty values no longer count as work |
-| `table.new(4096, 4096)` | 14 | 15 | the collection its memory starts pays for its roots |
+| naming the register of an error (`field 'x'`) | `1 + pc/8 + locals/8` | units looked at / 8 | what the scan looks at, the name's copy included (+3 to +5 in the rows above) |
+| `collectgarbage()` over 1000 tables in a table | 10090 | 10299 | roots paid, a removed entry looked at counts |
+| `collectgarbage()` after 1100 garbage strings | 10298 | 10259 | a string found in a table's piece is marked there, not traced again |
+| `collectgarbage()` 64 frames deep (a tail call each: one frame) | 529 | 492 | marked or empty values no longer count as work |
+| `collectgarbage()` 64 frames deep, 5 nil locals a frame | 593 | 844 | every root is paid, nil registers included: 1 a 4 |
+| `table.new(4096, 4096)`, `table.new(0, 0)`, `table.clear` of 3 items | 14, 14, 29 | 15, 15, 30 | a collection that starts during the chunk pays for its roots |
 
-Unchanged, and pinned: dense writes 4147, length appends 6147, fill and clear 7151, a numeric `for` 1006, `next`
-and `table.foreach` over empty slots (1 a slot), callbacks written in Lua, numeric coercion. A call refused for want
+Unchanged, and pinned (`tests/table_fuel.rs`, `tests/fuel_prices.rs`): dense writes 4147, length appends 6147, fill
+and clear 7151, a numeric `for` 1006, `next` and `table.foreach` over empty slots (1 a slot), callbacks written in Lua,
+numeric coercion, `load` with a reader (its pieces prepay the compile price), a refused bytecode chunk. The
+collector's worklist now counts as memory while it holds values (`collectgarbage("count")` shows it during marking). A call refused for want
 of fuel now refuses before work it cannot pay for, so some refusals come earlier than they did; the exact price of a
 call still suffices and one less is refused.
 

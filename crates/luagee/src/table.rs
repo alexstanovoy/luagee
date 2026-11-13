@@ -408,6 +408,14 @@ impl Table {
         &self.array
     }
 
+    /// Moves every array value up `gap` slots, nils in front, as a window's prepend would (no write, no barrier): for
+    /// the collector's test of `Heap::array_shifted`.
+    #[cfg(test)]
+    pub(crate) fn shift_array(&mut self, gap: usize) {
+        self.array
+            .splice(0..0, std::iter::repeat_n(Value::Nil, gap));
+    }
+
     /// How many hash entries the table holds, removed ones too: the collector's walk over them.
     pub(crate) fn entry_count(&self) -> usize {
         self.entries.len()

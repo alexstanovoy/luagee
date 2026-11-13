@@ -37,3 +37,31 @@ impl Fuel {
         LuaError::Limit(self.limit)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Fuel;
+    use crate::Limit;
+
+    /// The units the fuel left pays for are exactly those whose price, rounded down, the fuel left covers.
+    #[test]
+    fn affordable_work_is_what_a_rounded_down_price_pays_for() {
+        for left in 0..10 {
+            for per_fuel in [1, 4, 8, 16] {
+                let fuel = Fuel {
+                    left,
+                    limit: Limit::FuelPerCall,
+                };
+                let units = fuel.affordable(per_fuel);
+                assert!(
+                    (units / per_fuel) as u64 <= left,
+                    "{left} fuel, {per_fuel} a fuel: {units} units"
+                );
+                assert!(
+                    ((units + 1) / per_fuel) as u64 > left,
+                    "{left} fuel, {per_fuel} a fuel: {units} units"
+                );
+            }
+        }
+    }
+}

@@ -299,14 +299,14 @@ fn a_refused_bytecode_chunk_costs_the_same_at_any_length() {
 }
 
 /// Matching a byte against a set scans the set twice: once to find its `]`, once to test the byte; both are counted
-/// where they happen (and paid).
+/// where they happen (and paid). The pattern is anchored: one position, one scan of each kind.
 #[test]
 fn both_scans_of_a_pattern_set_are_counted() {
     let row: Row = (
         "set",
-        "local p='['..string.rep('x',n)..']'",
+        "local p='^['..string.rep('x',n)..']'",
         "return string.match('y',p)",
-        "#p == n+2",
+        "#p == n+3",
     );
     for n in SIZES {
         let full = run(&row, n, AMPLE);

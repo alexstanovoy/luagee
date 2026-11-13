@@ -42,9 +42,9 @@ const PRICES: &[(&str, u64)] = &[
     ("string.match('y','['..string.rep('x',1000)..']')", 520),
     ("pcall(string.match,'y','['..string.rep('x',1000))", 333),
     ("string.find('y','abcdefghijklmnopq')", 9),
-    ("for i=1,1100 do local s='k'..i end collectgarbage()", 10288),
-    ("local function f(d) local a,b,c,e,g if d>0 then return (f(d-1)) end collectgarbage() end f(64)", 873),
-    ("local t={} for i=1,1000 do t[i]={} end collectgarbage()", 10328),
+    ("for i=1,1100 do local s='k'..i end collectgarbage()", 10259),
+    ("local function f(d) local a,b,c,e,g if d>0 then return (f(d-1)) end collectgarbage() end f(64)", 844),
+    ("local t={} for i=1,1000 do t[i]={} end collectgarbage()", 10299),
     ("local k=0 load(function() k=k+1 if k==1 then return string.rep(' ',4000) end end)", 1531),
 ];
 

@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use crate::Limit;
 use crate::Limits;
-use crate::heap::{Arena, Function, Heap, NativeFn, Phase};
+use crate::heap::{Arena, Function, Heap, NativeFn, Partial, Phase};
 use crate::number;
 use crate::proto::{ArithOp, Capture, CompareOp, Op, Proto, Rk};
 use crate::table::Table;
@@ -140,7 +140,6 @@ pub(crate) struct ThreadState {
     pub(crate) pending: Option<Pending>,
     /// The native nesting when this coroutine was last resumed.
     pub(crate) depth: u32,
-    pub(crate) resumer: Option<ThreadId>,
     /// The bytes of this coroutine's stack already counted against the memory cap (while it runs, `Vm::stack_charged`
     /// holds them).
     pub(crate) charged: usize,
@@ -160,7 +159,6 @@ impl ThreadState {
             status: ThreadStatus::Fresh,
             pending: None,
             depth: 0,
-            resumer: None,
             charged: 0,
         }
     }
@@ -305,8 +303,6 @@ pub struct Vm {
     gc_memory_at_sweep: usize,
     /// The bytes of compiled code the current collection found alive.
     pub(crate) gc_protos: usize,
-    /// The object marking is tracing a piece at a time, if any.
-    gc_partial: Option<Partial>,
     /// A test mode that collects far more often than needed, to find a root or a barrier missing.
     pub(crate) gc_stress: GcStress,
     pub(crate) stack_charged: usize,
@@ -371,22 +367,6 @@ impl SweepArena {
 /// The most units of one object traced at once.
 const TRACE_PIECE: usize = 4096;
 
-/// What is left to trace of an object marking traces a piece at a time, so that no object, however large, is traced
-/// past what the fuel pays for. The order keeps every value found though the script runs between two pieces: a write
-/// grays what it writes, and the pieces left only ever hold values the object held when marking reached it.
-#[derive(Clone, Copy, Debug)]
-enum Partial {
-    /// A table: its hash entries below `entries`, from the last down (a rebuild only moves an entry down), then its
-    /// array values below `array`. The array's length is read when the entries are done, so that a value moved from
-    /// an entry into the array (on growing it) while the entries were traced is still found there.
-    Table {
-        id: TableId,
-        entries: usize,
-        array: Option<usize>,
-    },
-    /// A suspended coroutine: its stack values below `stack`. A coroutine that runs is traced again when it stops.
-    Thread { id: ThreadId, stack: usize },
-}
 /// The work (gray values traced, slots swept) of one step of an incremental collection.
 const GC_STEP: usize = 256;
 /// The counted bytes of a function object.
@@ -488,7 +468,6 @@ impl Vm {
             gc_kept: 0,
             gc_memory_at_sweep: 0,
             gc_protos: 0,
-            gc_partial: None,
             gc_stress: GcStress::Off,
             stack_charged: 0,
             scripts_loaded: 0,
@@ -2542,11 +2521,12 @@ impl Vm {
         Self::push_frames(&self.frames, gray);
         gray.extend(registry.into_iter().flatten());
         gray.extend(fixed);
+        self.heap.count_gray();
         Ok(())
     }
 
     /// What a list of frames holds beyond its stack: the functions running, and the handlers of `xpcall`s waiting.
-    fn push_frames(frames: &[Frame], gray: &mut Vec<Value>) {
+    fn push_frames(frames: &[Frame], gray: &mut crate::heap::Gray) {
         for frame in frames {
             gray.push(Value::Function(frame.function));
             if let Some(catch) = frame.catch {
@@ -2561,7 +2541,7 @@ impl Vm {
         self.gc_protos = 0;
         self.heap.gray.clear();
         assert!(
-            self.gc_partial.is_none(),
+            self.heap.partial.is_none(),
             "a collection ends with no object half traced"
         );
         self.heap.phase = Phase::Marking;
@@ -2591,7 +2571,7 @@ impl Vm {
         let mut traced = 0usize;
         let done = loop {
             let room = budget.min(affordable).saturating_sub(traced);
-            if let Some(partial) = self.gc_partial {
+            if let Some(partial) = self.heap.partial {
                 if room == 0 {
                     break false;
                 }
@@ -2614,6 +2594,7 @@ impl Vm {
             crate::work::visit(crate::work::Work::Collector, work);
             traced += work;
         };
+        self.heap.count_gray();
         self.charge_fuel((traced / GC_OBJECTS_PER_FUEL) as u64)?;
         if !done && traced < budget {
             return Err(self.out_of_fuel());
@@ -2635,13 +2616,26 @@ impl Vm {
         }
     }
 
-    /// Traces up to `room` (at least one) units of the partly traced object; returns the work done.
+    /// Traces up to `room` (at least one) units of the partly traced object; returns the work done. A string found
+    /// is marked at once (it refers to nothing), so that a large table of strings does not fill the worklist.
     fn trace_piece(&mut self, partial: Partial, room: usize) -> usize {
-        let objects =
-            |value: &Value| !matches!(value, Value::Nil | Value::Boolean(_) | Value::Number(_));
+        let Heap {
+            tables,
+            strings,
+            gray,
+            partial: left,
+            ..
+        } = &mut self.heap;
+        let mut reached = |value: Value| match value {
+            Value::Nil | Value::Boolean(_) | Value::Number(_) => {}
+            Value::String(s) => {
+                strings.mark(s.0);
+            }
+            object => gray.push(object),
+        };
         let work = match partial {
             Partial::Table { id, entries, array } => {
-                let table = self.heap.tables.get(id.0);
+                let table = tables.get(id.0);
                 let entries = entries.min(table.entry_count());
                 if array.is_none() && entries > 0 {
                     let from = entries.saturating_sub(room);
@@ -2649,27 +2643,25 @@ impl Vm {
                         // A removed key is never looked at again: its key need not stay alive.
                         let (key, value) = table.entry(index);
                         if value != Value::Nil {
-                            self.heap
-                                .gray
-                                .extend([key, value].iter().filter(|v| objects(v)));
+                            reached(key);
+                            reached(value);
                         }
                     }
-                    self.gc_partial = Some(Partial::Table {
+                    *left = Some(Partial::Table {
                         id,
                         entries: from,
                         array: None,
                     });
                     entries - from
                 } else {
-                    let table = self.heap.tables.get(id.0);
                     let end = array
                         .unwrap_or(table.array().len())
                         .min(table.array().len());
                     let from = end.saturating_sub(room);
-                    self.heap
-                        .gray
-                        .extend(table.array()[from..end].iter().filter(|v| objects(v)));
-                    self.gc_partial = (from > 0).then_some(Partial::Table {
+                    table.array()[from..end]
+                        .iter()
+                        .for_each(|&value| reached(value));
+                    *left = (from > 0).then_some(Partial::Table {
                         id,
                         entries: 0,
                         array: Some(from),
@@ -2681,10 +2673,10 @@ impl Vm {
                 let thread = self.threads.get(id.0);
                 let end = stack.min(thread.stack.len());
                 let from = end.saturating_sub(room);
-                self.heap
-                    .gray
-                    .extend(thread.stack[from..end].iter().filter(|v| objects(v)));
-                self.gc_partial = (from > 0).then_some(Partial::Thread { id, stack: from });
+                thread.stack[from..end]
+                    .iter()
+                    .for_each(|&value| reached(value));
+                *left = (from > 0).then_some(Partial::Thread { id, stack: from });
                 end - from
             }
         };
@@ -2709,9 +2701,11 @@ impl Vm {
         let done = self.trace_gray(usize::MAX)?;
         assert!(done, "an unbounded trace ends with no gray value left");
         debug_assert!(
-            self.gc_partial.is_none(),
+            self.heap.partial.is_none(),
             "an unbounded trace ends every partial object"
         );
+        // The worklist is empty until the next collection: its storage goes back, and out of the count with the sweep.
+        self.heap.gray.release();
         self.heap.phase = Phase::Sweeping;
         self.gc_arena = SweepArena::Strings;
         self.gc_kept = 0;
@@ -2824,6 +2818,7 @@ impl Vm {
             // The running coroutine's stack is out of its slot: counted with the arena, as the others are.
             SweepArena::Threads if self.threads.is_swept() => {
                 self.threads.end_sweep(THREAD_BYTES)
+                    + self.heap.gray.bytes()
                     + self.pinned.capacity() * SLOT_BYTES
                     + self.stack.capacity() * SLOT_BYTES
                     + self.frames.capacity() * FRAME_BYTES
@@ -2861,7 +2856,7 @@ impl Vm {
                 if let Some(mt) = table.metatable {
                     heap.gray.push(Value::Table(mt));
                 }
-                self.gc_partial = Some(Partial::Table {
+                self.heap.partial = Some(Partial::Table {
                     id: t,
                     entries: table.entry_count(),
                     array: None,
@@ -2913,12 +2908,11 @@ impl Vm {
                     return 0;
                 }
                 // Frames are bounded by the call depth; the stack, as large as the frames' registers, goes in pieces.
+                // The coroutine that resumed this one needs no edge: the call that resumed it holds this coroutine
+                // (or the function `wrap` made) in its own stack, which is a root or reached in turn from main's.
                 let thread = self.threads.get(t.0);
                 Self::push_frames(&thread.frames, &mut self.heap.gray);
-                if let Some(resumer) = thread.resumer {
-                    self.heap.gray.push(Value::Thread(resumer));
-                }
-                self.gc_partial = Some(Partial::Thread {
+                self.heap.partial = Some(Partial::Thread {
                     id: t,
                     stack: thread.stack.len(),
                 });
@@ -2976,6 +2970,7 @@ impl Vm {
         if self.heap.phase == Phase::Marking {
             self.threads.unmark(from.0);
             self.heap.gray.push(Value::Thread(from));
+            self.heap.count_gray();
             // A half-traced coroutine needs nothing more: the one stopping is traced again whole, and the one starting
             // leaves an empty stack in its slot (its own is the running stack, a root), where the trace ends.
         }
@@ -3011,7 +3006,6 @@ impl Vm {
             let thread = self.threads.get_mut(co.0);
             thread.status = ThreadStatus::Running;
             thread.depth = depth;
-            thread.resumer = Some(from);
         }
         let outcome = self.run_coroutine(status, args);
         self.finish_resume(co, from, outcome)

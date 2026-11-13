@@ -1,8 +1,9 @@
 //! The collector: pieces of a large object with the script mutating the object between two pieces, and collections
 //! stopped by fuel anywhere and resumed by the next call.
 
-use super::{Partial, Phase};
+use super::Phase;
 use crate::heap::Function;
+use crate::heap::Partial;
 use crate::{Error, GcStress, Keys, Limit, Limits, Lua, Value};
 
 /// A table of `{i}` tables at keys 2..=count in its hash part, rooted by a global; marking started and run until the
@@ -27,7 +28,7 @@ fn half_traced(count: usize) -> Lua {
     let vm = lua.vm();
     vm.gc_start().expect("marking starts");
     for _ in 0..1_000_000 {
-        if let Some(Partial::Table { entries, .. }) = vm.gc_partial
+        if let Some(Partial::Table { entries, .. }) = vm.heap.partial
             && entries < count / 2
             && entries > count / 4
         {
@@ -105,7 +106,7 @@ fn a_coroutine_traced_before_it_runs_is_traced_again_when_it_stops() {
     let vm = lua.vm();
     vm.gc_start().expect("marking starts");
     vm.trace(co);
-    while let Some(Partial::Thread { .. }) = vm.gc_partial {
+    while let Some(Partial::Thread { .. }) = vm.heap.partial {
         vm.trace_gray(1).expect("traces the coroutine");
     }
     assert_eq!(vm.heap.phase, Phase::Marking);
@@ -332,13 +333,14 @@ fn a_half_traced_table_that_shrank_is_traced_to_its_end() {
             panic!("a table")
         };
         let vm = lua.vm();
-        while vm.gc_partial.is_some() {
+        while vm.heap.partial.is_some() {
             vm.trace_gray(16).expect("ends the object half traced");
         }
-        assert!(vm.heap.tables.mark(id.0));
-        vm.gc_partial = Some(Partial::Table { id, entries, array });
+        // Traced already or not: tracing it again in pieces is what is tested.
+        vm.heap.tables.mark(id.0);
+        vm.heap.partial = Some(Partial::Table { id, entries, array });
         vm.trace_gray(AMPLE as usize).expect("traces");
-        assert!(vm.gc_partial.is_none(), "the pieces ended");
+        assert!(vm.heap.partial.is_none(), "the pieces ended");
         lua.collect().expect("collects");
         lua.exec("check", b"assert(u[1] == 1 and u[10] == 3)")
             .expect("checks");
@@ -359,4 +361,73 @@ fn a_removed_key_does_not_keep_its_object_alive() {
         before + 1,
         "only `h` is left of the two tables"
     );
+}
+
+/// An array part shifted up while half traced (a prepend that moves values without writing them) keeps the moved
+/// values: `Heap::array_shifted` grows the untraced part by the shift. Without it the values moved past the cursor
+/// would be swept while still in the table.
+#[test]
+fn values_shifted_past_a_half_traced_array_cursor_are_still_traced() {
+    let mut lua = marking("u = {} for i = 1, 20000 do u[i] = {i} end");
+    let Value::Table(u) = lua.exec("u", b"return u").expect("u")[0] else {
+        panic!("a table")
+    };
+    let vm = lua.vm();
+    let mut gap = None;
+    for _ in 0..1_000_000 {
+        if let Some(Partial::Table {
+            id,
+            array: Some(from),
+            ..
+        }) = vm.heap.partial
+            && id == u
+            && from < 15_000
+        {
+            gap = Some(20_000 - from);
+            break;
+        }
+        vm.trace_gray(16).expect("traces");
+    }
+    let gap = gap.expect("the array part is half traced");
+    vm.heap.tables.get_mut(u.0).shift_array(gap);
+    vm.heap.array_shifted(u, gap);
+    lua.collect().expect("collects");
+    let check = format!("for i = 1, 20000 do assert(u[i + {gap}][1] == i, i) end");
+    lua.exec("check", check.as_bytes())
+        .expect("every shifted value is alive");
+}
+
+/// Coroutines resuming one another hold each other through their callers' stacks: a chain of them, made inline and
+/// held by nothing else, survives collections at its innermost level in every collector mode.
+#[test]
+fn a_chain_of_resumed_coroutines_survives_collections_at_its_innermost_level() {
+    for stress in [GcStress::Off, GcStress::Incremental, GcStress::Full] {
+        let mut lua = Lua::new(
+            Limits {
+                fuel_per_call: AMPLE,
+                fuel_per_tick: AMPLE,
+                ..Limits::DEFAULT
+            },
+            Keys {
+                hash: [193, 271],
+                random: 0,
+            },
+        )
+        .expect("state");
+        lua.set_gc_stress(stress);
+        lua.exec(
+            "chain",
+            b"local function level(d)
+                  local o = {d}
+                  if d == 0 then collectgarbage() collectgarbage() return o[1] end
+                  local inner = coroutine.wrap(level)(d - 1)
+                  collectgarbage()
+                  return o[1] + inner
+              end
+              assert(coroutine.wrap(level)(20) == 210)
+              local ok, sum = coroutine.resume(coroutine.create(level), 20)
+              assert(ok and sum == 210)",
+        )
+        .unwrap_or_else(|error| panic!("{stress:?}: {error}"));
+    }
 }

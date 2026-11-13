@@ -11,7 +11,7 @@ use crate::fuel::Fuel;
 use crate::proto::Proto;
 use crate::table::Table;
 use crate::value::{
-    CellId, FuncId, HANDLE_BYTES, Handle, StrId, TableId, UserdataId, VALUE_BYTES, Value,
+    CellId, FuncId, HANDLE_BYTES, Handle, StrId, TableId, ThreadId, UserdataId, VALUE_BYTES, Value,
 };
 use crate::vm::{Args, LuaError, Vm};
 
@@ -451,9 +451,91 @@ pub(crate) struct Heap {
     /// Where the collector is.
     pub(crate) phase: Phase,
     /// The collector's worklist: values reached but not traced yet.
-    pub(crate) gray: Vec<Value>,
+    pub(crate) gray: Gray,
     /// The running call's fuel, which the heap's own work spends too.
     pub(crate) fuel: Fuel,
+    /// The object marking is tracing a piece at a time, if any.
+    pub(crate) partial: Option<Partial>,
+}
+
+/// What is left to trace of an object marking traces a piece at a time, so that no object, however large, is traced
+/// past what the fuel pays for. The order keeps every value found though the script runs between two pieces: a write
+/// grays what it writes, and the pieces left only ever hold values the object held when marking reached it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Partial {
+    /// A table: its hash entries below `entries`, from the last down (a rebuild only moves an entry down), then its
+    /// array values below `array`. The array's length is read when the entries are done, so that a value moved from
+    /// an entry into the array (on growing it) while the entries were traced is still found there.
+    Table {
+        id: TableId,
+        entries: usize,
+        array: Option<usize>,
+    },
+    /// A suspended coroutine: its stack values below `stack`. A coroutine that runs is traced again when it stops.
+    Thread { id: ThreadId, stack: usize },
+}
+
+/// The collector's worklist. Its storage is memory like any other: what it grows by is counted (`Heap::count_gray`)
+/// as soon as the operation that grew it is done, and with the rest of the heap at the end of a collection.
+#[derive(Debug, Default)]
+pub(crate) struct Gray {
+    values: Vec<Value>,
+    /// The bytes the storage grew by and the heap has not counted yet.
+    grown: usize,
+}
+
+impl Gray {
+    fn make_room(&mut self, more: usize) {
+        if self.values.len().saturating_add(more) > self.values.capacity() {
+            let before = self.values.capacity();
+            self.values.reserve(more);
+            self.grown = self
+                .grown
+                .saturating_add((self.values.capacity() - before).saturating_mul(VALUE_BYTES));
+        }
+    }
+
+    pub(crate) fn push(&mut self, value: Value) {
+        self.make_room(1);
+        self.values.push(value);
+    }
+
+    pub(crate) fn extend<V: std::borrow::Borrow<Value>>(
+        &mut self,
+        values: impl IntoIterator<Item = V>,
+    ) {
+        for value in values {
+            self.push(*value.borrow());
+        }
+    }
+
+    pub(crate) fn extend_from_slice(&mut self, values: &[Value]) {
+        self.make_room(values.len());
+        self.values.extend_from_slice(values);
+    }
+
+    pub(crate) fn last(&self) -> Option<&Value> {
+        self.values.last()
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<Value> {
+        self.values.pop()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.values.clear();
+    }
+
+    /// Gives the storage of an empty worklist back.
+    pub(crate) fn release(&mut self) {
+        debug_assert!(self.values.is_empty(), "only an empty worklist is released");
+        self.values = Vec::new();
+    }
+
+    /// The counted bytes of the storage.
+    pub(crate) fn bytes(&self) -> usize {
+        self.values.capacity() * VALUE_BYTES
+    }
 }
 
 /// Where the collector is.
@@ -506,11 +588,12 @@ impl Heap {
             memory: 0,
             cap,
             phase: Phase::Idle,
-            gray: Vec::new(),
+            gray: Gray::default(),
             fuel: Fuel {
                 left: u64::MAX,
                 limit: crate::Limit::FuelPerCall,
             },
+            partial: None,
         }
     }
 
@@ -518,6 +601,23 @@ impl Heap {
     /// collector's points (where the cap itself is checked, after collecting) cannot fail just short of reclaiming.
     pub(crate) fn ceiling(&self) -> usize {
         self.cap.saturating_add(self.cap / 4)
+    }
+
+    /// Every value of table `t`'s array part moved up `gap` slots without being written (a prepend that shifts the
+    /// array): when `t` is half traced in its array part, its untraced part grows by the same `gap`, so that the
+    /// values moved past the cursor are still traced. Any code that shifts an array part this way must call it; no
+    /// code does yet (an array part only grows at its end), so only the tests use it.
+    #[cfg(test)]
+    pub(crate) fn array_shifted(&mut self, t: TableId, gap: usize) {
+        if let Some(Partial::Table {
+            id,
+            array: Some(from),
+            ..
+        }) = &mut self.partial
+            && *id == t
+        {
+            *from = from.saturating_add(gap);
+        }
     }
 
     /// The write barrier: while marking, a value stored into an object is grayed, so that the object, if already
@@ -528,7 +628,16 @@ impl Heap {
             && !matches!(value, Value::Nil | Value::Boolean(_) | Value::Number(_))
         {
             self.gray.push(value);
+            self.count_gray();
         }
+    }
+
+    /// Counts what the collector's worklist grew by. It grows with paid work (a store, a trace), so the count may pass
+    /// the ceiling: the next check of the cap then collects or refuses.
+    #[inline]
+    pub(crate) fn count_gray(&mut self) {
+        let grown = std::mem::take(&mut self.gray.grown);
+        self.memory = self.memory.saturating_add(grown);
     }
 
     /// Counts `bytes` more, failing when that crosses the ceiling.
@@ -745,6 +854,7 @@ impl Heap {
                 }
                 Function::Native { upvalues, .. } => self.gray.extend_from_slice(upvalues),
             }
+            self.count_gray();
         }
         Ok(FuncId(self.functions.insert(function)))
     }
