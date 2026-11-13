@@ -125,6 +125,11 @@ impl Table {
                 return Ok(());
             }
             if value == Value::Nil {
+                debug_assert!(
+                    self.find(key, hash())
+                        .is_none_or(|entry| self.entries[entry].value == Value::Nil),
+                    "the next array key has no live hash entry"
+                );
                 return Ok(());
             }
             return self.append(value, hasher, budget);
@@ -207,6 +212,7 @@ impl Table {
         budget: &mut WriteBudget<'_>,
     ) -> Result<usize, LuaError> {
         if self.entries.is_empty() {
+            budget(1, 0)?;
             return Ok(0);
         }
         for count in 0..=self.entries.len() {

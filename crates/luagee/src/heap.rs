@@ -88,9 +88,17 @@ impl KeyHasher {
     /// The hash of a number key; 0 and -0 hash alike.
     #[inline]
     pub(crate) fn number(&self, n: f64) -> u64 {
+        #[cfg(test)]
+        tests::note_numeric_hash();
         let n = if n == 0.0 { 0.0 } else { n };
         self.word(1, n.to_bits())
     }
+}
+
+/// Numeric keys need hashing only after array storage has been ruled out.
+enum WriteHash {
+    Number(f64),
+    Ready(u64),
 }
 
 /// An arena slot.
@@ -707,9 +715,9 @@ impl Heap {
         value: Value,
         fuel: &mut dyn FnMut(u64) -> Result<(), LuaError>,
     ) -> Result<(), LuaError> {
-        let cached_hash = match key {
-            Value::Number(_) => 0,
-            _ => self.key_hash(key),
+        let hash = match key {
+            Value::Number(number) => WriteHash::Number(number),
+            _ => WriteHash::Ready(self.key_hash(key)),
         };
         let hasher = self.hasher;
         self.barrier(key);
@@ -727,9 +735,9 @@ impl Heap {
         };
         self.tables.get_mut(t.0).set(
             key,
-            || match key {
-                Value::Number(number) => hasher.number(number),
-                _ => cached_hash,
+            || match hash {
+                WriteHash::Number(number) => hasher.number(number),
+                WriteHash::Ready(hash) => hash,
             },
             value,
             &hasher,
