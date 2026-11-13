@@ -215,6 +215,38 @@ fuel cost; replacing an existing element has constant cost. The interpreter uses
 one mutation path and charges storage before reservation. Rebuild and migration
 budgets are checked before structural changes, so exhaustion leaves valid tables.
 
+### Fuel paid before the work (unreleased fix)
+
+Every place a script sizes the work is paid before the work, in proportion to it, and refused where the fuel left
+stops paying: [docs/fuel_audit.md](docs/fuel_audit.md) lists each one, its bound, its price and the test that holds
+it. Every arena grows through one bounded reservation ([docs/table_allocation.md](docs/table_allocation.md)). These
+prices changed for scripts (fixtures run whole, so each includes the fill or loop around the operation):
+
+| Fixture | Before | After | Why |
+|---|---|---|---|
+| `t[1]=1` moving 999 keys from the hash part into the array | 5316 | 6315 | each moved key's second lookup, 1 a key |
+| `table.maxn` over 1000 live hash keys | 6319 | 5444 | slots looked at, 8 a fuel (was 1 a live key) |
+| `table.maxn` over a cleared array of 1000 | 7154 | 7279 | the nil tail it walks, 8 a fuel (was free) |
+| `table.maxn` over 1000 removed hash keys | 9323 | 9448 | removed entries it walks, 8 a fuel (were free) |
+| `table.foreachi(t, coroutine.running)`, 1000 items | 4153 | 5153 | a native calling a native pays 1 a call |
+| `table.foreach(t, coroutine.running)`, 1000 keys | 6323 | 7323 | as above |
+| `table.sort(t, rawequal)`, 1000 items | 21321 | 30394 | as above, a call a comparison |
+| `string.gsub(s, '.', type)`, 1000 bytes | 11895 | 12895 | as above, a call a match |
+| `assert(false, s)` from Lua, 1000-byte `s`, caught | 145 | 269 | locating a message copies and hashes it: 2 a 16 bytes |
+| `local t; return t.x` from Lua, caught | 13 | 16 | as above for its 40-byte message, less for naming `t` (below) |
+| `string.match('y', '[' .. 1000 bytes .. ']')` | 272 | 520 | each scan of a set, 1 a 16 bytes |
+| `string.find('y', 'abcdefghijklmnopq')` | 8 | 9 | deciding the pattern is plain, 1 a 16 bytes |
+| an error message of `n` bytes reaching the host | — | + `n / 16` | converting it to text |
+| naming the register of an error (`field 'x'`) | `1 + pc/8 + locals/8` | units looked at / 8 | what the scan looks at, the name's copy included |
+| `collectgarbage()` over 1000 tables in a table | 10090 | 10328 | roots paid, a removed entry looked at counts |
+| `collectgarbage()` 64 frames deep | 529 | 521 | marked or empty values no longer count as work |
+| `table.new(4096, 4096)` | 14 | 15 | the collection its memory starts pays for its roots |
+
+Unchanged, and pinned: dense writes 4147, length appends 6147, fill and clear 7151, a numeric `for` 1006, `next`
+and `table.foreach` over empty slots (1 a slot), callbacks written in Lua, numeric coercion. A call refused for want
+of fuel now refuses before work it cannot pay for, so some refusals come earlier than they did; the exact price of a
+call still suffices and one less is refused.
+
 ### Typed mutation and host stack use (unreleased fix)
 
 `Lua::userdata_mut` and `Vm::userdata_mut` provide a generation-checked typed
