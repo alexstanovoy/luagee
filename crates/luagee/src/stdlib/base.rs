@@ -417,7 +417,7 @@ fn tonumber(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let value = vm.check_any(args, 0)?;
     let base = vm.opt_integer(args, 1, 10)?;
     if base == 10 {
-        let n = vm.coerce_number(value).map_or(Value::Nil, Value::Number);
+        let n = vm.coerce_number(value)?.map_or(Value::Nil, Value::Number);
         return vm.results(&[n]);
     }
     // LuaJIT asks for the string before it checks the base.

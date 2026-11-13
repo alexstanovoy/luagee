@@ -791,17 +791,18 @@ impl Vm {
 
     /// A value as a number, converting numeric strings, as arithmetic does.
     #[inline]
-    pub(crate) fn coerce_number(&mut self, value: Value) -> Option<f64> {
-        // Reading a numeric string is work in its length: paid (the next instruction stops when fuel ran out).
-        if let Value::String(s) = value {
-            let cost = 1 + self.heap.string(s).len() as u64 / 16;
-            self.heap.fuel.left = self.heap.fuel.left.saturating_sub(cost);
-        }
-        match value {
+    pub(crate) fn coerce_number(&mut self, value: Value) -> Result<Option<f64>, LuaError> {
+        Ok(match value {
             Value::Number(n) => Some(n),
-            Value::String(s) => number::parse(self.heap.string(s)),
+            Value::String(s) => {
+                // Reading a numeric string is work in its length: paid before it is read.
+                let length = self.heap.string(s).len();
+                self.charge_fuel(1 + length as u64 / 16)?;
+                crate::work::visit(crate::work::Work::Bytes, length);
+                number::parse(self.heap.string(s))
+            }
             _ => None,
-        }
+        })
     }
 
     pub(crate) fn raw_set_checked(
@@ -945,7 +946,7 @@ impl Vm {
 
     #[inline(never)]
     pub(crate) fn arith(&mut self, op: ArithOp, a: Value, b: Value) -> Result<Value, LuaError> {
-        if let (Some(x), Some(y)) = (self.coerce_number(a), self.coerce_number(b)) {
+        if let (Some(x), Some(y)) = (self.coerce_number(a)?, self.coerce_number(b)?) {
             return Ok(Value::Number(Self::arith_numbers(op, x, y)));
         }
         let event = self.arith_event(op);
@@ -954,7 +955,7 @@ impl Vm {
             handler = self.metamethod(b, event);
         }
         if handler == Value::Nil {
-            let culprit = if self.coerce_number(a).is_some() {
+            let culprit = if self.coerce_number(a)?.is_some() {
                 b
             } else {
                 a
@@ -968,7 +969,7 @@ impl Vm {
     }
 
     pub(crate) fn negate(&mut self, a: Value) -> Result<Value, LuaError> {
-        if let Some(x) = self.coerce_number(a) {
+        if let Some(x) = self.coerce_number(a)? {
             return Ok(Value::Number(number::neg(x)));
         }
         let handler = self.metamethod(a, self.names.unm);
@@ -1796,10 +1797,10 @@ impl Vm {
                             _ => {
                                 save_pc!(self, pc);
                                 let result = self.arith(op, x, y);
-                                let culprit = if self.coerce_number(x).is_some() {
-                                    c
-                                } else {
-                                    b
+                                let culprit = match self.coerce_number(x) {
+                                    Ok(Some(_)) => c,
+                                    Ok(None) => b,
+                                    Err(limit) => return Err(limit),
                                 };
                                 let result = match culprit.0 {
                                     r if r < Rk::CONSTANT => result
@@ -2007,9 +2008,9 @@ impl Vm {
                     }
                     Op::ForPrep { a, offset } => {
                         let a = base + usize::from(a);
-                        let start = self.coerce_number(self.stack[a]);
-                        let limit = self.coerce_number(self.stack[a + 1]);
-                        let step = self.coerce_number(self.stack[a + 2]);
+                        let start = located!(self, self.coerce_number(self.stack[a]), pc);
+                        let limit = located!(self, self.coerce_number(self.stack[a + 1]), pc);
+                        let step = located!(self, self.coerce_number(self.stack[a + 2]), pc);
                         let (Some(start), Some(limit), Some(step)) = (start, limit, step) else {
                             let message = if start.is_none() {
                                 "'for' initial value must be a number"
@@ -2181,19 +2182,49 @@ impl Vm {
         pc: usize,
         register: u8,
     ) -> Option<(&'static str, Vec<u8>)> {
-        // The scan walks back through the function and its locals: paid as the work it is.
-        let work = 1 + pc as u64 / 8 + proto.locals.len() as u64 / 8;
-        self.heap.fuel.left = self.heap.fuel.left.saturating_sub(work);
+        // The scan walks back through the function, its locals at each register it follows, and copies a name: no
+        // further than the fuel left pays for, at eight units a fuel, and then paid. Past that the error goes unnamed
+        // and the call ends at its next instruction.
+        let limit = self.heap.fuel.affordable(VALUES_PER_FUEL);
+        let units = std::cell::Cell::new(1usize);
+        let afford = |more: usize| {
+            units.set(units.get().saturating_add(more));
+            crate::work::visit(crate::work::Work::Slots, more);
+            units.get() <= limit
+        };
+        let named = self.scan_register(proto, pc, register, &afford);
+        if units.get() > limit {
+            let _ = self.heap.fuel.exhaust();
+            return None;
+        }
+        self.heap.fuel.left -= (units.get() / VALUES_PER_FUEL) as u64;
+        named
+    }
+
+    /// `describe_register`'s scan; `afford(units)` counts work about to be done, false when it is not paid for.
+    fn scan_register(
+        &self,
+        proto: &Proto,
+        pc: usize,
+        register: u8,
+        afford: &dyn Fn(usize) -> bool,
+    ) -> Option<(&'static str, Vec<u8>)> {
         let local_name = |register: u8| {
+            if !afford(proto.locals.len()) {
+                return None;
+            }
             proto
                 .locals
                 .iter()
                 .rev()
                 .find(|l| l.register == register && l.start <= pc && pc < l.end)
+                .filter(|l| afford(l.name.len()))
                 .map(|l| l.name.clone())
         };
         let constant = |k: usize| match proto.constants[k] {
-            Value::String(s) => Some(self.heap.string(s).to_vec()),
+            Value::String(s) if afford(self.heap.string(s).len()) => {
+                Some(self.heap.string(s).to_vec())
+            }
             _ => None,
         };
         let mut register = register;
@@ -2203,6 +2234,9 @@ impl Vm {
                 return Some(("local", name.into_vec()));
             }
             while i > 0 {
+                if !afford(1) {
+                    return None;
+                }
                 i -= 1;
                 let r = usize::from(register);
                 let within = |first: u8, count: usize| {
@@ -2230,6 +2264,7 @@ impl Vm {
                         return proto
                             .upvalue_names
                             .get(usize::from(upvalue))
+                            .filter(|n| afford(n.len()))
                             .map(|n| ("upvalue", n.to_vec()));
                     }
                     Op::GetCell { a, cell } if a == register => {

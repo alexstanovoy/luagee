@@ -51,6 +51,9 @@ const ROWS: &[Row] = &[
     ("collectgarbage, live tables", "local t={} for i=1,n do t[i]={} end", "local _ = t collectgarbage()", "#t == n"),
     ("collectgarbage, one large table", ARRAY, "local _ = t collectgarbage()", "#t == n"),
     ("collectgarbage, one large hash", HASH, "local _ = t collectgarbage()", "t[-n] == n"),
+    ("tonumber, long numeric string", "local s=string.rep(' ',n)..'1'", "return tonumber(s)", "#s == n+1"),
+    ("arithmetic, long numeric string", "local s=string.rep(' ',n)..'1'", "return s + 1", "#s == n+1"),
+    ("error naming, long field name", "local k=string.rep('k',n) local f=loadstring('local t={} return t.'..k..'.x')", "return pcall(f)", "#k == n"),
     ("a write moving hash keys into the array", "local t={} for i=2,n+1 do t[i]=i end", "t[1]=1", "t[1] == nil and t[n+1] == n+1"),
 ];
 
