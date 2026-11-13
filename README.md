@@ -150,6 +150,11 @@ let mut limits = LIMITS;
 limits.fuel_per_call = 1_000_000;
 ```
 
+`Error`, `Limit`, `LimitsError` and `ModuleNameError` are `#[non_exhaustive]`: match them with a wildcard arm, and treat
+an error you do not know as a failed call (a script's call that ended in an `Error` has failed, whatever the kind). `Value`
+(the eight types of Lua), `LuaError` (a catchable error or an uncatchable limit) and `GcStress` (a set of modes) are
+closed on purpose and stay exhaustive.
+
 `Lua::new` refuses limits that cannot hold an interpreter (`Error::InvalidLimits`, naming the field): a `memory` below
 `Limits::MIN_MEMORY` (64 KiB) and a `string_length` below `Limits::MIN_STRING_LENGTH` (16). Every other value is
 accepted and a script meets it as its own bound; `Limits::validate` checks without making an interpreter.

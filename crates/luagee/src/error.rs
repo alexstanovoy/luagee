@@ -7,8 +7,23 @@ use crate::LimitsError;
 pub(crate) const RETIRED_MESSAGE: &str = "interpreter retired after a host callback panic";
 
 /// What ended a call into a script: the host gets this, never a panic, and the interpreter stays usable.
+///
+/// More kinds may be added, so match it with a wildcard arm that treats an error you do not know as a failed call:
+///
+/// ```
+/// # use luagee::{Error, Limit};
+/// fn describe(error: &Error) -> String {
+///     match error {
+///         Error::Limit(Limit::FuelPerCall) => "the call ran out of fuel".to_owned(),
+///         Error::Syntax { message, .. } | Error::Runtime { message, .. } => message.clone(),
+///         other => format!("the call failed: {other}"),
+///     }
+/// }
+/// # let _ = describe;
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[must_use]
+#[non_exhaustive]
 pub enum Error {
     /// The source does not parse.
     Syntax {
@@ -34,8 +49,10 @@ pub enum Error {
     InvalidLimits(LimitsError),
 }
 
-/// Which uncatchable bound of the [`Limits`](crate::Limits) a script crossed.
+/// Which uncatchable bound of the [`Limits`](crate::Limits) a script crossed. More may be added: match with a wildcard
+/// arm that treats one you do not know as a failed call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Limit {
     /// [`Limits::fuel_per_call`](crate::Limits::fuel_per_call).
     FuelPerCall,

@@ -18,9 +18,10 @@ pub struct ModuleName {
     name: String,
 }
 
-/// Why a string is not a [`ModuleName`].
+/// Why a string is not a [`ModuleName`]. More reasons may be added: match with a wildcard arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
+#[non_exhaustive]
 pub enum ModuleNameError {
     /// It has no component.
     Empty,
