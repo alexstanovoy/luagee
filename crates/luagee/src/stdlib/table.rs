@@ -100,9 +100,13 @@ fn getn(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
 
 fn maxn(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     let t = vm.check_table(args, 0)?;
-    let table = vm.heap.table(t);
-    vm.charge_fuel(table.pairs().count() as u64)?;
-    let most = vm.heap.table(t).max_integer_key();
+    // The scan stops where the fuel left stops paying for it, and is paid as it went.
+    let per_fuel = crate::vm::VALUES_PER_FUEL;
+    let affordable = vm.heap.fuel.affordable(per_fuel);
+    let Some((most, visited)) = vm.heap.table(t).max_integer_key(affordable) else {
+        return Err(vm.heap.fuel.exhaust());
+    };
+    vm.charge_fuel((visited / per_fuel) as u64)?;
     vm.results(&[Value::Number(most)])
 }
 

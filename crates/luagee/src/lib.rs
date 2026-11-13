@@ -70,6 +70,7 @@ mod stdlib;
 mod table;
 mod value;
 mod vm;
+mod work;
 
 pub use error::{Error, Limit};
 

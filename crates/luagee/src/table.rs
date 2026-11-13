@@ -398,20 +398,35 @@ impl Table {
             .map(|e| (e.key, e.value))
     }
 
-    /// The largest positive integer key (`table.maxn`).
-    pub(crate) fn max_integer_key(&self) -> f64 {
-        let mut most = self
-            .array
-            .iter()
-            .rposition(|v| *v != Value::Nil)
-            .map_or(0.0, |i| (i + 1) as f64);
-        for e in self.entries.iter().filter(|e| e.value != Value::Nil) {
-            if let Value::Number(n) = e.key
+    /// The largest positive numeric key (`table.maxn`), found looking at no more than `limit` slots: the array's nil
+    /// tail from its end, then every hash entry, removed or not. With the slots looked at; None when `limit` is short.
+    pub(crate) fn max_integer_key(&self, limit: usize) -> Option<(f64, usize)> {
+        let mut visited = 0;
+        let mut most = 0.0;
+        for (i, value) in self.array.iter().enumerate().rev() {
+            if visited == limit {
+                return None;
+            }
+            visited += 1;
+            crate::work::visit(crate::work::Work::Slots, 1);
+            if *value != Value::Nil {
+                most = (i + 1) as f64;
+                break;
+            }
+        }
+        for e in &self.entries {
+            if visited == limit {
+                return None;
+            }
+            visited += 1;
+            crate::work::visit(crate::work::Work::Slots, 1);
+            if e.value != Value::Nil
+                && let Value::Number(n) = e.key
                 && n > most
             {
                 most = n;
             }
         }
-        most
+        Some((most, visited))
     }
 }
