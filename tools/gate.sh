@@ -41,7 +41,7 @@ step() { # name command...
 }
 
 step ignored-audit tools/ignored_audit.sh
-step bench-tooling python3 -m unittest discover -s tools/bench -p 'test_*.py'
+step bench-tooling python3 -I -m unittest discover -s tools/bench -p 'test_*.py'
 step wasm-audit tools/wasm_audit.sh
 step fuzz-check fuzz/fuzz.sh check
 step clippy cargo clippy --all-targets --all-features -- -D warnings

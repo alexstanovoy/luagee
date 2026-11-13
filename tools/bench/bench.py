@@ -16,8 +16,10 @@ import platform
 import shlex
 import selectors
 import statistics
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -32,9 +34,31 @@ def sha256(data):
 def source_provenance(root):
     def git(*arguments):
         return subprocess.check_output(["git", "-C", str(root), *arguments], timeout=10)
+    untracked = {}
+    total = 0
+    paths = git("ls-files", "--others", "--exclude-standard", "-z").split(b"\0")
+    if len(paths) > 10001:
+        raise ValueError("source provenance exceeds 10000 untracked files")
+    for name in filter(None, paths):
+        relative = os.fsdecode(name)
+        path = root / relative
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            data = os.fsencode(os.readlink(path))
+            kind = "symlink"
+        elif stat.S_ISREG(metadata.st_mode):
+            total += metadata.st_size
+            if total > 128 << 20:
+                raise ValueError("source provenance exceeds 128 MiB of untracked content")
+            data = path.read_bytes()
+            kind = "file"
+        else:
+            raise ValueError(f"source provenance requires a regular file or symlink: {relative}")
+        untracked[relative] = {"kind": kind, "sha256": sha256(data)}
     return {"revision": git("rev-parse", "HEAD").decode().strip(),
+            "tree": git("rev-parse", "HEAD^{tree}").decode().strip(),
             "status": git("status", "--porcelain", "--untracked-files=all").decode(),
-            "diff_sha256": sha256(git("diff", "--binary", "HEAD"))}
+            "diff_sha256": sha256(git("diff", "--binary", "HEAD")), "untracked": untracked}
 
 
 def assignments(values):
@@ -156,12 +180,27 @@ def measure(args):
                 samples.append({"round": round_number, "warmup": round_number < args.warmups,
                                 "kernel": kernel, "interpreter": name, "seconds": elapsed,
                                 "output_checked": True})
-    return {"compiler": subprocess.check_output(["rustc", "-vV"], text=True, timeout=10),
+    return {"status": "passed", "compiler": subprocess.check_output(["rustc", "-vV"], text=True, timeout=10),
             "machine": {"system": platform.system(), "release": platform.release(), "architecture": platform.machine(),
                         "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None},
             "settings": {"fuel": 1 << 40, "memory_bytes": 512 << 20, "runs": args.runs, "warmups": args.warmups},
             "interpreters": provenance, "kernels": kernels, "samples": samples,
             "summaries": summarize(samples, kernels, names)}
+
+
+def write_report(path, report):
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=".samples_", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            json.dump(report, output, indent=2)
+            output.write("\n")
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
 
 def main():
@@ -182,10 +221,9 @@ def main():
     try:
         report = measure(args)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
+        write_report(args.output, {"status": "failed", "error": str(error)})
         parser.exit(1, f"bench: {error}\n")
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(report, indent=2) + "\n")
+    write_report(args.output, report)
     for kernel, candidates in report["summaries"].items():
         print(kernel, " | ".join(f"{name}: {s['median_seconds']:.6f} [{s['min_seconds']:.6f}, {s['max_seconds']:.6f}]" for name, s in candidates.items()))
 

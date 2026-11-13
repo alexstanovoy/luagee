@@ -112,8 +112,9 @@ bench)
     cargo build --quiet --release -p luagee --example lua --target "$target"
     # Compiled ahead, so that the timings are the interpreter's, not Cranelift's. The kernels' folder is /bench in the
     # guest: under WASI the folder loader resolves a folder only below a top-level preopened one.
+    # {} expands to the kernel's relative path without its suffix, including nested folders.
     "$runtime" compile -o temp/lua.cwasm "target/$target/release/examples/lua.wasm"
-    python3 -I tools/bench/bench.py --wasm "$runtime run --allow-precompiled --dir $here/tools/bench::/bench $here/temp/lua.cwasm /bench/{}.lua" 5
+    python3 -I tools/bench/bench.py --output temp/wasm_bench.json --wasm "$runtime run --allow-precompiled --dir $here/tools/bench::/bench $here/temp/lua.cwasm /bench/{}.lua" 5
     ;;
 *)
     sed -n '2,12p' "$0"

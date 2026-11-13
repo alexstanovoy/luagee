@@ -1,7 +1,5 @@
--- brokkr verdict workload derived from examples/strings/patterns.lua (see
--- that file for the probe rationale). Same kernel, repeated K times per
--- _bench call so one call is ~100ms and the standalone run takes a few
--- seconds in a release build.
+-- patterns workload. See PROVENANCE.md for origin and modifications.
+-- Repeated kernels produce a checked checksum; the queue uses a shorter repetition count.
 
 local log = "[2026-05-05 12:34:56] WARN  request_id=req-7Fa2 method=GET status=200 path=/api/v1/users size=1532b"
 local url = "https://user:pass@example.com:8443/path/to/resource?q=hello+world&page=42#frag-1"

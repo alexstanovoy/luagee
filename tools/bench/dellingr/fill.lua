@@ -1,7 +1,5 @@
--- brokkr verdict workload derived from examples/tables/fill.lua (see that
--- file for the probe rationale). Same kernel, repeated K times per _bench
--- call so one call is ~100ms and the standalone run takes a few seconds
--- in a release build.
+-- fill workload. See PROVENANCE.md for origin and modifications.
+-- Repeated kernels produce a checked checksum; the queue uses a shorter repetition count.
 
 local keys = {}
 for i = 1, 3000 do

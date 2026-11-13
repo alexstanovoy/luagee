@@ -12,12 +12,12 @@ python3 tools/bench/bench.py --runs 5 --warmups 1 --output temp/samples.json \
 
 Each round reverses interpreter order. Every run must finish without diagnostics
 and print the exact adjacent `.out` file; the imported kernels print their computed
-checksum. A failed run refuses to publish a successful result file. The JSON records
+checksum. A failed run atomically publishes a failed status, replacing any stale successful report. The JSON records
 all warmup and measured samples, medians and minimum/maximum, source revisions and
-dirty status/diff hashes, executable/kernel/output hashes, compiler version, machine
+committed tree hashes, dirty status/diff hashes and untracked content hashes, executable/kernel/output hashes, compiler version, machine
 and CPU affinity. Keep the JSON beside the build logs; a compiler version identifies
 the harness host, while executable hashes and separate build logs identify the builds.
-Do not reuse an old output file after a failed command.
+Only consume reports whose status is passed. Format and commit each source tree before building and measuring; preserve build logs and check its tree hash in the report.
 
 Fuel and memory are raised for throughput measurements (2^40 and 512 MiB);
 accounting remains enabled. These are not default-limit latency measurements.

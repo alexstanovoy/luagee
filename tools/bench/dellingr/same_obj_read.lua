@@ -1,7 +1,5 @@
--- brokkr verdict workload derived from examples/fields/same_obj_read.lua
--- (see that file for the probe rationale). Same kernel, repeated K times
--- per _bench call so one call is ~100ms and the standalone run takes a
--- few seconds in a release build.
+-- same obj read workload. See PROVENANCE.md for origin and modifications.
+-- Repeated kernels produce a checked checksum; the queue uses a shorter repetition count.
 
 local entity = {
     pos_x = 1.5,
