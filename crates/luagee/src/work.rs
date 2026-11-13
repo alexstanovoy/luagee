@@ -11,8 +11,12 @@ pub(crate) enum Work {
     Bytes,
     /// Values the collector looks at.
     Collector,
-    /// Work paid one fuel a unit: functions a native function calls, slots `next` steps over.
+    /// Work paid one fuel a unit: functions a native function calls, slots `next` steps over, the upvalues a
+    /// compiling function takes (at `compiler::CAPTURE_FUEL` a unit), the statements a block's end is looked for in.
     Steps,
+    /// Name lookups the compiler makes, each at the price of a source byte: a name use is at least two bytes long and
+    /// makes four of these.
+    Names,
 }
 
 /// Records `units` of `work` done.

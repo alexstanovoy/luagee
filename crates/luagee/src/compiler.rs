@@ -16,6 +16,8 @@ use crate::lexer::SyntaxError;
 use crate::parser::ParseError;
 use crate::proto::{ArithOp, Capture, CompareOp, LocalInfo, Op, Proto, Rk};
 use crate::value::{Handle, StrId, Value};
+use crate::vm::LuaError;
+use crate::work::{self, Work};
 
 type Compile<T> = Result<T, ParseError>;
 
@@ -25,6 +27,10 @@ const MAX_REGISTERS: u32 = 250;
 const MAX_LOCALS: usize = 200;
 /// Values a table constructor stores per `SetList`.
 const FIELDS_PER_FLUSH: u32 = 50;
+/// The fuel a function pays for each upvalue it takes: the name is copied and indexed and the capture listed in it,
+/// and a name used deep inside nested functions is taken by each of them. The work is bounded by the limits (functions
+/// nested x upvalues), not by the size of the source, so it is paid for as it is done.
+pub(super) const CAPTURE_FUEL: u64 = 4;
 
 /// Compiles a chunk: a vararg function of no parameters.
 pub(crate) fn compile(
@@ -37,6 +43,7 @@ pub(crate) fn compile(
 ) -> Compile<Rc<Proto>> {
     let mut resolver = Resolver {
         functions: Vec::new(),
+        scope: ScopeIndex::new(),
         captured: Vec::new(),
         depth: 0,
         max_depth,
@@ -45,6 +52,7 @@ pub(crate) fn compile(
     let mut compiler = Compiler {
         heap,
         functions: Vec::new(),
+        scope: ScopeIndex::new(),
         captured: resolver.captured,
         declared: 0,
         chunk,
@@ -57,12 +65,63 @@ pub(crate) fn compile(
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Name lookup. Every active local declaration of every function being compiled, by name, innermost last: a reference
+// finds the declaration it means (the innermost, which is the last declared) in O(log names), however many locals and
+// enclosing functions there are. Scanning each function's locals for each reference instead costs a reference
+// (enclosing functions x locals) steps, which a script of one-line statements can make the whole compile.
+
+struct ScopeIndex<T> {
+    by_name: BTreeMap<Name, Vec<T>>,
+}
+
+impl<T> ScopeIndex<T> {
+    fn new() -> Self {
+        ScopeIndex {
+            by_name: BTreeMap::new(),
+        }
+    }
+
+    /// `name` is declared, shadowing every earlier declaration of it that is still active.
+    fn declare(&mut self, name: &Name, entry: T) {
+        work::visit(Work::Names, 1);
+        match self.by_name.get_mut(name) {
+            Some(entries) => entries.push(entry),
+            None => {
+                self.by_name.insert(name.clone(), vec![entry]);
+            }
+        }
+    }
+
+    /// The innermost declaration of `name` ends: the declarations it shadowed show again. Declarations end in the
+    /// reverse of the order they were made, as scopes nest.
+    fn end(&mut self, name: &Name) {
+        work::visit(Work::Names, 1);
+        let entries = self
+            .by_name
+            .get_mut(name)
+            .expect("an ending declaration was declared");
+        entries.pop();
+        if entries.is_empty() {
+            self.by_name.remove(name);
+        }
+    }
+
+    /// The innermost active declaration of `name`, if any: none means a global. The caller counts the lookup (the
+    /// ones that take an upvalue are paid for by it).
+    fn innermost(&self, name: &Name) -> Option<&T> {
+        self.by_name.get(name).and_then(|entries| entries.last())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // The resolver: which local declarations a nested function captures. It declares names in exactly the order the
 // compiler does, so the n-th declaration of one is the n-th of the other.
 
 struct Resolver {
     /// Per function being resolved, its blocks of (name, declaration) pairs.
     functions: Vec<Vec<Vec<(Name, usize)>>>,
+    /// The active declarations: the function that made each (its index in `functions`) and its number.
+    scope: ScopeIndex<(usize, usize)>,
     captured: Vec<bool>,
     depth: u32,
     max_depth: u32,
@@ -87,26 +146,39 @@ impl Resolver {
     fn declare(&mut self, name: &Name) {
         let id = self.captured.len();
         self.captured.push(false);
+        let function = self.functions.len() - 1;
+        self.scope.declare(name, (function, id));
         let blocks = self.functions.last_mut().expect("a function");
         blocks.last_mut().expect("a block").push((name.clone(), id));
     }
 
+    /// The innermost block of the current function ends, and with it the names it declared.
+    fn end_block(&mut self) {
+        let block = self
+            .functions
+            .last_mut()
+            .expect("a function")
+            .pop()
+            .expect("a block");
+        for (name, _) in block.iter().rev() {
+            self.scope.end(name);
+        }
+    }
+
+    fn begin_block(&mut self) {
+        self.functions
+            .last_mut()
+            .expect("a function")
+            .push(Vec::new());
+    }
+
     fn reference(&mut self, name: &Name) {
         let current = self.functions.len() - 1;
-        for f in (0..self.functions.len()).rev() {
-            let found = self.functions[f].iter().rev().find_map(|block| {
-                block
-                    .iter()
-                    .rev()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, id)| *id)
-            });
-            if let Some(id) = found {
-                if f != current {
-                    self.captured[id] = true;
-                }
-                return;
-            }
+        work::visit(Work::Names, 1);
+        if let Some(&(function, id)) = self.scope.innermost(name)
+            && function != current
+        {
+            self.captured[id] = true;
         }
     }
 
@@ -117,18 +189,16 @@ impl Resolver {
             self.declare(param);
         }
         self.block_contents(body)?;
+        self.end_block();
         self.functions.pop();
         self.depth -= 1;
         Ok(())
     }
 
     fn block(&mut self, block: &Block) -> Compile<()> {
-        self.functions
-            .last_mut()
-            .expect("a function")
-            .push(Vec::new());
+        self.begin_block();
         self.block_contents(block)?;
-        self.functions.last_mut().expect("a function").pop();
+        self.end_block();
         Ok(())
     }
 
@@ -175,10 +245,7 @@ impl Resolver {
                 self.block(body)
             }
             Statement::Repeat { body, condition } => {
-                self.functions
-                    .last_mut()
-                    .expect("a function")
-                    .push(Vec::new());
+                self.begin_block();
                 for statement in &body.statements {
                     self.statement(statement)?;
                 }
@@ -188,7 +255,7 @@ impl Resolver {
                     }
                 }
                 self.expr(condition)?;
-                self.functions.last_mut().expect("a function").pop();
+                self.end_block();
                 Ok(())
             }
             Statement::If { arms, otherwise } => {
@@ -214,13 +281,10 @@ impl Resolver {
                 if let Some(step) = step {
                     self.expr(step)?;
                 }
-                self.functions
-                    .last_mut()
-                    .expect("a function")
-                    .push(Vec::new());
+                self.begin_block();
                 self.declare(var);
                 self.block(body)?;
-                self.functions.last_mut().expect("a function").pop();
+                self.end_block();
                 Ok(())
             }
             Statement::GenericFor {
@@ -232,15 +296,12 @@ impl Resolver {
                 for value in values {
                     self.expr(value)?;
                 }
-                self.functions
-                    .last_mut()
-                    .expect("a function")
-                    .push(Vec::new());
+                self.begin_block();
                 for name in names {
                     self.declare(name);
                 }
                 self.block(body)?;
-                self.functions.last_mut().expect("a function").pop();
+                self.end_block();
                 Ok(())
             }
             Statement::LocalFunction { name, body } => {
@@ -335,7 +396,8 @@ struct FunctionState {
     booleans: [Option<u32>; 2],
     protos: Vec<Rc<Proto>>,
     captures: Vec<Capture>,
-    upvalue_names: Vec<Name>,
+    /// The index of each upvalue by its name (the proto lists the names by index).
+    upvalue_indices: BTreeMap<Name, u8>,
     locals: Vec<LocalVar>,
     infos: Vec<LocalInfo>,
     blocks: Vec<BlockState>,
@@ -373,6 +435,9 @@ impl Want {
 struct Compiler<'h> {
     heap: &'h mut Heap,
     functions: Vec<FunctionState>,
+    /// The active locals of all `functions`: the function that declared each (its index) and its place in that
+    /// function's `locals`.
+    scope: ScopeIndex<(usize, usize)>,
     captured: Vec<bool>,
     declared: usize,
     chunk: Rc<str>,
@@ -381,6 +446,16 @@ struct Compiler<'h> {
     max_depth: u32,
     /// `Limits::function_upvalues`: a function's captures may not outgrow it, so an upvalue's index fits its `u8`.
     max_upvalues: usize,
+}
+
+/// The names of a function's upvalues, by index.
+fn upvalue_names(indices: BTreeMap<Name, u8>) -> Vec<Name> {
+    let mut named: Vec<(u8, Name)> = indices
+        .into_iter()
+        .map(|(name, index)| (index, name))
+        .collect();
+    named.sort_unstable_by_key(|&(index, _)| index);
+    named.into_iter().map(|(_, name)| name).collect()
 }
 
 fn is_arith(op: BinOp) -> Option<ArithOp> {
@@ -558,6 +633,7 @@ impl Compiler<'_> {
         if self.f().locals.len() >= MAX_LOCALS {
             return Err(self.limit(self.functions.len() - 1, MAX_LOCALS, "local variables"));
         }
+        let function = self.functions.len() - 1;
         let f = self.f();
         let info = f.infos.len();
         f.infos.push(LocalInfo {
@@ -566,12 +642,14 @@ impl Compiler<'_> {
             start: f.code.len(),
             end: usize::MAX,
         });
+        let position = f.locals.len();
         f.locals.push(LocalVar {
-            name,
+            name: name.clone(),
             register,
             captured,
             info,
         });
+        self.scope.declare(&name, (function, position));
         if captured {
             self.emit(Op::NewCell { a: register });
         }
@@ -580,59 +658,63 @@ impl Compiler<'_> {
 
     fn resolve(&mut self, name: &Name) -> Compile<Var> {
         let current = self.functions.len() - 1;
-        if let Some(local) = self.functions[current]
-            .locals
-            .iter()
-            .rev()
-            .find(|l| l.name == *name)
-        {
-            return Ok(Var::Local(local.register, local.captured));
-        }
-        match self.upvalue(current, name)? {
-            Some(i) => Ok(Var::Upvalue(i)),
+        work::visit(Work::Names, 1);
+        match self.scope.innermost(name).copied() {
+            Some((function, position)) if function == current => {
+                let local = &self.functions[current].locals[position];
+                Ok(Var::Local(local.register, local.captured))
+            }
+            // A local of an enclosing function: this function holds it as an upvalue, through the ones between.
+            Some((owner, _)) => Ok(Var::Upvalue(self.upvalue(current, owner, name)?)),
             None => Ok(Var::Global(self.string_constant(name)?)),
         }
     }
 
-    fn upvalue(&mut self, function: usize, name: &Name) -> Compile<Option<u8>> {
-        if function == 0 {
-            return Ok(None);
-        }
-        if let Some(i) = self.functions[function]
-            .upvalue_names
-            .iter()
-            .position(|n| n == name)
-        {
-            return Ok(Some(
-                u8::try_from(i).expect("the limit is a u8, so every index below it fits"),
-            ));
+    /// Spends fuel on work about to be done: the compile ends there when the call cannot pay for it.
+    fn pay(&mut self, fuel: u64) -> Compile<()> {
+        self.heap.fuel.spend(fuel).map_err(|error| match error {
+            LuaError::Limit(limit) => ParseError::Limit(limit),
+            LuaError::Runtime(_) => unreachable!("spending fuel only fails by running out"),
+        })
+    }
+
+    /// The index of `function`'s upvalue for `name`, a local of the function `owner` above it, made (and made in the
+    /// functions between) if it is the first use. Steps up only through functions that do not hold it yet, each of
+    /// which gains an upvalue, so the work is bounded by the upvalue limit and not by the source.
+    fn upvalue(&mut self, function: usize, owner: usize, name: &Name) -> Compile<u8> {
+        assert!(
+            owner < function,
+            "an upvalue comes from an enclosing function"
+        );
+        if let Some(&index) = self.functions[function].upvalue_indices.get(name) {
+            return Ok(index);
         }
         let parent = function - 1;
-        let capture = if let Some(local) = self.functions[parent]
-            .locals
-            .iter()
-            .rev()
-            .find(|l| l.name == *name)
-        {
+        let capture = if owner == parent {
+            let (_, position) = *self
+                .scope
+                .innermost(name)
+                .expect("the owner's local is active");
+            let local = &self.functions[parent].locals[position];
             assert!(
                 local.captured,
                 "the resolver marks every local a nested function uses"
             );
             Capture::Register(local.register)
-        } else if let Some(i) = self.upvalue(parent, name)? {
-            Capture::Upvalue(i)
         } else {
-            return Ok(None);
+            Capture::Upvalue(self.upvalue(parent, owner, name)?)
         };
         if self.functions[function].captures.len() >= self.max_upvalues {
             return Err(self.limit(function, self.max_upvalues, "upvalues"));
         }
+        self.pay(CAPTURE_FUEL)?;
+        work::visit(Work::Steps, CAPTURE_FUEL as usize);
         let f = &mut self.functions[function];
         f.captures.push(capture);
-        f.upvalue_names.push(name.clone());
         let index = u8::try_from(f.captures.len() - 1)
             .expect("the limit is a u8, so every index below it fits");
-        Ok(Some(index))
+        f.upvalue_indices.insert(name.clone(), index);
+        Ok(index)
     }
 
     // --- functions and blocks --------------------------------------------------------------------------------
@@ -656,7 +738,7 @@ impl Compiler<'_> {
             booleans: [None; 2],
             protos: Vec::new(),
             captures: Vec::new(),
-            upvalue_names: Vec::new(),
+            upvalue_indices: BTreeMap::new(),
             locals: Vec::new(),
             infos: Vec::new(),
             blocks: Vec::new(),
@@ -676,6 +758,11 @@ impl Compiler<'_> {
         self.block(body, false, false)?;
         self.f().line = end_line;
         self.emit(Op::Return { first: 0, count: 1 });
+        // The parameters are in no block: they end with the function.
+        let f = self.functions.last().expect("the function being compiled");
+        for local in f.locals.iter().rev() {
+            self.scope.end(&local.name);
+        }
         let f = self.functions.pop().expect("the function being compiled");
         let proto = Proto {
             code: f.code,
@@ -684,7 +771,7 @@ impl Compiler<'_> {
             protos: f.protos,
             captures: f.captures,
             locals: f.infos,
-            upvalue_names: f.upvalue_names,
+            upvalue_names: upvalue_names(f.upvalue_indices),
             params: params.len() as u8,
             vararg,
             registers: f.registers as u8,
@@ -722,11 +809,16 @@ impl Compiler<'_> {
 
     fn statements(&mut self, block: &Block) -> Compile<()> {
         self.enter()?;
+        // Where the labels that end the block begin; looked for once, since looking from each statement is quadratic
+        // in a block of labels.
+        let trailing_labels = block
+            .statements
+            .iter()
+            .rposition(|s| !matches!(s, Statement::Label { .. }))
+            .map_or(0, |last| last + 1);
+        work::visit(Work::Steps, block.statements.len() - trailing_labels + 1);
         for (i, statement) in block.statements.iter().enumerate() {
-            let at_end = block.ret.is_none()
-                && block.statements[i + 1..]
-                    .iter()
-                    .all(|s| matches!(s, Statement::Label { .. }));
+            let at_end = block.ret.is_none() && i + 1 >= trailing_labels;
             self.statement(statement, at_end)?;
             let block_free = self.f().blocks.last().expect("a block").free;
             let free = self
@@ -746,11 +838,17 @@ impl Compiler<'_> {
 
     fn end_block(&mut self) -> Compile<()> {
         let block = self.f().blocks.pop().expect("a block");
-        let f = self.f();
+        let f = self
+            .functions
+            .last_mut()
+            .expect("a function being compiled");
         let end = f.code.len();
         for local in &f.locals[block.active..] {
             let info = &mut f.infos[local.info];
             info.end = info.end.min(end);
+        }
+        for local in f.locals[block.active..].iter().rev() {
+            self.scope.end(&local.name);
         }
         f.locals.truncate(block.active);
         f.free = block.free;
@@ -1380,8 +1478,20 @@ impl Compiler<'_> {
     /// Whether an expression that needs the registers above its target, or writes it before reading every operand,
     /// must go through a new register: unless the target is the newest register and no local's.
     fn needs_temp(&mut self, register: u8) -> bool {
-        u32::from(register) + 1 != self.free()
-            || self.f().locals.iter().any(|l| l.register == register)
+        if u32::from(register) + 1 != self.free() {
+            return true;
+        }
+        // Locals sit in the registers in the order they were declared, so a binary search finds the register's owner
+        // (a scan of up to 200 locals for each expression would be most of the compile of one-line statements).
+        let locals = &self.f().locals;
+        debug_assert!(
+            locals
+                .windows(2)
+                .all(|pair| pair[0].register < pair[1].register),
+            "active locals have rising registers"
+        );
+        let at = locals.partition_point(|l| l.register < register);
+        locals.get(at).is_some_and(|l| l.register == register)
     }
 
     fn expr_to_reg(&mut self, e: &Expr, reg: u8) -> Compile<()> {

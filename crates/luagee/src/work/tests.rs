@@ -7,7 +7,13 @@ use super::Work;
 use crate::{Error, Keys, Limit, Limits, Lua, Value};
 
 /// Every kind of work, in the order of its discriminant.
-const ALL: [Work; 4] = [Work::Slots, Work::Bytes, Work::Collector, Work::Steps];
+const ALL: [Work; 5] = [
+    Work::Slots,
+    Work::Bytes,
+    Work::Collector,
+    Work::Steps,
+    Work::Names,
+];
 
 /// The units of a kind of work one fuel pays for: the price the operations charge for it.
 const fn per_fuel(work: Work) -> u64 {
@@ -16,6 +22,8 @@ const fn per_fuel(work: Work) -> u64 {
         Work::Bytes => 16,
         Work::Collector => crate::vm::GC_OBJECTS_PER_FUEL as u64,
         Work::Steps => 1,
+        // A fuel pays for four source bytes; a name use is two bytes at least and looks its name up four times.
+        Work::Names => 4,
     }
 }
 
@@ -61,6 +69,18 @@ const DEEP_REGISTERS: &str = "local function f(d) local a1,a2,a3,a4,a5,a6,a7,a8,
     if d > 0 then f(d - 1) else while true do collectgarbage() coroutine.yield() end end end
     local co = coroutine.create(function() f(math.floor(n / 16)) end) coroutine.resume(co)";
 
+/// A function holding 60 upvalues (the default limit) and then `n` one-line statements reading a global: every use of a
+/// name is resolved against the function's upvalues and its enclosing function's locals.
+const UPVALUES_THEN_READS: &str = "local names, uses = {}, {} for i = 1, 60 do names[i] = 'u'..i uses[i] = 'u'..i..' = 2' end
+    local src = 'local '..table.concat(names, ',')..'\\nlocal function f()\\nlocal _\\n'..table.concat(uses, '\\n')..'\\n'..string.rep('_ = g\\n', n)..'end'";
+/// 40 functions nested, each with 150 locals still active in the next, and `n` one-line statements reading a global in
+/// the innermost: every use of a name is resolved against all of them.
+const NESTED_LOCALS_THEN_READS: &str = "local src = '' for level = 1, 40 do local names = {} for i = 1, 150 do names[i] = 'v'..level..'_'..i end
+    src = src..'local '..table.concat(names, ',')..'\\nlocal function l'..level..'()\\n' end
+    src = src..'local _\\n'..string.rep('_ = g\\n', n)..string.rep('end\\n', 40)";
+/// A block of `n` labels.
+const LABELS: &str = "local labels = {} for i = 1, n do labels[i] = '::l'..i..'::' end local src = table.concat(labels, '\\n')";
+
 // One row a line: the table reads as the list of operations it covers.
 #[rustfmt::skip]
 const ROWS: &[Row] = &[
@@ -91,6 +111,9 @@ const ROWS: &[Row] = &[
     ("arithmetic, long numeric string", "local s=string.rep(' ',n)..'1'", "return s + 1", "#s == n+1"),
     ("error naming, long field name", "local k=string.rep('k',n) local f=loadstring('local t={} return t.'..k..'.x')", "return pcall(f)", "#k == n"),
     ("load, a reader's piece then a number", "local s=string.rep('x',n) local k=0", "return load(function() k=k+1 if k==1 then return s end return 1 end)", "#s == n"),
+    ("load, reads under 60 upvalues", UPVALUES_THEN_READS, "return load(src)", "#src > n"),
+    ("load, reads under 40 nested functions of 150 locals", NESTED_LOCALS_THEN_READS, "return load(src)", "#src > n"),
+    ("load, a block of labels", LABELS, "return load(src)", "#src > n"),
     ("a write moving hash keys into the array", "local t={} for i=2,n+1 do t[i]=i end", "t[1]=1", "t[1] == nil and t[n+1] == n+1"),
 ];
 
@@ -316,6 +339,60 @@ fn both_scans_of_a_pattern_set_are_counted() {
             "n={n}: {} fuel of work for {}",
             full.work,
             full.fuel
+        );
+    }
+}
+
+/// A name used deep inside nested functions is taken as an upvalue by each of them on the way: that is as many
+/// upvalues as functions times names, however short the source, so each is paid when it is taken (`CAPTURE_FUEL`), and a
+/// compile whose call cannot pay ends there, having taken no more than it paid for.
+#[test]
+fn upvalues_taken_through_nested_functions_are_paid_one_by_one_before_they_are_taken() {
+    const NAMES: u64 = 30;
+    let row: Row = (
+        "captures",
+        "local names, uses = {}, {} for i = 1, 30 do names[i] = 'a'..i uses[i] = '_ = a'..i end
+        local src = 'local '..table.concat(names, ',')..'\\n'
+        for level = 1, n do src = src..'local function f'..level..'()\\n' end
+        src = src..'local _\\n'..table.concat(uses, '\\n')..'\\n'..string.rep('end\\n', n)",
+        "return load(src)",
+        "#src > n",
+    );
+    for depth in [8usize, 32, 90] {
+        let full = run(&row, depth, AMPLE);
+        assert!(full.outcome.is_ok(), "depth {depth}: {:?}", full.outcome);
+        let upvalues = NAMES * depth as u64;
+        assert!(
+            full.units >= upvalues * super::super::compiler::CAPTURE_FUEL,
+            "depth {depth}: the counter sees every upvalue taken, {} units",
+            full.units
+        );
+        assert!(
+            full.fuel >= upvalues * super::super::compiler::CAPTURE_FUEL,
+            "depth {depth}: {} fuel for {upvalues} upvalues",
+            full.fuel
+        );
+        assert!(
+            full.work <= full.fuel + SLACK,
+            "depth {depth}: {} fuel of work for {}",
+            full.work,
+            full.fuel
+        );
+        let short = run(&row, depth, full.fuel / 2);
+        assert!(refused(&short), "depth {depth}: {:?}", short.outcome);
+        assert!(
+            short.kept,
+            "depth {depth}: a refused compile changed the state"
+        );
+        assert!(
+            short.work <= full.fuel / 2 + SLACK,
+            "depth {depth}: {} fuel of work done before refusing at {}",
+            short.work,
+            full.fuel / 2
+        );
+        assert!(
+            refused(&run(&row, depth, full.fuel - 1)),
+            "depth {depth}: one fuel less is refused"
         );
     }
 }

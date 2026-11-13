@@ -236,6 +236,8 @@ pub(crate) struct Proto {
 
 // Fixed across targets; includes the native Rust header and Rc's strong/weak counters.
 const PROTO_OVERHEAD: usize = 240;
+/// What an upvalue's name takes beyond its bytes: the box's pointer and length in the proto's list.
+const NAME_OVERHEAD: usize = 16;
 const _: () =
     assert!(std::mem::size_of::<Proto>() + 2 * std::mem::size_of::<usize>() <= PROTO_OVERHEAD);
 
@@ -246,5 +248,10 @@ impl Proto {
             + self.code.len() * 16
             + self.constants.len() * crate::value::VALUE_BYTES
             + self.captures.len() * 2
+            + self
+                .upvalue_names
+                .iter()
+                .map(|name| name.len() + NAME_OVERHEAD)
+                .sum::<usize>()
     }
 }

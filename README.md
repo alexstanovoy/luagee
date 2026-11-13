@@ -245,6 +245,7 @@ prices changed for scripts (fixtures run whole, so each includes the fill or loo
 | `string.match('y', '[' .. 1000 bytes)` (never closed), caught | 271 | 333 | the scan that finds it malformed, 1 a 16 bytes |
 | an error message of `n` bytes reaching the host | — | + `n / 16` | converting it to text |
 | naming the register of an error (`field 'x'`) | `1 + pc/8 + locals/8` | units looked at / 8 | what the scan looks at, the name's copy included (+3 to +5 in the rows above) |
+| a function taking an upvalue while it compiles (`load`, a chunk with nested functions) | 0 | 4 | the name is copied and indexed; a name used deep inside nested functions is taken by each of them, however short the source |
 | creating a closure of 8, 60 or 255 upvalues (one closure, the loop around it left out) | 5, 5, 5 | 6, 12, 36 | the cells it copies, 1 a 8 |
 | `collectgarbage()` over 1000 tables in a table | 10090 | 10299 | roots paid, a removed entry looked at counts |
 | `collectgarbage()` after 1100 garbage strings | 10298 | 10259 | a string found in a table's piece is marked there, not traced again |

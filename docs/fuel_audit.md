@@ -48,9 +48,11 @@ nothing to grow.
 | hash-to-array migration | moved keys | second lookup, 1 a key | 13, 14, 32 (whole fill + move) | 13, 17, 23 | work row `a write moving hash keys into the array`, `table_fuel` pin |
 | function, cell, userdata, string, coroutine arenas | arena size | relocation of a capped growth, before reserving | false memory errors in bands of the cap | none | `garbage_functions_cells_and_coroutines_exhaust_fuel_without_false_memory_errors` |
 | `loadstring(s)`, `load(s)` refused (bytecode) | source length | no copy any more: constant | 17000 ns a fuel at 4 MB, caught and repeated | constant fuel at any length | `a_refused_bytecode_chunk_costs_the_same_at_any_length` |
-| `load(reader)` pieces | source length, at most `module_size` | each piece at the compile price (1 a 4 bytes) before it is copied; the compile charges the rest | 1150 ns a fuel at 1 MB | within the fuel | work row `load, a reader's piece then a number` |
+| `load(reader)` pieces | source length, at most `module_size` | each piece at the compile price (1 a 4 bytes) before it is copied; the compile itself pays for the upvalues it takes (below) | 1150 ns a fuel at 1 MB | within the fuel | work row `load, a reader's piece then a number` |
 | pattern set that never closes | pattern length | the scan to the pattern's end, 1 a 16 bytes, before the error | 190000 ns a fuel at 4 MB, caught and repeated | paid | `a_long_unclosed_set_is_malformed_only_when_its_scan_is_paid` |
 | a sweep stopped by fuel at an arena's end | — | each sweep step and the string index's shrink paid before; the arena is an enum ending in `Done` | the next call panicked ("six arenas") | resumes | `*_collection_stopped_by_fuel_anywhere_resumes_on_the_next_call` (plain, incremental, full) |
+| compile, a name use (`resolve`) | functions nested x locals and upvalues scanned for each use | no scan: an index of the active locals by name finds the innermost declaration in one lookup; the upvalues a use makes each function take are paid when taken (`CAPTURE_FUEL`, 4) | 3338 (40 functions of 150 locals nested), 516 (255 upvalues) | 215, 231 | work rows `load, reads under 60 upvalues`, `load, reads under 40 nested functions of 150 locals`, `upvalues_taken_through_nested_functions_are_paid_one_by_one_before_they_are_taken` |
+| compile, a block of labels | statements after each, to see whether only labels follow | looked for once from the block's end | 8000 (40000 labels) | 290 | work row `load, a block of labels` |
 | creating a closure | upvalues copied, at most `Limits::function_upvalues` (default 60, at most 255) | `ALLOCATION_FUEL` + 1 a 8 upvalues, before the copy (the cells are counted as memory by `Heap::new_function`) | 19, 49 (60, 255 upvalues) | 8, 12 | `a_closure_costs_its_instruction_an_allocation_and_one_fuel_for_every_eight_upvalues_it_copies`, `a_closure_whose_copy_is_not_paid_is_refused_before_it_is_made` |
 | `table.new(narray, nhash)` storage | hints up to 4096 | memory counted before the storage is built | built, then refused | refused first | `table_new_is_refused_by_the_memory_cap_before_allocating_its_storage` |
 
@@ -91,7 +93,7 @@ nothing to grow.
 |---|---|---|---|---|
 | `error(v, level)` | message bytes; the level walk stops at a boundary or `pcall` frame, and the frames it walks are unwound by the error | message copy and new string, before copying | — | 32, 32, 32 (no position) / 5, 2, 1 (with one) |
 | `pcall`, `xpcall` | arguments and results | 1 a 8 values; a native handler 1 a call | stack counted | 5, 4, 4 |
-| `loadstring`, `load` | source bytes, at most `module_size` | 1 a 4 bytes before parsing; a string source is shared, not copied; a reader's pieces are paid before they are copied | source limits, then the heap | 6, 3, 3 |
+| `loadstring`, `load` | source bytes, at most `module_size`; upvalues taken, at most functions nested x `Limits::function_upvalues` | 1 a 4 bytes before parsing, and `CAPTURE_FUEL` (4) when a function takes an upvalue, before it is taken; a string source is shared, not copied; a reader's pieces are paid before they are copied | source limits, then the heap | 6, 3, 3 |
 | `require`, `dofile` | module source through the host's loader (trusted Rust), at most `module_size` | as `load` | module count and size limits | — |
 | `tonumber(s, base)` | digits | 1 + 1 a 16 bytes | — | 8, 6, 6 |
 | `print` | bytes written | 1 a 16 bytes | — | 3, 0.4, 0.3 |
@@ -135,6 +137,11 @@ nothing to grow.
 
 ## Known limits of this audit
 
+- Compiling is paid 1 a 4 source bytes, which is proportional to the work only for ordinary source. Source made
+  of one-line statements (`_ = g` repeated, 6 bytes and about three tokens each) costs 160 to 300 ns a fuel: lexing,
+  parsing and compiling take about 100 ns a token whatever its length, against the quarter fuel a byte. That is the
+  same at one upvalue as at 255 and at any nesting; a module of `module_size` (1 MiB) of such statements takes about
+  50 ms for 260,000 fuel. Pricing by token would close it, at a price for every `load` that is a decision of its own.
 - Hash probing (tables and the string index) is not priced per probe. With a secret SipHash key a script cannot
   choose colliding keys, and every index is kept at most half full, so probe runs are short in expectation; the
   measurements of hash writes stay within a factor of three of array writes at 262144 keys.
