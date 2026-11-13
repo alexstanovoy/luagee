@@ -45,7 +45,7 @@ impl Drop for CallScope<'_> {
         self.vm.tick_fuel = self
             .vm
             .tick_fuel
-            .saturating_sub(self.budget.saturating_sub(self.vm.fuel));
+            .saturating_sub(self.budget.saturating_sub(self.vm.heap.fuel.left));
         self.vm.stack.truncate(self.slot);
         self.vm.frames.clear();
         self.vm.native_depth = 0;
@@ -98,9 +98,9 @@ impl Lua {
     pub fn new(limits: Limits, keys: Keys) -> Result<Lua, Error> {
         let owner = crate::value::next_owner()?;
         let mut vm = Vm::new(limits, keys, owner).map_err(|e| to_error(&mut None, e))?;
-        let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
+        let fuel = std::mem::replace(&mut vm.heap.fuel.left, u64::MAX);
         crate::stdlib::open(&mut vm).map_err(|e| to_error(&mut None, e))?;
-        vm.fuel = fuel;
+        vm.heap.fuel.left = fuel;
         Ok(Lua { vm })
     }
 
@@ -117,8 +117,8 @@ impl Lua {
     /// Starts a host tick: the fuel all calls of the tick may spend is full again.
     pub fn begin_tick(&mut self) {
         self.vm.tick_fuel = self.vm.limits.fuel_per_tick;
-        self.vm.fuel = self.vm.limits.fuel_per_call.min(self.vm.tick_fuel);
-        self.vm.fuel_limit = if self.vm.limits.fuel_per_call <= self.vm.tick_fuel {
+        self.vm.heap.fuel.left = self.vm.limits.fuel_per_call.min(self.vm.tick_fuel);
+        self.vm.heap.fuel.limit = if self.vm.limits.fuel_per_call <= self.vm.tick_fuel {
             Limit::FuelPerCall
         } else {
             Limit::FuelPerTick
@@ -136,13 +136,13 @@ impl Lua {
         self.ensure_active()?;
         let vm = &mut self.vm;
         // The host's own loading is not a script's work: it spends no script fuel (the source limits still hold).
-        let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
+        let fuel = std::mem::replace(&mut vm.heap.fuel.left, u64::MAX);
         // As a file is in Lua, the chunk's source is "@" and its name.
         let compiled = vm
             .heap
             .intern(format!("@{chunk}").as_bytes())
             .and_then(|name| crate::stdlib::compile_source(vm, source, name, chunk));
-        vm.fuel = fuel;
+        vm.heap.fuel.left = fuel;
         let compiled = compiled.map_err(|e| to_error(&mut Some(vm), e))?;
         compiled.map_err(|message: String| Error::Syntax {
             chunk: chunk.to_owned(),
@@ -156,8 +156,8 @@ impl Lua {
         self.ensure_active()?;
         let vm = &mut self.vm;
         let budget = vm.limits.fuel_per_call.min(vm.tick_fuel);
-        vm.fuel = budget;
-        vm.fuel_limit = if vm.limits.fuel_per_call <= vm.tick_fuel {
+        vm.heap.fuel.left = budget;
+        vm.heap.fuel.limit = if vm.limits.fuel_per_call <= vm.tick_fuel {
             Limit::FuelPerCall
         } else {
             Limit::FuelPerTick
@@ -208,18 +208,18 @@ impl Lua {
     pub fn pin(&mut self, value: Value) -> Result<(), Error> {
         self.ensure_active()?;
         // Setup, like `load`, is outside script execution; a result can be rooted after the call spent its fuel.
-        let fuel = std::mem::replace(&mut self.vm.fuel, u64::MAX);
+        let fuel = std::mem::replace(&mut self.vm.heap.fuel.left, u64::MAX);
         let result = self.vm.pin(value);
-        self.vm.fuel = fuel;
+        self.vm.heap.fuel.left = fuel;
         result.map_err(|e| to_error(&mut Some(&mut self.vm), e))
     }
 
     /// Releases one matching pin; false if it was not pinned. Root storage and scans are bounded.
     pub fn unpin(&mut self, value: Value) -> Result<bool, Error> {
         self.ensure_active()?;
-        let fuel = std::mem::replace(&mut self.vm.fuel, u64::MAX);
+        let fuel = std::mem::replace(&mut self.vm.heap.fuel.left, u64::MAX);
         let result = self.vm.unpin(value);
-        self.vm.fuel = fuel;
+        self.vm.heap.fuel.left = fuel;
         result.map_err(|e| to_error(&mut Some(&mut self.vm), e))
     }
 
@@ -228,9 +228,9 @@ impl Lua {
     pub fn string(&mut self, bytes: &[u8]) -> Result<Value, Error> {
         self.ensure_active()?;
         let vm = &mut self.vm;
-        let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
+        let fuel = std::mem::replace(&mut vm.heap.fuel.left, u64::MAX);
         let result = vm.new_string(bytes);
-        vm.fuel = fuel;
+        vm.heap.fuel.left = fuel;
         result.map_err(|e| to_error(&mut Some(vm), e))
     }
 
@@ -258,11 +258,11 @@ impl Lua {
     pub fn set_global(&mut self, name: &str, value: Value) -> Result<(), Error> {
         self.ensure_active()?;
         let vm = &mut self.vm;
-        let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
+        let fuel = std::mem::replace(&mut vm.heap.fuel.left, u64::MAX);
         let result = vm
             .validate(value)
             .and_then(|()| vm.set_field(vm.globals, name, value));
-        vm.fuel = fuel;
+        vm.heap.fuel.left = fuel;
         result.map_err(|e| to_error(&mut Some(vm), e))
     }
 
@@ -324,9 +324,9 @@ impl Lua {
     pub fn collect(&mut self) -> Result<(), Error> {
         self.ensure_active()?;
         let vm = &mut self.vm;
-        let fuel = std::mem::replace(&mut vm.fuel, u64::MAX);
+        let fuel = std::mem::replace(&mut vm.heap.fuel.left, u64::MAX);
         let result = vm.unwind_scope(|vm| vm.collect());
-        vm.fuel = fuel;
+        vm.heap.fuel.left = fuel;
         result.map_err(|e| to_error(&mut Some(vm), e))
     }
 
@@ -353,12 +353,12 @@ impl Lua {
     /// Setup never spends tick fuel and cannot execute Lua through `Vm::call`; use `Lua::call` for execution.
     /// Callbacks receive their active VM directly and share the executing call's budget.
     pub fn vm(&mut self) -> &mut Vm {
-        self.vm.fuel = if self.vm.retired {
+        self.vm.heap.fuel.left = if self.vm.retired {
             0
         } else {
             self.vm.limits.fuel_per_call
         };
-        self.vm.fuel_limit = Limit::FuelPerCall;
+        self.vm.heap.fuel.limit = Limit::FuelPerCall;
         &mut self.vm
     }
 }

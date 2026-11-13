@@ -7,6 +7,7 @@
 use std::any::Any;
 use std::rc::Rc;
 
+use crate::fuel::Fuel;
 use crate::proto::Proto;
 use crate::table::Table;
 use crate::value::{
@@ -172,8 +173,8 @@ impl<T> Arena<T> {
         }
     }
 
-    /// The slots the next `insert` adds to the arena's storage (it doubles when full): what to charge before it.
-    pub(crate) fn growth(&self) -> usize {
+    /// The slots the next `insert` adds to the arena's storage when nothing caps it (it doubles when full).
+    fn growth(&self) -> usize {
         if self.free.is_empty() && self.slots.len() == self.slots.capacity() {
             self.slots.capacity().max(4)
         } else {
@@ -181,15 +182,55 @@ impl<T> Arena<T> {
         }
     }
 
-    fn reserve_growth(&mut self, growth: usize) -> usize {
-        if growth == 0 {
-            return 0;
+    /// Makes room for the next `insert` before anything is allocated, for every arena alike: counts the new object's
+    /// `object` bytes (with what it owns) and, when the arena is full, its growth at `slot` counted bytes a slot.
+    ///
+    /// Growth doubles the arena, but at most up to the `ceiling` on `memory`: an arena full of garbage near the cap
+    /// then still takes objects until the next collection point reclaims it, rather than failing for want of a
+    /// doubling. A capped growth gives up geometric amortisation (the next one may come soon), so the relocation it
+    /// may cause is paid first: `1 + slots * slot / (VALUE_BYTES * VALUES_PER_FUEL)`. When even one slot does not
+    /// fit, or the fuel does not pay, nothing is allocated, counted or spent beyond the fuel.
+    pub(crate) fn reserve(
+        &mut self,
+        memory: &mut usize,
+        ceiling: usize,
+        object: usize,
+        slot: usize,
+        fuel: &mut Fuel,
+    ) -> Result<(), LuaError> {
+        let room = ceiling
+            .checked_sub(*memory)
+            .and_then(|room| room.checked_sub(object))
+            .ok_or(LuaError::Limit(crate::Limit::Memory))?;
+        let wanted = self.growth();
+        let growth = wanted.min(room / slot);
+        if wanted != 0 && growth == 0 {
+            return Err(LuaError::Limit(crate::Limit::Memory));
         }
-        debug_assert!(self.free.is_empty());
-        debug_assert_eq!(self.slots.len(), self.slots.capacity());
+        if growth < wanted {
+            let copied = self
+                .slots
+                .len()
+                .checked_mul(slot)
+                .ok_or(LuaError::Limit(crate::Limit::Memory))?;
+            fuel.spend(1 + (copied / (VALUE_BYTES * crate::vm::VALUES_PER_FUEL)) as u64)?;
+        }
+        // `room` covers both: the sum stays within the ceiling.
+        *memory += object + growth * slot;
+        if growth == 0 {
+            return Ok(());
+        }
         let previous = self.slots.capacity();
         self.slots.reserve_exact(growth);
-        self.slots.capacity() - previous
+        let granted = self.slots.capacity() - previous;
+        if granted > growth {
+            // An allocator's over-grant is held too: counted even when counting it crosses the ceiling.
+            *memory = memory.saturating_add((granted - growth).saturating_mul(slot));
+            if *memory > ceiling {
+                return Err(LuaError::Limit(crate::Limit::Memory));
+            }
+        }
+        Ok(())
     }
 
     /// A live handle at a trusted slot index (the intern index is maintained with the arena).
@@ -378,6 +419,8 @@ pub(crate) struct Heap {
     pub(crate) phase: Phase,
     /// The collector's worklist: values reached but not traced yet.
     pub(crate) gray: Vec<Value>,
+    /// The running call's fuel, which the heap's own work spends too.
+    pub(crate) fuel: Fuel,
 }
 
 /// Where the collector is.
@@ -431,6 +474,10 @@ impl Heap {
             cap,
             phase: Phase::Idle,
             gray: Vec::new(),
+            fuel: Fuel {
+                left: u64::MAX,
+                limit: crate::Limit::FuelPerCall,
+            },
         }
     }
 
@@ -485,8 +532,16 @@ impl Heap {
         } else {
             0
         };
-        self.charge(
-            STRING_OVERHEAD + bytes.len() + self.strings.growth() * STRING_OVERHEAD + index_growth,
+        let object = (STRING_OVERHEAD + index_growth)
+            .checked_add(bytes.len())
+            .ok_or(LuaError::Limit(crate::Limit::Memory))?;
+        let ceiling = self.ceiling();
+        self.strings.reserve(
+            &mut self.memory,
+            ceiling,
+            object,
+            STRING_OVERHEAD,
+            &mut self.fuel,
         )?;
         if grow {
             self.rehash_intern(self.intern.len() * 2);
@@ -616,44 +671,16 @@ impl Heap {
         *self.cells.get_mut(cell.0) = value;
     }
 
-    pub(crate) fn new_table(
-        &mut self,
-        array: usize,
-        hash: usize,
-        fuel: &mut dyn FnMut(u64) -> Result<(), LuaError>,
-    ) -> Result<TableId, LuaError> {
+    pub(crate) fn new_table(&mut self, array: usize, hash: usize) -> Result<TableId, LuaError> {
         let table = Table::with_capacity(array, hash);
-        let room = self
-            .ceiling()
-            .checked_sub(self.memory)
-            .and_then(|room| room.checked_sub(table.bytes()))
-            .ok_or(LuaError::Limit(crate::Limit::Memory))?;
-        let wanted = self.tables.growth();
-        let growth = wanted.min(room / TABLE_SIZE);
-        if wanted != 0 && growth == 0 {
-            return Err(LuaError::Limit(crate::Limit::Memory));
-        }
-        if growth < wanted {
-            // A capped reservation may lose geometric amortisation. Pay its full possible relocation first.
-            let copied = self
-                .tables
-                .slots
-                .len()
-                .checked_mul(TABLE_SIZE)
-                .ok_or(LuaError::Limit(crate::Limit::Memory))?;
-            fuel(1 + (copied / (VALUE_BYTES * crate::vm::VALUES_PER_FUEL)) as u64)?;
-        }
-        self.charge(table.bytes() + growth * TABLE_SIZE)?;
-        let actual = self.tables.reserve_growth(growth);
-        if actual > growth {
-            // Keep allocator over-grants accounted even when the resulting quota check refuses the allocation.
-            self.memory = self
-                .memory
-                .saturating_add((actual - growth).saturating_mul(TABLE_SIZE));
-            if self.memory > self.ceiling() {
-                return Err(LuaError::Limit(crate::Limit::Memory));
-            }
-        }
+        let ceiling = self.ceiling();
+        self.tables.reserve(
+            &mut self.memory,
+            ceiling,
+            table.bytes(),
+            TABLE_SIZE,
+            &mut self.fuel,
+        )?;
         Ok(TableId(self.tables.insert(table)))
     }
 
@@ -663,7 +690,14 @@ impl Heap {
                 Function::Lua { upvalues, .. } => upvalues.len() * HANDLE_BYTES,
                 Function::Native { upvalues, .. } => upvalues.len() * VALUE_BYTES,
             };
-        self.charge(size + self.functions.growth() * FUNCTION_SIZE)?;
+        let ceiling = self.ceiling();
+        self.functions.reserve(
+            &mut self.memory,
+            ceiling,
+            size,
+            FUNCTION_SIZE,
+            &mut self.fuel,
+        )?;
         // Born marked during a collection, so what it refers to is grayed here: nothing else would trace it.
         if self.phase == Phase::Marking {
             match &function {
@@ -678,7 +712,14 @@ impl Heap {
     }
 
     pub(crate) fn new_cell(&mut self, value: Value) -> Result<CellId, LuaError> {
-        self.charge(CELL_SIZE + self.cells.growth() * CELL_SIZE)?;
+        let ceiling = self.ceiling();
+        self.cells.reserve(
+            &mut self.memory,
+            ceiling,
+            CELL_SIZE,
+            CELL_SIZE,
+            &mut self.fuel,
+        )?;
         self.barrier(value);
         Ok(CellId(self.cells.insert(value)))
     }
@@ -699,9 +740,16 @@ impl Heap {
         bytes: usize,
     ) -> Result<UserdataId, LuaError> {
         let size = bytes
-            .checked_add(USERDATA_SIZE + self.userdata.growth() * USERDATA_SIZE)
+            .checked_add(USERDATA_SIZE)
             .ok_or(LuaError::Limit(crate::Limit::Memory))?;
-        self.charge(size)?;
+        let ceiling = self.ceiling();
+        self.userdata.reserve(
+            &mut self.memory,
+            ceiling,
+            size,
+            USERDATA_SIZE,
+            &mut self.fuel,
+        )?;
         if let Some(mt) = metatable {
             self.barrier(Value::Table(mt));
         }
@@ -759,7 +807,6 @@ impl Heap {
         t: TableId,
         key: Value,
         value: Value,
-        fuel: &mut dyn FnMut(u64) -> Result<(), LuaError>,
     ) -> Result<(), LuaError> {
         let hash = match key {
             Value::Number(number) => WriteHash::Number(number),
@@ -770,8 +817,9 @@ impl Heap {
         self.barrier(value);
         let ceiling = self.ceiling();
         let memory = &mut self.memory;
+        let fuel = &mut self.fuel;
         let mut budget = |work, bytes| {
-            fuel(work)?;
+            fuel.spend(work)?;
             let total = memory.saturating_add(bytes);
             if total > ceiling {
                 return Err(LuaError::Limit(crate::Limit::Memory));

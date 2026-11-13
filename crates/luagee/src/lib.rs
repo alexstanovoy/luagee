@@ -55,6 +55,7 @@
 mod ast;
 mod compiler;
 mod error;
+mod fuel;
 mod heap;
 mod host;
 mod lexer;

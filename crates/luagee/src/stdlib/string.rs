@@ -245,8 +245,8 @@ fn matcher<'a>(vm: &Vm, source: &'a [u8], pattern: &'a [u8]) -> Matcher<'a> {
         source,
         pattern,
         vm.limits.pattern_depth,
-        vm.fuel,
-        vm.fuel_limit,
+        vm.heap.fuel.left,
+        vm.heap.fuel.limit,
     )
 }
 
@@ -282,7 +282,7 @@ fn find_aux(vm: &mut Vm, args: Args, find: bool) -> Result<usize, LuaError> {
             break Ok(None);
         }
     };
-    vm.fuel = m.fuel;
+    vm.heap.fuel.left = m.fuel;
     let captures = m.captures.clone();
     let check = m.check_captures();
     match outcome {
@@ -335,7 +335,7 @@ fn gmatch_step(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
             Err(e) => break Err(e),
         }
     };
-    vm.fuel = m.fuel;
+    vm.heap.fuel.left = m.fuel;
     let captures = m.captures.clone();
     match outcome {
         Err(e) => Err(pattern_error(vm, e)),
@@ -397,7 +397,7 @@ fn gsub(vm: &mut Vm, args: Args) -> Result<usize, LuaError> {
     while count < max {
         let mut m = matcher(vm, &source, &pattern);
         let outcome = m.run(s, p);
-        vm.fuel = m.fuel;
+        vm.heap.fuel.left = m.fuel;
         let captures = m.captures.clone();
         let end = match outcome {
             Err(e) => return Err(pattern_error(vm, e)),

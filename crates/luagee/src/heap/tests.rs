@@ -5,12 +5,14 @@ use crate::{Error, Keys, Limit, Limits, Lua};
 
 fn four_slot_heap(cap: usize) -> Heap {
     let mut heap = Heap::new(cap, [1, 2], 1);
+    heap.fuel.left = 1_000;
     for _ in 0..4 {
-        heap.new_table(0, 0, &mut |_| {
-            panic!("geometric growth has no fallback charge")
-        })
-        .expect("four initial tables fit");
+        heap.new_table(0, 0).expect("four initial tables fit");
     }
+    assert_eq!(
+        heap.fuel.left, 1_000,
+        "geometric growth has no fallback charge"
+    );
     assert_eq!(heap.tables.slots.len(), 4);
     assert_eq!(heap.tables.slots.capacity(), 4);
     heap
@@ -23,15 +25,12 @@ fn capped_table_arena_growth_prepays_its_exact_relocation_budget() {
     for initial in [price - 1, price] {
         let mut heap = four_slot_heap(9 * TABLE_SIZE);
         let before = heap.memory;
-        let mut left = initial;
-        let result = heap.new_table(0, 0, &mut |work| {
-            let remaining = left.checked_sub(work);
-            left = remaining.unwrap_or(0);
-            remaining
-                .map(|_| ())
-                .ok_or(crate::LuaError::Limit(Limit::FuelPerCall))
-        });
-        assert_eq!(left, 0, "exact fallback charge, including refusal");
+        heap.fuel.left = initial;
+        let result = heap.new_table(0, 0);
+        assert_eq!(
+            heap.fuel.left, 0,
+            "exact fallback charge, including refusal"
+        );
         if initial == price {
             result.expect("minimum prepaid growth succeeds");
             assert_eq!(heap.tables.slots.capacity(), 6);
@@ -55,13 +54,13 @@ fn capped_table_arena_growth_prepays_its_exact_relocation_budget() {
 fn table_arena_refuses_before_work_when_no_new_slot_fits() {
     let mut heap = four_slot_heap(TABLE_SIZE * 38 / 5);
     let before = heap.memory;
-    let mut charged = 0;
-    let result = heap.new_table(0, 0, &mut |work| {
-        charged += work;
-        Ok(())
-    });
+    heap.fuel.left = 1_000;
+    let result = heap.new_table(0, 0);
     assert!(matches!(result, Err(crate::LuaError::Limit(Limit::Memory))));
-    assert_eq!(charged, 0, "zero-growth refusal precedes relocation work");
+    assert_eq!(
+        heap.fuel.left, 1_000,
+        "zero-growth refusal precedes relocation work"
+    );
     assert_eq!(heap.memory, before);
     assert_eq!(heap.tables.slots.capacity(), 4);
     assert_eq!(heap.tables.slots.len(), 4);
@@ -96,6 +95,43 @@ fn garbage_tables_exhaust_fuel_without_false_memory_errors_at_arena_growth_bound
         let result = lua.exec("garbage", b"while true do local t={} end");
         if !matches!(result, Err(Error::Limit(Limit::FuelPerCall))) {
             failures.push(format!("memory={memory}: {result:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every arena grows through the same reservation: a garbage loop near the cap ends by fuel, not by a doubling that
+/// does not fit. The caps sit inside the bands where uncapped doubling failed, scaled with each arena's slot size.
+#[test]
+fn garbage_functions_cells_and_coroutines_exhaust_fuel_without_false_memory_errors() {
+    let scaled =
+        |quarter_mib: usize, slot: usize, original: usize| ((quarter_mib << 18) / original) * slot;
+    let functions = [12, 22, 44, 88].map(|q| scaled(q, super::FUNCTION_SIZE, 80));
+    let coroutines = [9, 18, 36, 72].map(|q| scaled(q, crate::vm::THREAD_BYTES, 256));
+    let cells = [8].map(|q| scaled(q, super::CELL_SIZE, 32));
+    let mut failures = Vec::new();
+    for (caps, source) in [
+        (
+            &functions[..],
+            &b"while true do local f=function() return 1 end end"[..],
+        ),
+        (
+            &coroutines[..],
+            &b"local f=function() end while true do local co=coroutine.create(f) end"[..],
+        ),
+        (
+            &cells[..],
+            &b"while true do local x=1 local f=function() return x end end"[..],
+        ),
+    ] {
+        for &memory in caps {
+            let result = arena_interpreter(memory).exec("garbage", source);
+            if !matches!(result, Err(Error::Limit(Limit::FuelPerCall))) {
+                failures.push(format!(
+                    "memory={memory}, {}: {result:?}",
+                    String::from_utf8_lossy(source)
+                ));
+            }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

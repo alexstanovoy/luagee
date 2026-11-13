@@ -26,7 +26,7 @@ const SLOT_BYTES: usize = VALUE_BYTES;
 /// The bytes a frame is counted as.
 const FRAME_BYTES: usize = 192;
 /// The bytes a coroutine is counted as, beyond its stack.
-const THREAD_BYTES: usize = 256;
+pub(crate) const THREAD_BYTES: usize = 256;
 const _: () = assert!(crate::heap::slot_size::<ThreadState>() <= THREAD_BYTES);
 const _: () = assert!(std::mem::size_of::<Frame>() <= FRAME_BYTES);
 
@@ -286,9 +286,6 @@ pub struct Vm {
     /// Values the host keeps across calls.
     pub(crate) pinned: Vec<Value>,
     pub(crate) limits: Limits,
-    pub(crate) fuel: u64,
-    /// Which limit runs out when `fuel` does.
-    pub(crate) fuel_limit: Limit,
     pub(crate) tick_fuel: u64,
     pub(crate) native_depth: u32,
     pub(crate) host_depth: u32,
@@ -328,7 +325,7 @@ impl Drop for UnwindScope<'_> {
     fn drop(&mut self) {
         if !self.completed {
             self.vm.retired = true;
-            self.vm.fuel = 0;
+            self.vm.heap.fuel.left = 0;
         }
     }
 }
@@ -377,10 +374,7 @@ impl Vm {
         array: usize,
         hash: usize,
     ) -> Result<TableId, LuaError> {
-        let fuel = &mut self.fuel;
-        let limit = self.fuel_limit;
-        self.heap
-            .new_table(array, hash, &mut |work| Self::spend_fuel(fuel, limit, work))
+        self.heap.new_table(array, hash)
     }
 
     pub(crate) fn new(limits: Limits, keys: crate::Keys, owner: u64) -> Result<Vm, LuaError> {
@@ -407,11 +401,12 @@ impl Vm {
             metatable: intern("__metatable")?,
             name: intern("__name")?,
         };
-        let globals = heap.new_table(0, 64, &mut |_| Ok(()))?;
-        let loaded = heap.new_table(0, 16, &mut |_| Ok(()))?;
+        let globals = heap.new_table(0, 64)?;
+        let loaded = heap.new_table(0, 16)?;
         let mut threads = Arena::new(owner);
         let main = ThreadId(threads.insert(ThreadState::new()));
         threads.get_mut(main.0).status = ThreadStatus::Running;
+        heap.fuel.left = limits.fuel_per_call;
         Ok(Vm {
             owner,
             retired: false,
@@ -428,8 +423,6 @@ impl Vm {
             names,
             pinned: Vec::new(),
             limits,
-            fuel: limits.fuel_per_call,
-            fuel_limit: Limit::FuelPerCall,
             tick_fuel: limits.fuel_per_tick,
             native_depth: 0,
             host_depth: 0,
@@ -475,16 +468,7 @@ impl Vm {
         if self.retired {
             return Err(self.error(crate::error::RETIRED_MESSAGE));
         }
-        Self::spend_fuel(&mut self.fuel, self.fuel_limit, amount)
-    }
-
-    fn spend_fuel(fuel: &mut u64, limit: Limit, amount: u64) -> Result<(), LuaError> {
-        if *fuel < amount {
-            *fuel = 0;
-            return Err(LuaError::Limit(limit));
-        }
-        *fuel -= amount;
-        Ok(())
+        self.heap.fuel.spend(amount)
     }
 
     pub(crate) fn unwind_scope<T>(
@@ -777,7 +761,7 @@ impl Vm {
         // Reading a numeric string is work in its length: paid (the next instruction stops when fuel ran out).
         if let Value::String(s) = value {
             let cost = 1 + self.heap.string(s).len() as u64 / 16;
-            self.fuel = self.fuel.saturating_sub(cost);
+            self.heap.fuel.left = self.heap.fuel.left.saturating_sub(cost);
         }
         match value {
             Value::Number(n) => Some(n),
@@ -797,11 +781,7 @@ impl Vm {
             Value::Number(n) if n.is_nan() => Err(self.error("table index is NaN")),
             _ => {
                 self.charge_fuel(1)?;
-                let limit = self.fuel_limit;
-                let fuel = &mut self.fuel;
-                self.heap.raw_set_budgeted(t, key, value, &mut |work| {
-                    Self::spend_fuel(fuel, limit, work)
-                })
+                self.heap.raw_set_budgeted(t, key, value)
             }
         }
     }
@@ -1615,11 +1595,11 @@ impl Vm {
             let code = &proto.code[..];
             let frame_top = base + usize::from(proto.registers);
             loop {
-                if self.fuel == 0 {
+                if self.heap.fuel.left == 0 {
                     self.frames.last_mut().expect("a running frame").pc = pc;
-                    return Err(LuaError::Limit(self.fuel_limit));
+                    return Err(LuaError::Limit(self.heap.fuel.limit));
                 }
-                self.fuel -= 1;
+                self.heap.fuel.left -= 1;
                 if self.heap.phase != Phase::Idle
                     || self.heap.memory >= self.gc_threshold
                     || self.gc_requested
@@ -2153,7 +2133,7 @@ impl Vm {
     ) -> Option<(&'static str, Vec<u8>)> {
         // The scan walks back through the function and its locals: paid as the work it is.
         let work = 1 + pc as u64 / 8 + proto.locals.len() as u64 / 8;
-        self.fuel = self.fuel.saturating_sub(work);
+        self.heap.fuel.left = self.heap.fuel.left.saturating_sub(work);
         let local_name = |register: u8| {
             proto
                 .locals
@@ -2499,13 +2479,11 @@ impl Vm {
 
     /// The collector work the fuel left pays for.
     fn affordable_work(&self) -> usize {
-        usize::try_from(self.fuel)
-            .map_or(usize::MAX, |fuel| fuel.saturating_mul(GC_OBJECTS_PER_FUEL))
+        self.heap.fuel.affordable(GC_OBJECTS_PER_FUEL)
     }
 
     fn out_of_fuel(&mut self) -> LuaError {
-        self.fuel = 0;
-        LuaError::Limit(self.fuel_limit)
+        self.heap.fuel.exhaust()
     }
 
     /// The end of marking: the roots once more (they changed while marking went on) and every gray value traced; then
@@ -2564,8 +2542,8 @@ impl Vm {
             0 if heap.strings.is_swept() => {
                 // Shrinking the string index walks it: done when the fuel pays for it, else left for another time.
                 let cost = (heap.intern_size() / GC_OBJECTS_PER_FUEL) as u64;
-                if cost <= self.fuel && heap.shrink_intern() {
-                    self.fuel -= cost;
+                if cost <= heap.fuel.left && heap.shrink_intern() {
+                    heap.fuel.left -= cost;
                 }
                 heap.strings.end_sweep(crate::heap::STRING_OVERHEAD)
                     + heap.intern_size() * crate::heap::INTERN_ENTRY
@@ -2700,8 +2678,14 @@ impl Vm {
     // --- coroutines ------------------------------------------------------------------------------------------
 
     pub(crate) fn new_thread(&mut self, function: Value) -> Result<ThreadId, LuaError> {
-        self.heap
-            .charge(THREAD_BYTES + self.threads.growth() * THREAD_BYTES)?;
+        let ceiling = self.heap.ceiling();
+        self.threads.reserve(
+            &mut self.heap.memory,
+            ceiling,
+            THREAD_BYTES,
+            THREAD_BYTES,
+            &mut self.heap.fuel,
+        )?;
         let mut thread = ThreadState::new();
         thread.stack.push(function);
         self.heap.barrier(function);
