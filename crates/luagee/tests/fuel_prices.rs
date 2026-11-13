@@ -46,6 +46,7 @@ const PRICES: &[(&str, u64)] = &[
     ("local function f(d) local a,b,c,e,g if d>0 then return (f(d-1)) end collectgarbage() end f(64)", 844),
     ("local t={} for i=1,1000 do t[i]={} end collectgarbage()", 10299),
     ("local k=0 load(function() k=k+1 if k==1 then return string.rep(' ',4000) end end)", 1531),
+    ("local k=0 load(function() k=k+1 if k<=200 then return '--x\\n' .. ' ' end end)", 2867),
 ];
 
 #[test]

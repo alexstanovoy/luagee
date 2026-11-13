@@ -47,9 +47,9 @@ nothing to grow.
 | `coroutine.resume` of a deep coroutine | frames | the boundary frame is known, no walk | 27, 31, 69 (16, 128, 1024 frames) | 25, 20, 28 | measurement |
 | hash-to-array migration | moved keys | second lookup, 1 a key | 13, 14, 32 (whole fill + move) | 13, 17, 23 | work row `a write moving hash keys into the array`, `table_fuel` pin |
 | function, cell, userdata, string, coroutine arenas | arena size | relocation of a capped growth, before reserving | false memory errors in bands of the cap | none | `garbage_functions_cells_and_coroutines_exhaust_fuel_without_false_memory_errors` |
-| `loadstring(s)`, `load(s)` refused (bytecode) | source length | no copy any more: constant | 17000 ns a fuel at 4 MB (review) | constant fuel at any length | `a_refused_bytecode_chunk_costs_the_same_at_any_length` |
-| `load(reader)` pieces | source length, at most `module_size` | each piece at the compile price (1 a 4 bytes) before it is copied; the compile charges the rest | 1150 ns a fuel at 1 MB (review) | within the fuel | work row `load, a reader's piece then a number` |
-| pattern set that never closes | pattern length | the scan to the pattern's end, 1 a 16 bytes, before the error | 190000 ns a fuel at 4 MB, caught and repeated (review) | paid | `a_long_unclosed_set_is_malformed_only_when_its_scan_is_paid` |
+| `loadstring(s)`, `load(s)` refused (bytecode) | source length | no copy any more: constant | 17000 ns a fuel at 4 MB, caught and repeated | constant fuel at any length | `a_refused_bytecode_chunk_costs_the_same_at_any_length` |
+| `load(reader)` pieces | source length, at most `module_size` | each piece at the compile price (1 a 4 bytes) before it is copied; the compile charges the rest | 1150 ns a fuel at 1 MB | within the fuel | work row `load, a reader's piece then a number` |
+| pattern set that never closes | pattern length | the scan to the pattern's end, 1 a 16 bytes, before the error | 190000 ns a fuel at 4 MB, caught and repeated | paid | `a_long_unclosed_set_is_malformed_only_when_its_scan_is_paid` |
 | a sweep stopped by fuel at an arena's end | — | each sweep step and the string index's shrink paid before; the arena is an enum ending in `Done` | the next call panicked ("six arenas") | resumes | `*_collection_stopped_by_fuel_anywhere_resumes_on_the_next_call` (plain, incremental, full) |
 | `table.new(narray, nhash)` storage | hints up to 4096 | memory counted before the storage is built | built, then refused | refused first | `table_new_is_refused_by_the_memory_cap_before_allocating_its_storage` |
 

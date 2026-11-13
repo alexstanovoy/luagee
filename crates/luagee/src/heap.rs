@@ -826,8 +826,12 @@ impl Heap {
         self.tables
             .reserve(&mut self.memory, ceiling, bytes, TABLE_SIZE, &mut self.fuel)?;
         let table = Table::with_capacity(array, hash);
-        // An allocator may grant more than asked: what the table holds is counted.
-        self.charge(table.bytes().saturating_sub(bytes))?;
+        // `Vec::with_capacity` reserves exactly what it is asked for: the table holds what was counted.
+        debug_assert_eq!(
+            table.bytes(),
+            bytes,
+            "a new table holds the storage planned for it"
+        );
         Ok(TableId(self.tables.insert(table)))
     }
 
