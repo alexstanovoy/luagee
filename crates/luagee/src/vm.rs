@@ -297,8 +297,8 @@ pub struct Vm {
     pub(crate) gc_threshold: usize,
     pub(crate) gc_epoch: u64,
     pub(crate) gc_requested: bool,
-    /// The arena the sweep is in (strings, tables, functions, cells, userdata, threads).
-    gc_arena: usize,
+    /// The arena the sweep is in.
+    gc_arena: SweepArena,
     /// The counted bytes the sweep kept so far.
     gc_kept: usize,
     /// Memory as counted when the sweep began.
@@ -341,6 +341,32 @@ pub(crate) const GC_OBJECTS_PER_FUEL: usize = 4;
 
 #[cfg(test)]
 mod tests;
+
+/// The arena a sweep is in, in the order the sweep walks them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SweepArena {
+    Strings,
+    Tables,
+    Functions,
+    Cells,
+    Userdata,
+    Threads,
+    /// Every arena swept: the sweep ends.
+    Done,
+}
+
+impl SweepArena {
+    fn next(self) -> SweepArena {
+        match self {
+            SweepArena::Strings => SweepArena::Tables,
+            SweepArena::Tables => SweepArena::Functions,
+            SweepArena::Functions => SweepArena::Cells,
+            SweepArena::Cells => SweepArena::Userdata,
+            SweepArena::Userdata => SweepArena::Threads,
+            SweepArena::Threads | SweepArena::Done => SweepArena::Done,
+        }
+    }
+}
 
 /// The most units of one object traced at once.
 const TRACE_PIECE: usize = 4096;
@@ -458,7 +484,7 @@ impl Vm {
             gc_threshold: MIN_THRESHOLD,
             gc_epoch: 0,
             gc_requested: false,
-            gc_arena: 0,
+            gc_arena: SweepArena::Strings,
             gc_kept: 0,
             gc_memory_at_sweep: 0,
             gc_protos: 0,
@@ -2687,67 +2713,116 @@ impl Vm {
             "an unbounded trace ends every partial object"
         );
         self.heap.phase = Phase::Sweeping;
-        self.gc_arena = 0;
+        self.gc_arena = SweepArena::Strings;
         self.gc_kept = 0;
         self.gc_memory_at_sweep = self.heap.memory;
         Ok(())
     }
 
-    /// Sweeps up to `budget` slots, arena after arena, paying fuel as it goes; recounts memory at the end.
+    /// Sweeps up to `budget` slots, arena after arena, each step paid before it is walked (4 slots a fuel, rounded
+    /// down over the whole sweep step); ends each arena as soon as its last slot is swept (shrinking the string index
+    /// when that is paid for too), and the sweep with the last. Out of fuel, it stops between two steps, in a state
+    /// the next point resumes.
     fn gc_sweep(&mut self, budget: usize) -> Result<(), LuaError> {
-        let affordable = self.affordable_work();
         let mut walked = 0usize;
-        while walked < budget {
-            if walked >= affordable {
+        loop {
+            while self.gc_arena != SweepArena::Done && self.gc_arena_swept(&mut walked) {
+                self.gc_arena = self.gc_arena.next();
+            }
+            if self.gc_arena == SweepArena::Done {
+                return self.gc_end_sweep();
+            }
+            if walked >= budget {
+                return Ok(());
+            }
+            let heap = &self.heap;
+            let unswept = match self.gc_arena {
+                SweepArena::Strings => heap.strings.unswept(),
+                SweepArena::Tables => heap.tables.unswept(),
+                SweepArena::Functions => heap.functions.unswept(),
+                SweepArena::Cells => heap.cells.unswept(),
+                SweepArena::Userdata => heap.userdata.unswept(),
+                SweepArena::Threads => self.threads.unswept(),
+                SweepArena::Done => 0,
+            };
+            let step = (budget - walked)
+                .min(unswept)
+                .min(self.payable_work(walked));
+            if step == 0 {
                 return Err(self.out_of_fuel());
             }
-            let step = (budget - walked).min(affordable - walked);
+            self.pay_work(&mut walked, step);
             let heap = &mut self.heap;
             let (kept, slots) = match self.gc_arena {
-                0 => heap.sweep_strings(step),
-                1 => heap.tables.sweep(step, Table::bytes, |_, _| ()),
-                2 => heap.functions.sweep(step, function_bytes, |_, _| ()),
-                3 => heap
+                SweepArena::Strings => heap.sweep_strings(step),
+                SweepArena::Tables => heap.tables.sweep(step, Table::bytes, |_, _| ()),
+                SweepArena::Functions => heap.functions.sweep(step, function_bytes, |_, _| ()),
+                SweepArena::Cells => heap
                     .cells
                     .sweep(step, |_| crate::heap::CELL_SIZE, |_, _| ()),
-                4 => heap
-                    .userdata
-                    .sweep(step, |u| crate::heap::USERDATA_SIZE + u.bytes, |_, _| ()),
-                5 => self.threads.sweep(step, ThreadState::bytes, |_, _| ()),
-                _ => unreachable!("six arenas"),
-            };
-            self.gc_kept += kept;
-            walked += slots;
-            if self.gc_arena_swept() {
-                self.gc_arena += 1;
-                if self.gc_arena == 6 {
-                    self.charge_fuel((walked / GC_OBJECTS_PER_FUEL) as u64)?;
-                    return self.gc_end_sweep();
+                SweepArena::Userdata => {
+                    heap.userdata
+                        .sweep(step, |u| crate::heap::USERDATA_SIZE + u.bytes, |_, _| ())
                 }
-            }
+                SweepArena::Threads => self.threads.sweep(step, ThreadState::bytes, |_, _| ()),
+                SweepArena::Done => (0, 0),
+            };
+            debug_assert_eq!(slots, step, "a paid step walks every slot it paid for");
+            crate::work::visit(crate::work::Work::Collector, slots);
+            self.gc_kept += kept;
         }
-        self.charge_fuel((walked / GC_OBJECTS_PER_FUEL) as u64)
     }
 
-    /// When the arena being swept is done: counts its storage (and what goes with it) and ends its sweep.
-    fn gc_arena_swept(&mut self) -> bool {
+    /// The collector's units of work (4 a fuel, rounded down over a run of them) the fuel left pays for, after a run
+    /// that already did `done` units and paid for them.
+    fn payable_work(&self, done: usize) -> usize {
+        let paid = done / GC_OBJECTS_PER_FUEL;
+        let left = usize::try_from(self.heap.fuel.left).unwrap_or(usize::MAX);
+        left.saturating_add(paid)
+            .saturating_mul(GC_OBJECTS_PER_FUEL)
+            .saturating_add(GC_OBJECTS_PER_FUEL - 1)
+            .saturating_sub(done)
+    }
+
+    /// Pays for `units` more of a run that did `done` units: never fails for `units` up to `payable_work(done)`.
+    fn pay_work(&mut self, done: &mut usize, units: usize) {
+        let owed = (*done + units) / GC_OBJECTS_PER_FUEL - *done / GC_OBJECTS_PER_FUEL;
+        self.heap.fuel.left -= owed as u64;
+        *done += units;
+    }
+
+    /// When the arena being swept is done: counts its storage (and what goes with it), ends its sweep and returns
+    /// true; false while it has slots left. Shrinking the string index walks it: done, paid before as part of the run
+    /// `walked` counts, when the fuel left pays for it, else left for another collection.
+    fn gc_arena_swept(&mut self, walked: &mut usize) -> bool {
+        if self.gc_arena == SweepArena::Strings && self.heap.strings.is_swept() {
+            let size = self.heap.intern_size();
+            if self.heap.shrinkable_intern() && size <= self.payable_work(*walked) {
+                self.pay_work(walked, size);
+                crate::work::visit(crate::work::Work::Collector, size);
+                self.heap.shrink_intern();
+            }
+        }
         let heap = &mut self.heap;
         let storage = match self.gc_arena {
-            0 if heap.strings.is_swept() => {
-                // Shrinking the string index walks it: done when the fuel pays for it, else left for another time.
-                let cost = (heap.intern_size() / GC_OBJECTS_PER_FUEL) as u64;
-                if cost <= heap.fuel.left && heap.shrink_intern() {
-                    heap.fuel.left -= cost;
-                }
+            SweepArena::Strings if heap.strings.is_swept() => {
                 heap.strings.end_sweep(crate::heap::STRING_OVERHEAD)
                     + heap.intern_size() * crate::heap::INTERN_ENTRY
             }
-            1 if heap.tables.is_swept() => heap.tables.end_sweep(crate::heap::TABLE_SIZE),
-            2 if heap.functions.is_swept() => heap.functions.end_sweep(crate::heap::FUNCTION_SIZE),
-            3 if heap.cells.is_swept() => heap.cells.end_sweep(crate::heap::CELL_SIZE),
-            4 if heap.userdata.is_swept() => heap.userdata.end_sweep(crate::heap::USERDATA_SIZE),
+            SweepArena::Tables if heap.tables.is_swept() => {
+                heap.tables.end_sweep(crate::heap::TABLE_SIZE)
+            }
+            SweepArena::Functions if heap.functions.is_swept() => {
+                heap.functions.end_sweep(crate::heap::FUNCTION_SIZE)
+            }
+            SweepArena::Cells if heap.cells.is_swept() => {
+                heap.cells.end_sweep(crate::heap::CELL_SIZE)
+            }
+            SweepArena::Userdata if heap.userdata.is_swept() => {
+                heap.userdata.end_sweep(crate::heap::USERDATA_SIZE)
+            }
             // The running coroutine's stack is out of its slot: counted with the arena, as the others are.
-            5 if self.threads.is_swept() => {
+            SweepArena::Threads if self.threads.is_swept() => {
                 self.threads.end_sweep(THREAD_BYTES)
                     + self.pinned.capacity() * SLOT_BYTES
                     + self.stack.capacity() * SLOT_BYTES

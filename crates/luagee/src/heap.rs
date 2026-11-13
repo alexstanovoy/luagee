@@ -348,6 +348,11 @@ impl<T> Arena<T> {
         (kept, end - start)
     }
 
+    /// The slots the sweep has yet to walk.
+    pub(crate) fn unswept(&self) -> usize {
+        self.slots.len().saturating_sub(self.swept)
+    }
+
     /// Whether the sweep has walked every slot.
     pub(crate) fn is_swept(&self) -> bool {
         self.swept >= self.slots.len()
@@ -653,14 +658,19 @@ impl Heap {
         self.intern.len()
     }
 
-    /// Shrinks the string index after a sweep left it mostly empty; false when it is dense enough already.
-    pub(crate) fn shrink_intern(&mut self) -> bool {
-        let size = (self.interned * 4).next_power_of_two().max(1024);
-        if size * 2 > self.intern.len() {
-            return false;
-        }
-        self.rehash_intern(size);
-        true
+    /// Shrinks the string index after a sweep left it mostly empty (`shrinkable_intern`).
+    pub(crate) fn shrink_intern(&mut self) {
+        self.rehash_intern(self.shrunk_intern_size());
+    }
+
+    /// Whether the string index is mostly empty enough to shrink.
+    pub(crate) fn shrinkable_intern(&self) -> bool {
+        self.shrunk_intern_size() * 2 <= self.intern.len()
+    }
+
+    /// The size a shrink would give the string index.
+    fn shrunk_intern_size(&self) -> usize {
+        (self.interned * 4).next_power_of_two().max(1024)
     }
 
     #[inline]
