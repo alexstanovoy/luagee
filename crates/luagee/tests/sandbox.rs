@@ -382,3 +382,24 @@ fn numeric_for_signed_zero_steps_remain_cancellable_by_fuel() {
         );
     }
 }
+
+#[test]
+fn native_error_names_charge_fuel_for_the_bytes_they_render() {
+    let mut lua = lua(Limits {
+        fuel_per_call: 10_000,
+        fuel_per_tick: 10_000,
+        ..Limits::DEFAULT
+    });
+    let name = "n".repeat(4096);
+    let source = format!(
+        "local t={{['{name}']=math.abs}}; for i=1,50 do pcall(function() t['{name}'](false) end) end"
+    );
+    let function = lua
+        .load("named_errors", source.as_bytes())
+        .expect("source fits");
+    let ended = lua.call(function, &[]);
+    assert!(
+        matches!(ended, Err(Error::Limit(Limit::FuelPerCall))),
+        "{ended:?}"
+    );
+}

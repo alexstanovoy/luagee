@@ -132,20 +132,27 @@ impl Vm {
         if !self.args_are_live(args) {
             return self.error("expired callback arguments");
         }
-        let (kind, name) = match self.callee() {
-            Some((kind, name)) => (kind, crate::shown(&name)),
-            None => ("", "?".to_owned()),
-        };
-        if kind == "method" {
-            if i == 0 {
-                return self.error(format!("calling '{name}' on bad self ({message})"));
-            }
-            return self.error(format!("bad argument #{i} to '{name}' ({message})"));
+        let (kind, name) = self.callee().unwrap_or_else(|| ("", b"?".to_vec()));
+        if let Err(limit) = self.charge_fuel(1 + name.len() as u64 / 16) {
+            return limit;
         }
-        self.error(format!(
-            "bad argument #{} to '{name}' ({message})",
-            i.saturating_add(1)
-        ))
+        let (prefix, suffix) = if kind == "method" && i == 0 {
+            ("calling '".to_owned(), format!("' on bad self ({message})"))
+        } else {
+            let argument = if kind == "method" {
+                i
+            } else {
+                i.saturating_add(1)
+            };
+            (
+                format!("bad argument #{argument} to '"),
+                format!("' ({message})"),
+            )
+        };
+        let mut text = prefix.into_bytes();
+        text.extend_from_slice(crate::c_string_prefix(&name));
+        text.extend_from_slice(suffix.as_bytes());
+        self.error(text)
     }
 
     fn type_name_of_arg(&self, args: Args, i: usize) -> &'static str {

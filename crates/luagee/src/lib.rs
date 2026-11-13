@@ -72,6 +72,15 @@ mod vm;
 
 pub use error::{Error, Limit};
 
+/// LuaJIT interpolates variable and callee names as C strings; other bytes remain unchanged.
+pub(crate) fn c_string_prefix(bytes: &[u8]) -> &[u8] {
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    &bytes[..end]
+}
+
 /// A script's bytes as an error message shows them: at most 60 of them, so that no message copies a huge string.
 pub(crate) fn shown(bytes: &[u8]) -> String {
     const SHOWN: usize = 60;

@@ -2275,6 +2275,9 @@ impl Vm {
         let Some((kind, n)) = self.describe_register(proto, pc, register) else {
             return error;
         };
+        if let Err(limit) = self.charge_fuel(1 + n.len() as u64 / 16) {
+            return limit;
+        }
         // "attempt to call a nil value" becomes "attempt to call global 'f' (a nil value)".
         let text = self.heap.string(message);
         let Some(article) = find(text, b" a ").or_else(|| find(text, b" an ")) else {
@@ -2282,7 +2285,7 @@ impl Vm {
         };
         let mut rewritten = text[..article].to_vec();
         rewritten.extend_from_slice(format!(" {kind} '").as_bytes());
-        rewritten.extend_from_slice(&n);
+        rewritten.extend_from_slice(crate::c_string_prefix(&n));
         rewritten.extend_from_slice(b"' (");
         rewritten.extend_from_slice(&text[article + 1..]);
         rewritten.push(b')');
