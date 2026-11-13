@@ -50,7 +50,9 @@ fn table_workloads_keep_their_preoptimization_fuel_prices() {
             "local t={} for i=1,1000 do t[i]=i end for i=1,1000 do t[i]=nil end",
             7151,
         ),
-        ("local t={} for i=2,1000 do t[i]=i end t[1]=1", 5316),
+        // Moving 999 keys into the array looks each up twice (planning, then moving): one fuel more a key since
+        // the second lookup is paid, 5316 before.
+        ("local t={} for i=2,1000 do t[i]=i end t[1]=1", 6315),
     ] {
         for fuel in [minimum - 1, minimum] {
             let mut lua = Lua::new(

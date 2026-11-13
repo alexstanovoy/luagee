@@ -51,6 +51,7 @@ const ROWS: &[Row] = &[
     ("collectgarbage, live tables", "local t={} for i=1,n do t[i]={} end", "local _ = t collectgarbage()", "#t == n"),
     ("collectgarbage, one large table", ARRAY, "local _ = t collectgarbage()", "#t == n"),
     ("collectgarbage, one large hash", HASH, "local _ = t collectgarbage()", "t[-n] == n"),
+    ("a write moving hash keys into the array", "local t={} for i=2,n+1 do t[i]=i end", "t[1]=1", "t[1] == nil and t[n+1] == n+1"),
 ];
 
 fn interpreter() -> Lua {
@@ -74,10 +75,12 @@ struct Run {
     work: u64,
     units: u64,
     fuel: u64,
+    /// Whether the state is still as the preparation left it.
+    kept: bool,
 }
 
-/// Prepares the row's state in a new interpreter and runs the operation with `budget` fuel for the call; a refused
-/// call must leave the state as it was.
+/// Prepares the row's state in a new interpreter and runs the operation with `budget` fuel for the call, then checks
+/// the state with ample fuel.
 fn run(&(name, prepare, operation, unchanged): &Row, n: usize, budget: u64) -> Run {
     let mut lua = interpreter();
     let source = format!(
@@ -94,21 +97,16 @@ fn run(&(name, prepare, operation, unchanged): &Row, n: usize, budget: u64) -> R
     let outcome = lua.call(functions[0], &[]).map(drop);
     let (work, units) = super::take();
     let fuel = AMPLE - lua.tick_fuel_left();
-    if outcome.is_err() {
-        lua.vm().limits.fuel_per_call = AMPLE;
-        lua.begin_tick();
-        let check = lua.call(functions[1], &[]).expect("the state check runs");
-        assert_eq!(
-            check,
-            [Value::Boolean(true)],
-            "{name}, n={n}: a refused call changed the state"
-        );
-    }
+    lua.vm().limits.fuel_per_call = AMPLE;
+    lua.begin_tick();
+    let check = lua.call(functions[1], &[]).expect("the state check runs");
+    let kept = check == [Value::Boolean(true)];
     Run {
         outcome,
         work,
         units,
         fuel,
+        kept,
     }
 }
 
@@ -131,6 +129,9 @@ fn violations(row: &Row, n: usize) -> Vec<String> {
         found.push(format!("{} fuel of work for {fuel} fuel", full.work));
     }
     let half = run(row, n, fuel / 2);
+    if !half.kept {
+        found.push("a call refused at half the fuel changed the state".to_owned());
+    }
     if !refused(&half) {
         found.push(format!("half the fuel is not refused: {:?}", half.outcome));
     }

@@ -248,6 +248,7 @@ impl Table {
                 .checked_add(2)
                 .and_then(|n| n.checked_add(count))
                 .ok_or(LuaError::Limit(Limit::Memory))?;
+            crate::work::visit(crate::work::Work::Steps, 1);
             match self.find(Value::Number(next as f64), hasher.number(next as f64)) {
                 Some(e) if self.entries[e].value != Value::Nil => {}
                 _ => return Ok(count),
@@ -263,6 +264,8 @@ impl Table {
         budget: &mut WriteBudget<'_>,
     ) -> Result<(), LuaError> {
         let count = self.migration_count(hasher, budget)?;
+        // Moving a planned key looks it up again: paid before anything moves.
+        budget(count as u64, 0)?;
         let required = self
             .array
             .len()
@@ -272,6 +275,7 @@ impl Table {
         self.reserve_array(required, budget)?;
         self.array.push(value);
         for _ in 0..count {
+            crate::work::visit(crate::work::Work::Steps, 1);
             let next = (self.array.len() + 1) as f64;
             let entry = self
                 .find(Value::Number(next), hasher.number(next))
