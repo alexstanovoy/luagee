@@ -39,10 +39,13 @@
 //!
 //! # Determinism
 //!
-//! Not promised yet, but designed in, so that turning it on changes no data structure: a table's iteration order
-//! follows its history, never an address; `tostring` of a table or function prints an id; collection runs at points
-//! the interpreter's own accounting decides; numbers follow the numeric rule of [`number`], and `math.random` draws
-//! from a stream the host seeds.
+//! A call's results, errors, fuel spent and memory counted are a function of the source, the host's calls, the
+//! [`Limits`], the [`Keys::random`] seed and the crate version; not of the hash key ([`Keys::hash`]), the platform,
+//! addresses, time or threads. A table's iteration order follows its history, never an address or a hash;
+//! `tostring` of a table or function prints an id; collection runs at points the interpreter's own accounting decides;
+//! numbers follow the numeric rule of [`number`], and `math.random` draws from a stream the host seeds. The exception
+//! is the math functions IEEE 754 does not define exactly (`^`, `exp`, `log`, trigonometry), which use the platform's
+//! routines. The full contract and its non-guarantees are in `docs/guarantees.md` in the repository.
 //!
 //! # Use
 //!

@@ -78,7 +78,7 @@ fn reference(source: &str) -> (Vec<u8>, bool) {
     (output.stdout, output.status.success())
 }
 
-/// The differences that are luagee's documented choices (README's "Known differences"), by name.
+/// The differences that are luagee's documented choices (`docs/differences.md`, "Known differences from LuaJIT"), by name.
 fn known_difference(_ours: &[u8], _theirs: &[u8]) -> Option<&'static str> {
     None
 }

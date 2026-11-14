@@ -1,4 +1,4 @@
-//! The prices of the operations whose fuel is paid before the work (README, "Fuel paid before the work"), pinned: a
+//! The prices of the operations whose fuel is paid before the work (`docs/embedding.md`, "Fuel paid before the work"), pinned: a
 //! chunk run whole succeeds with exactly its price, one fuel less is refused, and the price is the one recorded.
 
 use std::rc::Rc;
@@ -156,7 +156,7 @@ fn a_call_from_a_host_callback_pays_both_boundary_crossings_and_one_for_the_call
     }
 }
 
-/// A block of ordinary code, about 280 bytes: the README quotes what loading it repeated costs.
+/// A block of ordinary code, about 280 bytes: `docs/embedding.md` quotes what loading it repeated costs.
 const ORDINARY: &str = "do
   local function clamp(value, low, high)
     if value < low then return low end

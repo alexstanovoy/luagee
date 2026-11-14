@@ -16,8 +16,8 @@ pub type HostFunction = Rc<crate::heap::HostFn>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Keys {
     /// The key of the table hash. It must be secret to the scripts and different for every interpreter (draw it from
-    /// the host's entropy): a script that learned it could choose keys that collide. Iteration order never depends
-    /// on it, so it changes no script's output.
+    /// the host's entropy): a script that learned it could choose keys that collide. No result depends on it:
+    /// output, iteration order, fuel spent and memory counted are the same under every key (see `docs/guarantees.md`).
     pub hash: [u64; 2],
     /// The seed of `math.random`'s stream: the same seed and calls give the same numbers.
     pub random: u64,
